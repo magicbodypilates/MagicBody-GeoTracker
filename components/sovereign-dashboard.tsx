@@ -15,6 +15,7 @@ import { PromptHubTab } from "@/components/dashboard/tabs/prompt-hub-tab";
 import { ReputationSourcesTab } from "@/components/dashboard/tabs/reputation-sources-tab";
 import { VisibilityAnalyticsTab } from "@/components/dashboard/tabs/visibility-analytics-tab";
 import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab";
+import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import type { AppState, Battlecard, DriftAlert, Provider, RunDelta, ScheduleInterval, ScrapeRun, TabKey, Workspace } from "@/components/dashboard/types";
 import { ALL_PROVIDERS, PROVIDER_LABELS, SCHEDULE_OPTIONS, tabs } from "@/components/dashboard/types";
 
@@ -106,6 +107,13 @@ const tabIcons: Record<TabKey, ReactNode> = {
     <Icon>
       <path d="M9 11l3 3L22 4" />
       <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+    </Icon>
+  ),
+  "SRO Analysis": (
+    <Icon>
+      <path d="M12 20V10" />
+      <path d="M18 20V4" />
+      <path d="M6 20v-4" />
     </Icon>
   ),
   Documentation: (
@@ -232,6 +240,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     details:
       "Run checks for llms.txt, schema signals, and BLUF-style clarity indicators to quickly assess AI-answer readiness of a target URL.",
   },
+  "SRO Analysis": {
+    title: "SRO Analysis",
+    tooltip: "Analyze Selection Rate Optimization across AI platforms.",
+    details:
+      "Run a full SRO pipeline: Gemini grounding, cross-platform citation checks, SERP analysis, and AI-powered recommendations to improve your selection rate in LLM responses.",
+  },
   Documentation: {
     title: "Documentation",
     tooltip: "Learn about every feature in the tracker.",
@@ -250,6 +264,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const [activeWsId, setActiveWsId] = useState<string>("default");
   const [showWsPicker, setShowWsPicker] = useState(false);
   const [showScoreInfo, setShowScoreInfo] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   /** Apply theme class to <html> */
   const applyTheme = useCallback((t: "light" | "dark" | "system") => {
@@ -834,7 +849,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }
 
-  /** Batch run all custom prompts across all active providers */
+  /** Batch run all custom prompts across all active providers — fully parallel */
   async function batchRunAllPrompts() {
     const prompts = state.customPrompts.map((p) =>
       p.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
@@ -848,24 +863,21 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       : [state.provider];
     const totalJobs = prompts.length * providers.length;
     setBusy(true);
+    setMessage(`Batch: launching ${totalJobs} jobs in parallel...`);
 
-    let completed = 0;
-    let failed = 0;
+    // Fire ALL prompt × provider combinations at once
+    const jobs = prompts.flatMap((prompt) =>
+      providers.map((p) => callScrapeOne(prompt, p)),
+    );
+    const results = await Promise.allSettled(jobs);
+
     const allRuns: ScrapeRun[] = [];
-
-    for (const prompt of prompts) {
-      setMessage(`Batch: ${completed}/${totalJobs} done...`);
-      const results = await Promise.allSettled(
-        providers.map((p) => callScrapeOne(prompt, p)),
-      );
-      for (const r of results) {
-        if (r.status === "fulfilled" && r.value) {
-          allRuns.push(r.value);
-          completed++;
-        } else {
-          failed++;
-          completed++;
-        }
+    let failed = 0;
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value) {
+        allRuns.push(r.value);
+      } else {
+        failed++;
       }
     }
 
@@ -1292,6 +1304,10 @@ Now analyze all ${competitorList.length} competitors:`,
       return <CitationOpportunitiesTab runs={state.runs} brandWebsite={state.brand.website} />;
     }
 
+    if (activeTab === "SRO Analysis") {
+      return null; // rendered persistently below to preserve state
+    }
+
     if (activeTab === "Documentation") {
       return <DocumentationTab />;
     }
@@ -1310,8 +1326,15 @@ Now analyze all ${competitorList.length} competitors:`,
 
   return (
     <div className="flex h-screen overflow-hidden text-th-text">
-      {/* ── Fixed sidebar ──────────────────────────────────── */}
-      <aside className="flex w-[250px] shrink-0 flex-col border-r border-th-border bg-th-sidebar">
+      {/* ── Mobile sidebar backdrop ── */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      {/* ── Sidebar ──────────────────────────────────── */}
+      <aside className={`fixed inset-y-0 left-0 z-50 flex w-[250px] shrink-0 flex-col border-r border-th-border bg-th-sidebar transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
         {/* Brand / Workspace switcher */}
         <div className="border-b border-th-border px-4 py-3">
           {demoMode ? (
@@ -1408,7 +1431,7 @@ Now analyze all ${competitorList.length} competitors:`,
                 )}
                 <button
                   title={tabMeta[tab].tooltip}
-                  onClick={() => setActiveTab(tab)}
+                  onClick={() => { setActiveTab(tab); setSidebarOpen(false); }}
                   className={`group mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
                     active
                       ? "bg-th-accent-soft text-th-text font-medium"
@@ -1485,10 +1508,18 @@ Now analyze all ${competitorList.length} competitors:`,
           </div>
         )}
         {/* Toolbar */}
-        <header className="flex shrink-0 items-center gap-3 border-b border-th-border bg-th-card px-5 py-2.5">
-          <h1 className="mr-auto text-base font-semibold text-th-text">{tabMeta[activeTab].title}</h1>
-          <label className="text-sm text-th-text-muted">Models</label>
-          <div className="flex flex-wrap items-center gap-1">
+        <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-th-border bg-th-card px-3 py-2 md:gap-3 md:px-5 md:py-2.5">
+          {/* Hamburger for mobile */}
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="rounded-md border border-th-border p-1.5 text-th-text-muted hover:bg-th-card-hover md:hidden"
+            aria-label="Toggle sidebar"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+          <h1 className="mr-auto text-sm font-semibold text-th-text md:text-base">{tabMeta[activeTab].title}</h1>
+          <label className="hidden text-sm text-th-text-muted sm:inline">Models</label>
+          <div className="flex items-center gap-1 overflow-x-auto">
             {ALL_PROVIDERS.map((p) => {
               const active = state.activeProviders.includes(p);
               return (
@@ -1543,9 +1574,9 @@ Now analyze all ${competitorList.length} competitors:`,
         </header>
 
         {/* Scrollable body */}
-        <main className="flex-1 overflow-y-auto bg-th-bg px-5 py-4">
+        <main className="flex-1 overflow-y-auto bg-th-bg px-3 py-3 md:px-5 md:py-4">
           {/* KPI strip */}
-          <section className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+          <section className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-3 xl:grid-cols-6">
             <KpiCard label="Total Runs" value={state.runs.length} />
             <KpiCard
               label="Avg Visibility"
@@ -1636,6 +1667,12 @@ Now analyze all ${competitorList.length} competitors:`,
 
           {/* Active tab panel */}
           <section className="rounded-xl border border-th-border bg-th-card p-5 shadow-sm">{renderActiveTab()}</section>
+          {/* SRO Analysis stays mounted to preserve in-flight state */}
+          <div className={activeTab === "SRO Analysis" ? "" : "hidden"}>
+            <section className="rounded-xl border border-th-border bg-th-card p-5 shadow-sm">
+              <SROAnalysisTab />
+            </section>
+          </div>
           <section className="mt-3 rounded-lg border border-th-border bg-th-card px-4 py-3">
             <div className="text-xs uppercase tracking-wider font-medium text-th-text-muted">What this tab does</div>
             <p className="mt-1 text-sm leading-relaxed text-th-text-secondary">{tabMeta[activeTab].details}</p>

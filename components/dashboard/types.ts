@@ -159,6 +159,7 @@ export const tabs = [
   "Citation Opportunities",
   "Competitor Battlecards",
   "AEO Audit",
+  "SRO Analysis",
   "Automation",
   "Documentation",
 ] as const;

@@ -12,7 +12,9 @@
 
 <p align="center">
   Open-source, local-first AI visibility intelligence dashboard.<br/>
-  Track your brand across <strong>6 AI models</strong> with zero vendor lock-in.
+  Track your brand across <strong>6 AI models</strong> with zero vendor lock-in.<br/>
+  Now with <strong>SRO Analysis</strong> — deep cross-platform search result optimization.<br/>
+  <strong>Mobile-responsive</strong> — works seamlessly on desktop, tablet, and phone.
 </p>
 
 <p align="center">
@@ -45,12 +47,12 @@ Existing tools charge **$200–$500+/month**, lock you into closed ecosystems, a
 
 ## Features
 
-### 📋 12 Feature Tabs
+### 📋 13 Feature Tabs
 
 | Tab | What it does |
 |-----|-------------|
 | ⚙️ **Project Settings** | Brand name, aliases, website, industry, keywords, description |
-| 💬 **Prompt Hub** | Manage tracking prompts with `{brand}` injection. Run single or batch across models |
+| 💬 **Prompt Hub** | Manage tracking prompts with `{brand}` injection. Run single or batch across models in parallel |
 | 🎭 **Persona Fan-Out** | Generate persona-specific prompt variants (CMO, SEO Lead, Founder, etc.) |
 | 🔍 **Niche Explorer** | AI-generated high-intent queries for your niche |
 | 📝 **Responses** | Browse AI responses with brand/competitor highlighting, filters, and search |
@@ -59,18 +61,22 @@ Existing tools charge **$200–$500+/month**, lock you into closed ecosystems, a
 | 🎯 **Citation Opportunities** | URLs where competitors get cited but you don't, with outreach briefs |
 | ⚔️ **Competitor Battlecards** | AI-generated side-by-side competitor analysis with strengths/weaknesses |
 | 🏥 **AEO Audit** | Site readiness check: llms.txt, Schema.org, BLUF density, heading structure |
+| 📡 **SRO Analysis** | 6-stage deep pipeline: Gemini Grounding → Cross-Platform Citations → SERP → Page Scraping → Site Context → LLM Analysis. Produces SRO Score (0–100), prioritized recommendations, content gaps & competitor insights |
 | ⏱️ **Automation** | Cron / GitHub Actions templates for scheduled runs |
-| 📖 **Documentation** | Searchable 14-section guide covering every feature |
+| 📖 **Documentation** | Searchable 18-section guide covering every feature |
 
 ### 🚀 Core Capabilities
 
 - 🤖 **Multi-model tracking** across ChatGPT, Perplexity, Gemini, Copilot, Google AI Overview, Grok
+- � **SRO Analysis**: 6-stage pipeline scoring how well your page is optimized for AI search results
 - 📈 **Visibility scoring** (0–100): brand mentions, position, frequency, citations, sentiment
 - 🔔 **Drift alerts**: automatic notifications when your score changes significantly
 - ⏰ **Scheduled auto-runs**: configurable interval-based batch scraping
+- 🚀 **Fully parallel batch runs**: all prompt × provider combos execute simultaneously
 - 📅 **Historical comparison**: delta tracking across time periods
 - 🏢 **Multi-workspace**: manage multiple brands/projects independently
 - 🎨 **Dark/light/system** theme with a polished sidebar UI
+- 📱 **Mobile-responsive**: collapsible sidebar with hamburger menu, adaptive KPI grid, and scrollable model toolbar — works on any screen size
 
 ## Architecture
 
@@ -82,15 +88,28 @@ Next.js 16.1 + Turbopack
 │   └── api/
 │       ├── scrape/route.ts         # Bright Data AI Scrapers (Node runtime)
 │       ├── analyze/route.ts        # OpenRouter LLM analysis (Edge runtime)
-│       └── audit/route.ts          # AEO site audit crawler
+│       ├── audit/route.ts          # AEO site audit crawler
+│       ├── sro-analyze/route.ts    # SRO final LLM analysis
+│       ├── serp/route.ts           # Bright Data SERP results
+│       ├── site-context/route.ts   # Homepage context extraction
+│       ├── unlocker/route.ts       # Bright Data Web Unlocker (single/batch)
+│       ├── brightdata-platforms/   # 6-platform AI citation polling
+│       └── bulk-sro/route.ts       # SSE bulk SRO analysis
 ├── components/
 │   ├── sovereign-dashboard.tsx     # Main shell — state, tabs, KPIs
 │   └── dashboard/
 │       ├── types.ts                # AppState, ScrapeRun, Provider, etc.
-│       └── tabs/                   # 12 tab components
+│       └── tabs/                   # 13 tab components
 ├── lib/
 │   ├── client/sovereign-store.ts   # IndexedDB + localStorage persistence
-│   ├── server/brightdata-scraper.ts # Bright Data API integration
+│   ├── server/
+│   │   ├── brightdata-scraper.ts   # Bright Data AI Scraper integration
+│   │   ├── brightdata-platforms.ts # 6-platform citation scraper
+│   │   ├── gemini-grounding.ts     # Gemini Grounding via Google Search
+│   │   ├── openrouter-sro.ts       # SRO analysis via OpenRouter
+│   │   ├── serp.ts                 # SERP data via Bright Data
+│   │   ├── sro-types.ts            # SRO type definitions
+│   │   └── unlocker.ts             # Web Unlocker scraping
 │   └── demo-data.ts               # Deterministic seed data for demo mode
 └── scripts/
     ├── test-scraper.js             # API validation script
@@ -99,8 +118,10 @@ Next.js 16.1 + Turbopack
 
 **Key decisions:**
 - **IndexedDB** primary store (no size limit) with localStorage as best-effort cache
-- **Edge runtime** for `/api/analyze` (Kimi K2.5 via OpenRouter) — fast global inference
+- **Edge runtime** for `/api/analyze` (Gemini Flash via OpenRouter) — fast global inference
 - **Bright Data Web Scraper API** for AI model scraping — reliable, structured data
+- **Bright Data SERP + Web Unlocker** for SRO pipeline data gathering
+- **Google Gemini API** for grounding analysis in SRO pipeline
 - **Zod** schema validation on all API routes
 - **Recharts** for analytics visualizations
 - **Tailwind CSS v4** with CSS custom properties for theming
@@ -134,8 +155,11 @@ BRIGHT_DATA_DATASET_GEMINI=gd_xxx
 BRIGHT_DATA_DATASET_GOOGLE_AI=gd_xxx
 BRIGHT_DATA_DATASET_GROK=gd_xxx
 
-# OpenRouter (powers /api/analyze — battlecards, niche generation)
+# OpenRouter (powers /api/analyze, /api/sro-analyze, /api/site-context)
 OPENROUTER_KEY=your_openrouter_api_key
+
+# Gemini API (powers Gemini Grounding in SRO Analysis)
+GEMINI_API_KEY=your_gemini_api_key
 ```
 
 ```bash
@@ -156,7 +180,7 @@ npm run lint            # ESLint
 
 > ✅ **The deploy button launches a fully functional production instance.** You'll be prompted for your API keys during setup. No demo mode, no restrictions.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fdanishashko%2Fsovereign-aeo-tracker&env=BRIGHT_DATA_KEY,BRIGHT_DATA_DATASET_CHATGPT,BRIGHT_DATA_DATASET_PERPLEXITY,BRIGHT_DATA_DATASET_COPILOT,BRIGHT_DATA_DATASET_GEMINI,BRIGHT_DATA_DATASET_GOOGLE_AI,BRIGHT_DATA_DATASET_GROK,OPENROUTER_KEY)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fdanishashko%2Fsovereign-aeo-tracker&env=BRIGHT_DATA_KEY,BRIGHT_DATA_DATASET_CHATGPT,BRIGHT_DATA_DATASET_PERPLEXITY,BRIGHT_DATA_DATASET_COPILOT,BRIGHT_DATA_DATASET_GEMINI,BRIGHT_DATA_DATASET_GOOGLE_AI,BRIGHT_DATA_DATASET_GROK,OPENROUTER_KEY,GEMINI_API_KEY)
 
 1. Click the button above (or run `vercel --prod` from your clone)
 2. Enter your [Bright Data](https://brightdata.com/?utm_source=geo-tracker-os) and [OpenRouter](https://openrouter.ai/) API keys when prompted
@@ -176,8 +200,14 @@ Want to deploy a read-only preview with sample data and no API keys?
 | `POST /api/scrape` | Node.js | Bright Data AI Scrapers — query AI models for brand mentions |
 | `POST /api/analyze` | Edge | OpenRouter LLM inference — battlecards, niche queries |
 | `POST /api/audit` | Node.js | AEO site audit — llms.txt, schema, BLUF, heading checks |
+| `POST /api/sro-analyze` | Node.js | SRO final analysis — synthesizes all data into score + recommendations |
+| `POST /api/serp` | Node.js | Bright Data SERP — organic search results for a keyword |
+| `POST /api/site-context` | Node.js | Homepage scrape + context extraction via OpenRouter |
+| `POST /api/unlocker` | Node.js | Bright Data Web Unlocker — single or batch URL scraping |
+| `POST /api/brightdata-platforms` | Node.js | 6-platform AI citation polling via Bright Data datasets |
+| `POST /api/bulk-sro` | Node.js | SSE streaming — bulk SRO analysis across multiple keywords |
 
-All routes include in-memory caching to minimize API costs.
+All routes include input validation and error handling. Most routes use in-memory caching to minimize API costs.
 
 ## Tech Stack
 
@@ -190,7 +220,10 @@ All routes include in-memory caching to minimize API costs.
 | Validation | Zod |
 | Storage | IndexedDB (idb-keyval) + localStorage |
 | AI Scraping | Bright Data Web Scraper API |
-| LLM Inference | OpenRouter (Kimi K2.5) |
+| LLM Inference | OpenRouter (Gemini Flash) |
+| SRO Grounding | Google Gemini API (`@google/genai`) |
+| SERP Data | Bright Data SERP API |
+| Web Scraping | Bright Data Web Unlocker |
 | Deployment | Vercel |
 
 ## License

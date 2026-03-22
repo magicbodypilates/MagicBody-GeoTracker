@@ -8,6 +8,7 @@ type ReputationSourcesTabProps = {
   brandTerms: string[];
   competitorTerms: string[];
   runDeltas?: RunDelta[];
+  onDeleteRun?: (index: number) => void;
 };
 
 function normalizeAnswerForDisplay(answer: string): string {
@@ -158,11 +159,13 @@ function ModelResponseCard({
   brandTerms,
   competitorTerms,
   delta,
+  onDelete,
 }: {
   run: ScrapeRun;
   brandTerms: string[];
   competitorTerms: string[];
   delta?: number | null;
+  onDelete?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const rawDisplay = normalizeAnswerForDisplay(run.answer ?? "");
@@ -176,7 +179,7 @@ function ModelResponseCard({
   const uniqueSources = [...new Set(run.sources)];
 
   return (
-    <div className="rounded-lg border border-th-border bg-th-card">
+    <div className="group relative rounded-lg border border-th-border bg-th-card">
       {/* Header */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -209,6 +212,18 @@ function ModelResponseCard({
         <span className="text-xs text-th-text-muted">{run.createdAt.slice(0, 10)}</span>
         <span className="text-xs text-th-text-muted">{expanded ? "▲" : "▼"}</span>
       </button>
+      {onDelete && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (window.confirm("Delete this response? This cannot be undone.")) onDelete();
+          }}
+          className="absolute right-2 top-2 rounded p-1 text-th-text-muted opacity-0 transition-opacity hover:bg-th-danger-soft hover:text-th-danger group-hover:opacity-100"
+          title="Delete this response"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        </button>
+      )}
 
       {/* Preview when collapsed */}
       {!expanded && (
@@ -290,6 +305,7 @@ export function ReputationSourcesTab({
   brandTerms,
   competitorTerms,
   runDeltas = [],
+  onDeleteRun,
 }: ReputationSourcesTabProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
@@ -547,6 +563,10 @@ export function ReputationSourcesTab({
                       brandTerms={brandTerms}
                       competitorTerms={competitorTerms}
                       delta={deltaMap.get(`${run.prompt}|||${run.provider}`) ?? null}
+                      onDelete={onDeleteRun ? () => {
+                        const origIdx = runs.indexOf(run);
+                        if (origIdx !== -1) onDeleteRun(origIdx);
+                      } : undefined}
                     />
                   ))}
                 </div>

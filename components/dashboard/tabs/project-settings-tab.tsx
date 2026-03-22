@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { BrandConfig } from "@/components/dashboard/types";
 
 type ProjectSettingsTabProps = {
@@ -30,12 +31,12 @@ export function ProjectSettingsTab({ brand, onBrandChange, onReset }: ProjectSet
           value={brand.brandAliases}
           onChange={(v) => onBrandChange({ brandAliases: v })}
         />
-        <Field
-          label="Website URL"
-          placeholder="https://acme.com"
-          value={brand.website}
-          onChange={(v) => onBrandChange({ website: v })}
-        />
+        <div className="xl:col-span-2">
+          <WebsiteListField
+            websites={brand.websites}
+            onChange={(websites) => onBrandChange({ websites })}
+          />
+        </div>
         <Field
           label="Industry / Vertical"
           placeholder="B2B SaaS, E-commerce, Healthcare…"
@@ -70,7 +71,7 @@ export function ProjectSettingsTab({ brand, onBrandChange, onReset }: ProjectSet
         />
         <StatusChip
           label="Website"
-          ok={brand.website.trim().length > 0}
+          ok={brand.websites.length > 0 && brand.websites.some((w) => w.trim().length > 0)}
         />
         <StatusChip
           label="Keywords"
@@ -91,6 +92,66 @@ export function ProjectSettingsTab({ brand, onBrandChange, onReset }: ProjectSet
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function WebsiteListField({
+  websites,
+  onChange,
+}: {
+  websites: string[];
+  onChange: (websites: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  function addUrl() {
+    const url = draft.trim();
+    if (!url) return;
+    onChange([...websites, url]);
+    setDraft("");
+  }
+
+  return (
+    <div>
+      <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-th-text-muted">
+        Website URLs
+      </label>
+      {websites.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {websites.map((url, i) => (
+            <span
+              key={i}
+              className="inline-flex items-center gap-1.5 rounded-full bg-th-card-alt border border-th-border px-3 py-1 text-sm text-th-text"
+            >
+              {url.replace(/^https?:\/\//, "")}
+              <button
+                onClick={() => onChange(websites.filter((_, j) => j !== i))}
+                className="rounded-full p-0.5 hover:bg-th-danger-soft hover:text-th-danger"
+                title="Remove"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addUrl(); } }}
+          placeholder="https://acme.com"
+          className="bd-input flex-1 rounded-lg p-2.5 text-sm"
+        />
+        <button
+          onClick={addUrl}
+          disabled={!draft.trim()}
+          className="rounded-lg bg-th-accent px-4 py-2 text-sm font-medium text-white hover:bg-th-accent-hover disabled:opacity-50"
+        >
+          Add
+        </button>
+      </div>
     </div>
   );
 }

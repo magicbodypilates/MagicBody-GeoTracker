@@ -16,7 +16,7 @@ import { ReputationSourcesTab } from "@/components/dashboard/tabs/reputation-sou
 import { VisibilityAnalyticsTab } from "@/components/dashboard/tabs/visibility-analytics-tab";
 import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
-import type { AppState, Battlecard, DriftAlert, Provider, RunDelta, ScheduleInterval, ScrapeRun, TabKey, Workspace } from "@/components/dashboard/types";
+import type { AppState, Battlecard, DriftAlert, Provider, RunDelta, ScheduleInterval, ScrapeRun, TabKey, TaggedPrompt, Workspace } from "@/components/dashboard/types";
 import { ALL_PROVIDERS, PROVIDER_LABELS, SCHEDULE_OPTIONS, tabs } from "@/components/dashboard/types";
 
 /* ── Inline SVG icon helpers (16×16) ─────────────────────────────── */
@@ -142,7 +142,7 @@ const defaultState: AppState = {
   brand: {
     brandName: "",
     brandAliases: "",
-    website: "",
+    websites: [],
     industry: "",
     keywords: "",
     description: "",
@@ -152,8 +152,8 @@ const defaultState: AppState = {
   prompt:
     "What is the strongest value proposition for sovereign AI analytics tools in 2026? Include sources.",
   customPrompts: [
-    "How visible is {brand} versus competitors for enterprise AI analytics tools? Include sources.",
-    "What are the top 3 reasons to choose {brand} based on trusted sources?",
+    { text: "How visible is {brand} versus competitors for enterprise AI analytics tools? Include sources.", tags: [] },
+    { text: "What are the top 3 reasons to choose {brand} based on trusted sources?", tags: [] },
   ],
   personas: "CMO\nSEO Lead\nProduct Marketing Manager\nFounder",
   fanoutPrompts: [],
@@ -162,7 +162,11 @@ const defaultState: AppState = {
   cronExpr: "0 */6 * * *",
   githubWorkflow:
     "name: sovereign-aeo\non:\n  schedule:\n    - cron: '0 */6 * * *'\njobs:\n  track:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run test:scraper",
-  competitors: "profound.com, otterly.ai, peec.ai",
+  competitors: [
+    { name: "profound.com", aliases: [], websites: [] },
+    { name: "otterly.ai", aliases: [], websites: [] },
+    { name: "peec.ai", aliases: [], websites: [] },
+  ],
   battlecards: [],
   runs: [],
   auditUrl: "https://example.com",
@@ -343,6 +347,25 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
               )
             : [],
         };
+        // Migrate legacy single website → websites array
+        const brandAny = data.brand as Record<string, unknown> | undefined;
+        if (brandAny && typeof brandAny.website === "string" && !Array.isArray(brandAny.websites)) {
+          merged.brand.websites = brandAny.website ? [brandAny.website] : [];
+        }
+        // Migrate legacy comma-separated competitors string → Competitor[]
+        if (typeof (data as Record<string, unknown>).competitors === "string") {
+          merged.competitors = (data as Record<string, unknown>).competitors
+            ? ((data as Record<string, unknown>).competitors as string)
+                .split(",")
+                .map((c: string) => c.trim())
+                .filter(Boolean)
+                .map((name: string) => ({ name, aliases: [], websites: [] }))
+            : [];
+        }
+        // Migrate legacy plain-string customPrompts → TaggedPrompt[]
+        if (Array.isArray(merged.customPrompts) && merged.customPrompts.length > 0 && typeof merged.customPrompts[0] === "string") {
+          merged.customPrompts = (merged.customPrompts as unknown as string[]).map((t) => ({ text: t, tags: [] }));
+        }
         if (merged.activeProviders.length === 0) {
           merged.activeProviders = [merged.provider];
         }
@@ -416,7 +439,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const runScheduledBatch = useCallback(async () => {
     const s = stateRef.current;
     if (busyRef.current) return; // skip if already running
-    const prompts = s.customPrompts.length > 0 ? s.customPrompts : [s.prompt];
+    const prompts = s.customPrompts.length > 0 ? s.customPrompts.map((p) => p.text) : [s.prompt];
     const providers = s.activeProviders;
     if (prompts.length === 0 || providers.length === 0) return;
 
@@ -665,7 +688,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** Brand context string injected into AI prompts when available */
   const brandCtx = state.brand.brandName
-    ? `Context: Brand "${state.brand.brandName}"${state.brand.website ? ` (${state.brand.website})` : ""}${state.brand.industry ? `, industry: ${state.brand.industry}` : ""}${state.brand.keywords ? `, keywords: ${state.brand.keywords}` : ""}. `
+    ? `Context: Brand "${state.brand.brandName}"${state.brand.websites.length > 0 ? ` (${state.brand.websites.join(", ")})` : ""}${state.brand.industry ? `, industry: ${state.brand.industry}` : ""}${state.brand.keywords ? `, keywords: ${state.brand.keywords}` : ""}. `
     : "";
 
   /** Build list of brand names/aliases to detect */
@@ -682,10 +705,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function getCompetitorTerms(): string[] {
-    return state.competitors
-      .split(",")
-      .map((c) => c.trim())
-      .filter(Boolean);
+    return state.competitors.flatMap((c) => [c.name, ...c.aliases]).filter(Boolean);
   }
 
   /** Find which terms appear in text (case-insensitive) */
@@ -753,11 +773,13 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     else if (mentionCount >= 2) score += 8;
 
     // Brand website in sources? +20
-    const websiteDomain = state.brand.website
-      .replace(/^https?:\/\//, "")
-      .replace(/\/.*$/, "")
-      .toLowerCase();
-    if (websiteDomain && sources.some((s) => s.toLowerCase().includes(websiteDomain))) {
+    const websiteDomains = state.brand.websites
+      .map((w) => w.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase())
+      .filter(Boolean);
+    if (websiteDomains.length > 0 && sources.some((s) => {
+      const sl = s.toLowerCase();
+      return websiteDomains.some((d) => sl.includes(d));
+    })) {
       score += 20;
     }
 
@@ -852,7 +874,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   /** Batch run all custom prompts across all active providers — fully parallel */
   async function batchRunAllPrompts() {
     const prompts = state.customPrompts.map((p) =>
-      p.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
+      p.text.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
     );
     if (prompts.length === 0) {
       setMessage("No tracking prompts to run. Add prompts first.");
@@ -909,16 +931,35 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const cleaned = value.trim();
     if (!cleaned) return;
     setState((prev) => {
-      if (prev.customPrompts.includes(cleaned)) return prev;
-      return { ...prev, customPrompts: [cleaned, ...prev.customPrompts].slice(0, 50) };
+      if (prev.customPrompts.some((p) => p.text === cleaned)) return prev;
+      return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts].slice(0, 50) };
     });
     setMessage("Tracking prompt added.");
   }
 
-  function removeCustomPrompt(value: string) {
+  function removeCustomPrompt(value: string, deleteResponses?: boolean) {
     setState((prev) => ({
       ...prev,
-      customPrompts: prev.customPrompts.filter((entry) => entry !== value),
+      customPrompts: prev.customPrompts.filter((entry) => entry.text !== value),
+      runs: deleteResponses
+        ? prev.runs.filter((r) => r.prompt !== value && r.prompt !== value.replace(/\{brand\}/gi, prev.brand.brandName || "our brand"))
+        : prev.runs,
+    }));
+  }
+
+  function updatePromptTags(text: string, tags: string[]) {
+    setState((prev) => ({
+      ...prev,
+      customPrompts: prev.customPrompts.map((p) =>
+        p.text === text ? { ...p, tags } : p,
+      ),
+    }));
+  }
+
+  function deleteRun(index: number) {
+    setState((prev) => ({
+      ...prev,
+      runs: prev.runs.filter((_, i) => i !== index),
     }));
   }
 
@@ -1020,8 +1061,7 @@ Requirements:
 
     try {
       const competitorList = state.competitors
-        .split(",")
-        .map((c) => c.trim())
+        .map((c) => c.name.trim())
         .filter(Boolean);
 
       if (competitorList.length === 0) {
@@ -1215,6 +1255,7 @@ Now analyze all ${competitorList.length} competitors:`,
           activeProviderCount={state.activeProviders.length}
           onAddCustomPrompt={addCustomPrompt}
           onRemoveCustomPrompt={removeCustomPrompt}
+          onUpdatePromptTags={updatePromptTags}
           onRunPrompt={callScrape}
           onBatchRunAll={batchRunAllPrompts}
         />
@@ -1241,7 +1282,7 @@ Now analyze all ${competitorList.length} competitors:`,
         <NicheExplorerTab
           niche={state.niche}
           nicheQueries={state.nicheQueries}
-          trackedPrompts={state.customPrompts}
+          trackedPrompts={state.customPrompts.map((p) => p.text)}
           onNicheChange={(value) => setState((prev) => ({ ...prev, niche: value }))}
           onGenerateQueries={runNicheExplorer}
           onAddToTracking={addCustomPrompt}
@@ -1275,7 +1316,7 @@ Now analyze all ${competitorList.length} competitors:`,
         <BattlecardsTab
           competitors={state.competitors}
           battlecards={state.battlecards}
-          onCompetitorsChange={(value) => setState((prev) => ({ ...prev, competitors: value }))}
+          onCompetitorsChange={(competitors) => setState((prev) => ({ ...prev, competitors }))}
           onBuildBattlecards={runBattlecards}
         />
       );
@@ -1288,6 +1329,7 @@ Now analyze all ${competitorList.length} competitors:`,
           brandTerms={getBrandTerms()}
           competitorTerms={getCompetitorTerms()}
           runDeltas={runDeltas}
+          onDeleteRun={deleteRun}
         />
       );
     }
@@ -1297,11 +1339,11 @@ Now analyze all ${competitorList.length} competitors:`,
     }
 
     if (activeTab === "Citations") {
-      return <PartnerDiscoveryTab partnerLeaderboard={partnerLeaderboard} brandWebsite={state.brand.website} />;
+      return <PartnerDiscoveryTab partnerLeaderboard={partnerLeaderboard} brandWebsites={state.brand.websites} />;
     }
 
     if (activeTab === "Citation Opportunities") {
-      return <CitationOpportunitiesTab runs={state.runs} brandWebsite={state.brand.website} />;
+      return <CitationOpportunitiesTab runs={state.runs} brandWebsites={state.brand.websites} />;
     }
 
     if (activeTab === "SRO Analysis") {
@@ -1366,8 +1408,8 @@ Now analyze all ${competitorList.length} competitors:`,
               <div className="truncate text-sm font-semibold text-th-text">
                 {state.brand.brandName || "AEO Tracker"}
               </div>
-              {state.brand.website && (
-                <div className="truncate text-xs text-th-text-muted">{state.brand.website.replace(/^https?:\/\//, "")}</div>
+              {state.brand.websites.length > 0 && (
+                <div className="truncate text-xs text-th-text-muted">{state.brand.websites[0].replace(/^https?:\/\//, "")}{state.brand.websites.length > 1 ? ` +${state.brand.websites.length - 1}` : ""}</div>
               )}
             </div>
             <span className="text-xs text-th-text-muted">{showWsPicker ? "▲" : "▼"}</span>

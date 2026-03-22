@@ -2,7 +2,7 @@ import { useMemo, useState, useCallback } from "react";
 
 type PartnerDiscoveryTabProps = {
   partnerLeaderboard: Array<{ url: string; count: number; prompts: string[] }>;
-  brandWebsite?: string;
+  brandWebsites?: string[];
 };
 
 function extractDomain(url: string): string {
@@ -24,7 +24,7 @@ function extractPath(url: string): string {
 
 type SortKey = "citations" | "pages" | "prompts" | "domain";
 
-export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsite }: PartnerDiscoveryTabProps) {
+export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: PartnerDiscoveryTabProps) {
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"domain" | "url">("domain");
   const [expandedDomains, setExpandedDomains] = useState<Record<string, boolean>>({});
@@ -47,10 +47,10 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsite }: Partne
         urls: data.urls,
         totalCount: data.totalCount,
         prompts: [...data.prompts],
-        isOwn: brandWebsite ? domain === extractDomain(brandWebsite) : false,
+        isOwn: brandWebsites.length > 0 ? brandWebsites.some((w) => domain === extractDomain(w)) : false,
       }))
       .sort((a, b) => b.totalCount - a.totalCount);
-  }, [partnerLeaderboard, brandWebsite]);
+  }, [partnerLeaderboard, brandWebsites]);
 
   // Filter + sort
   const filtered = useMemo(() => {

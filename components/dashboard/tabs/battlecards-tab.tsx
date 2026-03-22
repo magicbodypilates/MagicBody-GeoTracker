@@ -1,10 +1,10 @@
 import { useState } from "react";
-import type { Battlecard } from "@/components/dashboard/types";
+import type { Battlecard, Competitor } from "@/components/dashboard/types";
 
 type BattlecardsTabProps = {
-  competitors: string;
+  competitors: Competitor[];
   battlecards: Battlecard[];
-  onCompetitorsChange: (value: string) => void;
+  onCompetitorsChange: (value: Competitor[]) => void;
   onBuildBattlecards: () => void;
 };
 
@@ -28,17 +28,94 @@ export function BattlecardsTab({
   onBuildBattlecards,
 }: BattlecardsTabProps) {
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
+
+  function addCompetitor() {
+    const name = newName.trim();
+    if (!name) return;
+    onCompetitorsChange([...competitors, { name, aliases: [], websites: [] }]);
+    setNewName("");
+  }
+
+  function removeCompetitor(index: number) {
+    onCompetitorsChange(competitors.filter((_, i) => i !== index));
+  }
+
+  function updateCompetitor(index: number, patch: Partial<Competitor>) {
+    onCompetitorsChange(competitors.map((c, i) => (i === index ? { ...c, ...patch } : c)));
+  }
 
   return (
     <div className="space-y-4">
       <label className="text-sm font-medium uppercase tracking-wider text-th-text-muted">
-        Competitors (comma-separated)
+        Competitors
       </label>
-      <input
-        value={competitors}
-        onChange={(e) => onCompetitorsChange(e.target.value)}
-        className="bd-input w-full rounded-lg p-2.5 text-sm"
-      />
+
+      {/* Competitor list */}
+      {competitors.length > 0 && (
+        <div className="space-y-2">
+          {competitors.map((comp, i) => (
+            <div key={i} className="rounded-lg border border-th-border bg-th-card p-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-th-text">{comp.name}</span>
+                {comp.aliases.length > 0 && (
+                  <span className="text-xs text-th-text-muted">
+                    aka {comp.aliases.join(", ")}
+                  </span>
+                )}
+                <button
+                  onClick={() => removeCompetitor(i)}
+                  className="ml-auto rounded p-1 text-xs text-th-text-muted hover:bg-th-danger-soft hover:text-th-danger"
+                  title="Remove"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <input
+                  value={comp.aliases.join(", ")}
+                  onChange={(e) =>
+                    updateCompetitor(i, {
+                      aliases: e.target.value.split(",").map((a) => a.trim()).filter(Boolean),
+                    })
+                  }
+                  placeholder="Aliases (comma-separated)"
+                  className="bd-input rounded-lg p-2 text-xs"
+                />
+                <input
+                  value={comp.websites.join(", ")}
+                  onChange={(e) =>
+                    updateCompetitor(i, {
+                      websites: e.target.value.split(",").map((w) => w.trim()).filter(Boolean),
+                    })
+                  }
+                  placeholder="Websites (comma-separated)"
+                  className="bd-input rounded-lg p-2 text-xs"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add competitor */}
+      <div className="flex gap-2">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCompetitor(); } }}
+          placeholder="Competitor name…"
+          className="bd-input flex-1 rounded-lg p-2.5 text-sm"
+        />
+        <button
+          onClick={addCompetitor}
+          disabled={!newName.trim()}
+          className="rounded-lg bg-th-accent px-4 py-2.5 text-sm font-medium text-white hover:bg-th-accent-hover disabled:opacity-50"
+        >
+          Add
+        </button>
+      </div>
+
       <button
         onClick={onBuildBattlecards}
         className="bd-btn-primary rounded-lg px-4 py-2.5 text-sm"

@@ -299,7 +299,11 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
 }
 
 async function monitorUntilReady(snapshotId: string) {
-  const maxAttempts = 30;
+  const maxAttempts = 60;
+  const BASE_DELAY = 2000;
+  const MAX_DELAY = 10000;
+  let elapsed = 0;
+
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const monitorRes = await fetch(
       `https://api.brightdata.com/datasets/v3/progress/${snapshotId}`,
@@ -325,10 +329,15 @@ async function monitorUntilReady(snapshotId: string) {
       throw new Error("Snapshot failed");
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    // Exponential backoff: 2s → 4s → 8s → 10s (capped)
+    const delay = Math.min(BASE_DELAY * Math.pow(2, Math.floor(attempt / 5)), MAX_DELAY);
+    elapsed += delay;
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 
-  throw new Error("Timed out while waiting for snapshot readiness");
+  throw new Error(
+    `Timed out after ~${Math.round(elapsed / 1000)}s waiting for snapshot ${snapshotId}`,
+  );
 }
 
 async function downloadSnapshot(snapshotId: string) {

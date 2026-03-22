@@ -4,7 +4,7 @@ import { PROVIDER_LABELS, type Provider } from "@/components/dashboard/types";
 
 type CitationOpportunitiesTabProps = {
   runs: ScrapeRun[];
-  brandWebsite?: string;
+  brandWebsites?: string[];
 };
 
 type Opportunity = {
@@ -37,13 +37,13 @@ function downloadCsv(filename: string, content: string) {
 
 type SortKey = "citations" | "prompts" | "competitors" | "domain";
 
-export function CitationOpportunitiesTab({ runs, brandWebsite }: CitationOpportunitiesTabProps) {
+export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationOpportunitiesTabProps) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<SortKey>("citations");
   const [expandedOpp, setExpandedOpp] = useState<Record<string, boolean>>({});
   const [view, setView] = useState<"domain" | "url">("domain");
 
-  const brandDomain = brandWebsite ? extractDomain(brandWebsite) : null;
+  const brandDomains = useMemo(() => new Set(brandWebsites.map((w) => extractDomain(w)).filter(Boolean)), [brandWebsites]);
 
   // Core computation: find opportunities
   const opportunities = useMemo(() => {
@@ -61,7 +61,7 @@ export function CitationOpportunitiesTab({ runs, brandWebsite }: CitationOpportu
     qualifyingRuns.forEach((run) => {
       run.sources.forEach((source) => {
         const domain = extractDomain(source);
-        if (brandDomain && domain === brandDomain) return;
+        if (brandDomains.size > 0 && brandDomains.has(domain)) return;
         const existing = urlMap.get(source) ?? {
           count: 0,
           prompts: new Set<string>(),
@@ -94,7 +94,7 @@ export function CitationOpportunitiesTab({ runs, brandWebsite }: CitationOpportu
         if (a.highPriority !== b.highPriority) return a.highPriority ? -1 : 1;
         return b.citationCount - a.citationCount;
       });
-  }, [runs, brandDomain]);
+  }, [runs, brandDomains]);
 
   // Domain-grouped view
   const domainGroups = useMemo(() => {

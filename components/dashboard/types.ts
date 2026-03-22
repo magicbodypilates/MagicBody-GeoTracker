@@ -63,7 +63,8 @@ export type AuditReport = {
 export type BrandConfig = {
   brandName: string;
   brandAliases: string;
-  website: string;
+  /** Multiple brand/company website URLs */
+  websites: string[];
   industry: string;
   keywords: string;
   description: string;
@@ -122,20 +123,33 @@ export type RunDelta = {
   previousRun: ScrapeRun;
 };
 
+/** Structured competitor with optional aliases and websites */
+export type Competitor = {
+  name: string;
+  aliases: string[];
+  websites: string[];
+};
+
+/** A tracking prompt with optional tags for grouping/filtering */
+export type TaggedPrompt = {
+  text: string;
+  tags: string[];
+};
+
 export type AppState = {
   brand: BrandConfig;
   provider: Provider;
   /** Multiple providers selected for parallel runs */
   activeProviders: Provider[];
   prompt: string;
-  customPrompts: string[];
+  customPrompts: TaggedPrompt[];
   personas: string;
   fanoutPrompts: string[];
   niche: string;
   nicheQueries: string[];
   cronExpr: string;
   githubWorkflow: string;
-  competitors: string;
+  competitors: Competitor[];
   battlecards: Battlecard[];
   runs: ScrapeRun[];
   auditUrl: string;

@@ -1,4 +1,4 @@
-import type { AppState, ScrapeRun, DriftAlert, Battlecard, AuditReport, Provider } from "@/components/dashboard/types";
+import type { AppState, ScrapeRun, DriftAlert, Battlecard, AuditReport, Provider, TaggedPrompt } from "@/components/dashboard/types";
 
 /* ─────────────────────────  Deterministic helpers ───────────────────────── */
 /**
@@ -18,12 +18,12 @@ function seedScore(base: number, providerIdx: number, promptIdx: number, batch: 
 }
 
 /* ─────────────────────────  Runs ───────────────────────── */
-const PROMPTS = [
-  "What are the best AI visibility tracking tools for marketing teams in 2026?",
-  "How can B2B SaaS brands improve their presence in AI search results?",
-  "Compare the top answer engine optimization platforms for enterprise brands.",
-  "What is AEO and why does it matter for organic traffic in 2026?",
-  "Which tools help monitor brand mentions across ChatGPT, Perplexity, and Gemini?",
+const PROMPTS: TaggedPrompt[] = [
+  { text: "What are the best AI visibility tracking tools for marketing teams in 2026?", tags: ["visibility", "tools"] },
+  { text: "How can B2B SaaS brands improve their presence in AI search results?", tags: ["strategy"] },
+  { text: "Compare the top answer engine optimization platforms for enterprise brands.", tags: ["comparison"] },
+  { text: "What is AEO and why does it matter for organic traffic in 2026?", tags: ["education"] },
+  { text: "Which tools help monitor brand mentions across ChatGPT, Perplexity, and Gemini?", tags: ["visibility", "tools"] },
 ];
 
 const PROVIDERS: Provider[] = ["chatgpt", "perplexity", "gemini", "copilot", "google_ai", "grok"];
@@ -234,7 +234,7 @@ function generateRuns(): ScrapeRun[] {
     PROMPTS.forEach((prompt, pIdx) => {
       const subset = PROVIDERS.filter((_, i) => (i + pIdx + batch) % 3 !== 2);
       subset.forEach((provider) => {
-        runs.push(buildRun(prompt, provider, pIdx, batch));
+        runs.push(buildRun(prompt.text, provider, pIdx, batch));
       });
     });
   }
@@ -329,7 +329,7 @@ export const DEMO_STATE: AppState = {
   brand: {
     brandName: "GEO/AEO Tracker",
     brandAliases: "GEO AEO, AEO Tracker, GEO Tracker",
-    website: "https://geoaeotracker.com",
+    websites: ["https://geoaeotracker.com"],
     industry: "AI SEO / MarTech",
     keywords: "AEO, AI visibility, answer engine optimization, LLM tracking",
     description: "Open-source BYOK AEO/GEO intelligence dashboard for monitoring brand visibility across AI models.",
@@ -357,7 +357,11 @@ export const DEMO_STATE: AppState = {
   cronExpr: "0 */6 * * *",
   githubWorkflow:
     "name: geo-aeo-tracker\non:\n  schedule:\n    - cron: '0 */6 * * *'\njobs:\n  track:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run test:scraper",
-  competitors: "profound.com, peec.ai, otterly.ai",
+  competitors: [
+    { name: "profound.com", aliases: ["Profound"], websites: ["https://profound.com"] },
+    { name: "peec.ai", aliases: ["Peec AI"], websites: ["https://peec.ai"] },
+    { name: "otterly.ai", aliases: ["Otterly"], websites: ["https://otterly.ai"] },
+  ],
   battlecards: demoBattlecards,
   runs: generateRuns(),
   auditUrl: "https://geoaeotracker.com",

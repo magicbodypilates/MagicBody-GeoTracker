@@ -17,7 +17,7 @@
  *     예: "classnaom"
  */
 
-import { importX509, jwtVerify, type JWTPayload } from "jose";
+import { decodeProtectedHeader, importX509, jwtVerify, type JWTPayload } from "jose";
 
 const GOOGLE_PUBLIC_KEYS_URL =
   "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
@@ -92,12 +92,8 @@ export async function verifyIdToken(idToken: string): Promise<VerifiedToken | nu
   }
 
   try {
-    // 1) 토큰 header 에서 kid 추출 → 해당 공개키로 서명 검증
-    const [headerB64] = idToken.split(".");
-    if (!headerB64) return null;
-    const header = JSON.parse(
-      Buffer.from(headerB64.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8"),
-    ) as { kid?: string; alg?: string };
+    // 1) 토큰 header 에서 kid 추출 (jose 가 base64url 정확히 처리)
+    const header = decodeProtectedHeader(idToken) as { kid?: string; alg?: string };
 
     if (header.alg !== "RS256") {
       console.error("[firebase-admin] 예상치 못한 알고리즘:", header.alg);
@@ -108,22 +104,21 @@ export async function verifyIdToken(idToken: string): Promise<VerifiedToken | nu
       return null;
     }
 
-    const { keys } = await fetchPublicKeys();
-    const key = keys.get(header.kid);
-    if (!key) {
-      // kid rotation 가능성 — 캐시 버리고 한 번 더 시도
+    // 2) kid 에 해당하는 공개키 찾기 (없으면 캐시 비우고 재시도 — key rotation 대응)
+    let { keys } = await fetchPublicKeys();
+    let verifyKey = keys.get(header.kid);
+    if (!verifyKey) {
       cache = null;
-      const { keys: freshKeys } = await fetchPublicKeys();
-      const freshKey = freshKeys.get(header.kid);
-      if (!freshKey) {
-        console.error(`[firebase-admin] kid=${header.kid} 에 해당하는 공개키 없음`);
-        return null;
-      }
+      const refreshed = await fetchPublicKeys();
+      keys = refreshed.keys;
+      verifyKey = keys.get(header.kid);
+    }
+    if (!verifyKey) {
+      console.error(`[firebase-admin] kid=${header.kid} 에 해당하는 공개키 없음`);
+      return null;
     }
 
-    const verifyKey = cache?.keys.get(header.kid) ?? keys.get(header.kid)!;
-
-    // 2) 서명 + iss + aud + exp 검증
+    // 3) 서명 + iss + aud + exp 검증
     const { payload } = await jwtVerify(idToken, verifyKey, {
       issuer: `https://securetoken.google.com/${projectId}`,
       audience: projectId,

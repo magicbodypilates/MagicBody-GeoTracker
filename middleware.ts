@@ -87,7 +87,13 @@ export async function middleware(req: NextRequest) {
     return redirectWithReturnTo(req, "/admin/login");
   }
 
-  // 3) /api/** — 일반/최고관리자 둘 다 허용
+  // 3) /api/internal/** — 내부 시스템 호출 (Worker 등). 쿠키 인증 없이 통과.
+  //    라우트 자체가 X-Cron-Secret 등 별도 인증 수행.
+  if (pathname.startsWith("/api/internal/")) {
+    return NextResponse.next();
+  }
+
+  // 4) /api/** — 일반/최고관리자 둘 다 허용
   if (pathname.startsWith("/api/")) {
     const userOk = await verifyCookie(userCookie, "user");
     const adminOk = await verifyCookie(adminCookie, "admin");

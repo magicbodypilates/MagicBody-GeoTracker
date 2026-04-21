@@ -75,9 +75,9 @@ export default function LoginPage() {
             );
           } else if (body.error === "admin_info_not_found") {
             setErrMsg("CMS에 등록되지 않은 계정입니다. 관리자에게 문의하세요.");
-          } else if (body.error === "admin_sdk_unavailable") {
+          } else if (body.error === "firebase_project_not_configured") {
             setErrMsg(
-              "서버에 Firebase Admin SDK가 설정되지 않았습니다. 환경변수 FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON 확인.",
+              "서버에 Firebase 프로젝트 ID 가 설정되지 않았습니다. 환경변수 FIREBASE_PROJECT_ID 확인.",
             );
           } else {
             setErrMsg(body.hint || body.error || `HTTP ${res.status}`);

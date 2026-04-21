@@ -433,12 +433,30 @@ export async function runAiScraper(
     inputRecord.geolocation = request.country;
   }
 
+  const outboundBody = JSON.stringify({ input: [inputRecord] });
+
+  // [편향 감사 로그] Bright Data 에 실제로 나가는 요청 본문 전체 출력.
+  // 브랜드 정보 유출 경로 검증 후 제거 예정. `[brightdata:outbound]` 프리픽스로 grep 용이.
+  console.log(
+    "[brightdata:outbound]",
+    JSON.stringify({
+      provider: parsed,
+      datasetId,
+      targetUrl: `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
+      body: outboundBody,
+      bodyBytes: Buffer.byteLength(outboundBody),
+      requireSources: request.requireSources ?? false,
+      forceRefresh: request.forceRefresh ?? false,
+      country: request.country ?? null,
+    }),
+  );
+
   const scrapeResponse = await fetch(
     `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
     {
       method: "POST",
       headers: withAuthHeaders(),
-      body: JSON.stringify({ input: [inputRecord] }),
+      body: outboundBody,
     },
   );
 

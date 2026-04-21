@@ -95,9 +95,11 @@ export async function middleware(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  // 4) 나머지 페이지 — 일반관리자 세션 필요
+  // 4) 나머지 페이지 — 일반관리자 OR 최고관리자 세션 둘 다 허용
+  // (최고관리자가 OAuth 콜백 등으로 /geo-tracker/ 루트에 돌아올 때도 접근 가능해야 함)
   const userOk = await verifyCookie(userCookie, "user");
-  if (userOk) return NextResponse.next();
+  const adminOk = await verifyCookie(adminCookie, "admin");
+  if (userOk || adminOk) return NextResponse.next();
   return redirectWithReturnTo(req, "/login");
 }
 

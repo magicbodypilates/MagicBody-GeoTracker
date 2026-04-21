@@ -92,6 +92,45 @@ type BenchmarkResult = {
   competitors: Array<{ name: string; sampleCount: number; mentionRate: number; citedRate: number }>;
 };
 
+type HeatmapResult = {
+  days: number;
+  prompts: string[];
+  providers: string[];
+  matrix: (number | null)[][];
+  sampleCounts: number[][];
+};
+
+type CitationsResult = {
+  days: number;
+  total: number;
+  domains: Array<{ domain: string; count: number; category: "brand" | "competitor" | "other" }>;
+};
+
+type ProvidersResult = {
+  days: number;
+  providers: Array<{
+    provider: string;
+    sampleCount: number;
+    avgDurationMs: number | null;
+    lowQualityRate: number;
+    cachedRate: number;
+    avgVisibility: number;
+  }>;
+};
+
+type DriftAlertRow = {
+  id: string;
+  promptText: string;
+  provider: string;
+  oldScore: number;
+  newScore: number;
+  delta: number;
+  severity: "info" | "warning" | "critical";
+  dismissed: boolean;
+  createdAt: string;
+};
+type DriftResult = { alerts: DriftAlertRow[] };
+
 type HomeServerTabProps = {
   onOpenTab: (tab: string) => void;
   /** 현재 브랜드명 — 벤치마크 차트의 "우리 브랜드" 라벨 대체 */
@@ -107,6 +146,10 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
   const [timeseries, setTimeseries] = useState<TimeseriesResult | null>(null);
   const [ranking, setRanking] = useState<RankingResult | null>(null);
   const [benchmark, setBenchmark] = useState<BenchmarkResult | null>(null);
+  const [heatmap, setHeatmap] = useState<HeatmapResult | null>(null);
+  const [citations, setCitations] = useState<CitationsResult | null>(null);
+  const [providersStats, setProvidersStats] = useState<ProvidersResult | null>(null);
+  const [drift, setDrift] = useState<DriftResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
 
@@ -122,32 +165,49 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
     setBusy(true);
     setError("");
     const auto = autoOnly ? "true" : "false";
+    const qs = `?days=${days}&auto=${auto}`;
     try {
-      const [sumRes, tsRes, rankRes, benchRes] = await Promise.all([
-        fetch(`${BP}/api/workspaces/${wsId}/stats/summary?days=${days}&auto=${auto}`, {
-          credentials: "include",
-        }),
-        fetch(`${BP}/api/workspaces/${wsId}/stats/timeseries?days=${days}&auto=${auto}`, {
-          credentials: "include",
-        }),
-        fetch(
-          `${BP}/api/workspaces/${wsId}/stats/ranking?days=${days}&auto=${auto}&limit=5`,
-          { credentials: "include" },
-        ),
-        fetch(`${BP}/api/workspaces/${wsId}/stats/benchmark?days=${days}&auto=${auto}`, {
-          credentials: "include",
-        }),
+      const settled = await Promise.allSettled([
+        fetch(`${BP}/api/workspaces/${wsId}/stats/summary${qs}`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/timeseries${qs}`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/ranking${qs}&limit=5`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/benchmark${qs}`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/heatmap${qs}`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/citations${qs}&limit=15`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/providers${qs}`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/drift?dismissed=false&limit=20`, { credentials: "include" }),
       ]);
-      if (sumRes.ok) setSummary(await sumRes.json());
-      if (tsRes.ok) setTimeseries(await tsRes.json());
-      if (rankRes.ok) setRanking(await rankRes.json());
-      if (benchRes.ok) setBenchmark(await benchRes.json());
+      const [sumRes, tsRes, rankRes, benchRes, heatRes, citeRes, provRes, driftRes] = settled;
+      if (sumRes.status === "fulfilled" && sumRes.value.ok) setSummary(await sumRes.value.json());
+      if (tsRes.status === "fulfilled" && tsRes.value.ok) setTimeseries(await tsRes.value.json());
+      if (rankRes.status === "fulfilled" && rankRes.value.ok) setRanking(await rankRes.value.json());
+      if (benchRes.status === "fulfilled" && benchRes.value.ok) setBenchmark(await benchRes.value.json());
+      if (heatRes.status === "fulfilled" && heatRes.value.ok) setHeatmap(await heatRes.value.json());
+      if (citeRes.status === "fulfilled" && citeRes.value.ok) setCitations(await citeRes.value.json());
+      if (provRes.status === "fulfilled" && provRes.value.ok) setProvidersStats(await provRes.value.json());
+      if (driftRes.status === "fulfilled" && driftRes.value.ok) setDrift(await driftRes.value.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }, [wsId, days, autoOnly]);
+
+  async function dismissDriftAlert(alertId: string) {
+    try {
+      await fetch(`${BP}/api/drift/${alertId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ dismissed: true }),
+      });
+      setDrift((prev) =>
+        prev ? { alerts: prev.alerts.filter((a) => a.id !== alertId) } : prev,
+      );
+    } catch (e) {
+      console.error("[home] drift dismiss 실패:", e);
+    }
+  }
 
   useEffect(() => {
     if (!wsId) return;
@@ -359,10 +419,227 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
               </div>
             )}
           </div>
+
+          {/* 드리프트 알림 */}
+          {drift && drift.alerts.length > 0 && (
+            <div className="rounded-lg border border-th-warning/30 bg-th-warning-soft p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-base font-semibold text-th-text">
+                  ⚠️ 가시성 급변 알림 ({drift.alerts.length})
+                </h3>
+                <span className="text-xs text-th-text-muted">
+                  최근 실행이 과거 평균 대비 ±10점 이상 변동 시 자동 기록
+                </span>
+              </div>
+              <ul className="space-y-1">
+                {drift.alerts.slice(0, 10).map((a) => (
+                  <li
+                    key={a.id}
+                    className="flex items-center gap-2 rounded border border-th-border bg-th-card p-2 text-xs"
+                  >
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-0.5 font-mono ${
+                        a.severity === "critical"
+                          ? "bg-th-danger-soft text-th-danger"
+                          : a.severity === "warning"
+                            ? "bg-th-warning-soft text-th-warning"
+                            : "bg-th-text-muted/10 text-th-text-muted"
+                      }`}
+                    >
+                      {a.delta > 0 ? "▲" : "▼"} {a.delta > 0 ? "+" : ""}
+                      {a.delta}
+                    </span>
+                    <span className="shrink-0 text-th-text-secondary">
+                      {PROVIDER_LABELS[a.provider as Provider] ?? a.provider}
+                    </span>
+                    <span className="flex-1 truncate text-th-text" title={a.promptText}>
+                      {a.promptText}
+                    </span>
+                    <span className="text-th-text-muted">
+                      {a.oldScore}→{a.newScore}
+                    </span>
+                    <button
+                      onClick={() => void dismissDriftAlert(a.id)}
+                      className="shrink-0 rounded px-1.5 py-0.5 text-th-text-muted hover:bg-th-card-hover"
+                      title="해제"
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* 프롬프트 × 프로바이더 히트맵 */}
+          {heatmap && heatmap.prompts.length > 0 && (
+            <HeatmapPanel data={heatmap} days={days} />
+          )}
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* 인용 출처 분석 */}
+            {citations && citations.domains.length > 0 && (
+              <div className="rounded-lg border border-th-border bg-th-card p-4">
+                <h3 className="mb-2 text-base font-semibold text-th-text">
+                  인용 출처 Top {citations.domains.length}
+                </h3>
+                <ul className="space-y-1">
+                  {citations.domains.map((d) => (
+                    <li key={d.domain} className="flex items-center gap-2 text-xs">
+                      <span
+                        className={`shrink-0 rounded px-1.5 py-0.5 font-mono ${
+                          d.category === "brand"
+                            ? "bg-th-accent-soft text-th-text-accent"
+                            : d.category === "competitor"
+                              ? "bg-th-competitor-bg text-th-competitor-text"
+                              : "bg-th-card-alt text-th-text-muted"
+                        }`}
+                      >
+                        {d.category === "brand"
+                          ? "📍 공식"
+                          : d.category === "competitor"
+                            ? "🏁 경쟁"
+                            : "·"}
+                      </span>
+                      <span className="flex-1 truncate text-th-text" title={d.domain}>
+                        {d.domain}
+                      </span>
+                      <span className="font-mono text-th-text-secondary">{d.count}회</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs text-th-text-muted">
+                  기간 {days}일 · 전체 {citations.total}개 응답 중 언급된 도메인
+                </p>
+              </div>
+            )}
+
+            {/* 프로바이더 신뢰도 */}
+            {providersStats && providersStats.providers.length > 0 && (
+              <div className="rounded-lg border border-th-border bg-th-card p-4">
+                <h3 className="mb-2 text-base font-semibold text-th-text">프로바이더 신뢰도</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-th-border text-left text-th-text-muted">
+                        <th className="py-1.5">모델</th>
+                        <th className="py-1.5 text-right">표본</th>
+                        <th className="py-1.5 text-right">평균 응답</th>
+                        <th className="py-1.5 text-right">저품질</th>
+                        <th className="py-1.5 text-right">캐시</th>
+                        <th className="py-1.5 text-right">가시성</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {providersStats.providers.map((p) => (
+                        <tr key={p.provider} className="border-b border-th-border-subtle">
+                          <td className="py-1.5 text-th-text">
+                            {PROVIDER_LABELS[p.provider as Provider] ?? p.provider}
+                          </td>
+                          <td className="py-1.5 text-right font-mono">{p.sampleCount}</td>
+                          <td className="py-1.5 text-right font-mono text-th-text-secondary">
+                            {p.avgDurationMs != null
+                              ? `${Math.round(p.avgDurationMs / 1000)}s`
+                              : "—"}
+                          </td>
+                          <td
+                            className={`py-1.5 text-right font-mono ${
+                              p.lowQualityRate > 0.1 ? "text-th-danger" : "text-th-text-secondary"
+                            }`}
+                          >
+                            {(p.lowQualityRate * 100).toFixed(0)}%
+                          </td>
+                          <td className="py-1.5 text-right font-mono text-th-text-muted">
+                            {(p.cachedRate * 100).toFixed(0)}%
+                          </td>
+                          <td className="py-1.5 text-right font-mono">{p.avgVisibility}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-2 text-xs text-th-text-muted">
+                  저품질 = parse_quality=&apos;low&apos; 비율 · 캐시 = Bright Data 캐시 hit 비율
+                </p>
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>
   );
+}
+
+/** 프롬프트 × 프로바이더 히트맵 */
+function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
+  return (
+    <div className="rounded-lg border border-th-border bg-th-card p-4">
+      <h3 className="mb-2 text-base font-semibold text-th-text">
+        프롬프트 × 프로바이더 가시성 히트맵
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-th-border">
+              <th className="py-2 text-left text-th-text-muted">프롬프트</th>
+              {data.providers.map((p) => (
+                <th key={p} className="py-2 text-center text-th-text-muted">
+                  {PROVIDER_LABELS[p as Provider] ?? p}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.prompts.map((prompt, i) => (
+              <tr key={prompt} className="border-b border-th-border-subtle">
+                <td
+                  className="max-w-xs truncate py-1.5 pr-2 text-th-text"
+                  title={prompt}
+                >
+                  {prompt}
+                </td>
+                {data.providers.map((_, j) => {
+                  const val = data.matrix[i][j];
+                  const count = data.sampleCounts[i][j];
+                  return (
+                    <td key={j} className="px-1 py-1 text-center">
+                      {val != null ? (
+                        <div
+                          className="inline-block rounded px-2 py-1 font-mono text-xs"
+                          style={{
+                            backgroundColor: heatmapColor(val),
+                            color: val >= 40 ? "#fff" : "#333",
+                          }}
+                          title={`${val}점 · ${count}회 실행`}
+                        >
+                          {val.toFixed(0)}
+                        </div>
+                      ) : (
+                        <span className="text-th-text-muted">—</span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-xs text-th-text-muted">
+        기간 {days}일 · 셀 = 해당 프롬프트의 해당 모델 평균 가시성 점수 (0-100)
+      </p>
+    </div>
+  );
+}
+
+/** 가시성 점수 → 색상 (0-100 green scale) */
+function heatmapColor(v: number): string {
+  // 0 = 회색, 50 = 노랑, 100 = 녹색
+  if (v < 20) return "rgba(107, 114, 128, 0.2)"; // gray
+  if (v < 40) return "rgba(234, 179, 8, 0.35)"; // yellow
+  if (v < 60) return "rgba(234, 179, 8, 0.6)";
+  if (v < 80) return "rgba(34, 197, 94, 0.6)";
+  return "rgba(34, 197, 94, 0.85)";
 }
 
 function KpiCard({

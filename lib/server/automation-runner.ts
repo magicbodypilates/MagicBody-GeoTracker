@@ -36,6 +36,8 @@ export type TickResult = {
   executedRuns: number;
   skippedDuplicates: number;
   errors: { scheduleId: string; message: string }[];
+  /** 일별 집계가 이번 tick 에서 수행됐는지 (하루 한 번만 실행) */
+  dailyRollup?: { date: string; rows: number } | null;
 };
 
 export async function runTick(): Promise<TickResult> {
@@ -45,7 +47,23 @@ export async function runTick(): Promise<TickResult> {
     executedRuns: 0,
     skippedDuplicates: 0,
     errors: [],
+    dailyRollup: null,
   };
+
+  // 매일 자정 KST (UTC 15:00) 근처에 한해 롤업 실행.
+  // 다수 tick 이 같은 시간 범위에 걸쳐도 ON CONFLICT 로 중복 방지.
+  try {
+    const kstHour = (now.getUTCHours() + 9) % 24;
+    if (kstHour === 0 || kstHour === 1) {
+      const rollup = await runDailyRollup();
+      result.dailyRollup = rollup;
+    }
+  } catch (err) {
+    console.error(
+      "[automation] daily rollup 실패:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 
   // 1) 실행 대상 스케줄 조회
   const dueSchedules = await db
@@ -220,6 +238,15 @@ async function executeSchedule(
 
         if (inserted.length > 0) {
           executedRuns += 1;
+          // 드리프트 감지 — 같은 (workspace, prompt, provider) 의 이전 runs 와 비교
+          await detectAndRecordDrift(
+            sched.workspaceId,
+            prompt.text,
+            provider,
+            visibilityScore,
+          ).catch((e) =>
+            console.error("[automation] 드리프트 감지 실패:", e instanceof Error ? e.message : e),
+          );
         } else {
           // 동시에 다른 워커/틱이 먼저 INSERT 한 경우 — unique constraint 로 스킵됨
           skippedDuplicates += 1;
@@ -237,6 +264,138 @@ async function executeSchedule(
   await updateScheduleTiming(sched, now);
 
   return { executedRuns, skippedDuplicates };
+}
+
+/**
+ * 전날(KST 기준) runs 를 집계해 daily_stats 에 저장.
+ * - 각 (workspace, provider, prompt_id[프롬프트 text 매칭]) 조합별 평균 가시성 · 언급률 등
+ * - parse_quality='low' 제외
+ * - ON CONFLICT 로 재실행 시 갱신
+ */
+async function runDailyRollup(): Promise<{ date: string; rows: number }> {
+  // 어제(KST) 00:00 ~ 오늘(KST) 00:00 구간
+  const now = new Date();
+  const kstNowMs = now.getTime() + 9 * 60 * 60 * 1000;
+  const kstNow = new Date(kstNowMs);
+  const y = kstNow.getUTCFullYear();
+  const m = kstNow.getUTCMonth();
+  const d = kstNow.getUTCDate();
+  // KST 자정을 UTC 로 변환 (KST = UTC+9 → KST 00:00 = UTC 전날 15:00)
+  const kstMidnightTodayUtc = Date.UTC(y, m, d, -9, 0, 0);
+  const kstMidnightYesterdayUtc = Date.UTC(y, m, d - 1, -9, 0, 0);
+  const fromUtc = new Date(kstMidnightYesterdayUtc);
+  const toUtc = new Date(kstMidnightTodayUtc);
+
+  const dateStr = `${y}-${String(m + 1).padStart(2, "0")}-${String(d - 1).padStart(2, "0")}`;
+
+  // Drizzle 로 집계 — groupBy (workspace, provider)
+  // 주의: prompt_id 는 runs 테이블에 없고 prompt_text 만 있음. prompts 테이블과 LEFT JOIN 으로 매칭.
+  const rows = await db
+    .select({
+      workspaceId: schema.runs.workspaceId,
+      provider: schema.runs.provider,
+      sampleCount: sql<number>`count(*)::int`,
+      avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::numeric(5,2)`,
+      mentionRate: sql<number>`(count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0))::numeric / count(*)::numeric`,
+      positiveRate: sql<number>`(count(*) filter (where ${schema.runs.sentiment} = 'positive'))::numeric / count(*)::numeric`,
+      citedRate: sql<number>`(count(*) filter (where array_length(${schema.runs.citedBrandDomains}, 1) > 0))::numeric / count(*)::numeric`,
+    })
+    .from(schema.runs)
+    .where(
+      and(
+        sql`${schema.runs.createdAt} >= ${fromUtc.toISOString()}::timestamptz`,
+        sql`${schema.runs.createdAt} < ${toUtc.toISOString()}::timestamptz`,
+        or(
+          sql`${schema.runs.parseQuality} <> 'low'`,
+          isNull(schema.runs.parseQuality),
+        ),
+        eq(schema.runs.isAuto, true),
+      ),
+    )
+    .groupBy(schema.runs.workspaceId, schema.runs.provider);
+
+  for (const r of rows) {
+    await db
+      .insert(schema.dailyStats)
+      .values({
+        date: dateStr,
+        workspaceId: r.workspaceId,
+        provider: r.provider,
+        promptId: null,
+        sampleCount: r.sampleCount,
+        avgVisibility: String(r.avgVisibility) as unknown as string,
+        mentionRate: String(r.mentionRate) as unknown as string,
+        positiveSentimentRate: String(r.positiveRate) as unknown as string,
+        citedOfficialRate: String(r.citedRate) as unknown as string,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.dailyStats.date,
+          schema.dailyStats.workspaceId,
+          schema.dailyStats.provider,
+          schema.dailyStats.promptId,
+        ],
+        set: {
+          sampleCount: r.sampleCount,
+          avgVisibility: String(r.avgVisibility) as unknown as string,
+          mentionRate: String(r.mentionRate) as unknown as string,
+          positiveSentimentRate: String(r.positiveRate) as unknown as string,
+          citedOfficialRate: String(r.citedRate) as unknown as string,
+        },
+      });
+  }
+
+  return { date: dateStr, rows: rows.length };
+}
+
+/**
+ * 드리프트 감지 — 새로 저장된 run 과 같은 (workspace, prompt, provider) 의
+ * 최근 5개 runs 평균을 비교해 ±10점 이상 변동 시 drift_alerts 에 기록.
+ * - severity: |delta| >= 25 = critical, >= 15 = warning, >= 10 = info
+ */
+async function detectAndRecordDrift(
+  workspaceId: string,
+  promptText: string,
+  provider: string,
+  newScore: number,
+): Promise<void> {
+  const { desc } = await import("drizzle-orm");
+  // 가장 최근 1개 이전 run 가져오기 (방금 INSERT 한 건 제외 — created_at 기준 두 번째 건)
+  const recent = await db
+    .select({ visibilityScore: schema.runs.visibilityScore })
+    .from(schema.runs)
+    .where(
+      and(
+        eq(schema.runs.workspaceId, workspaceId),
+        eq(schema.runs.promptText, promptText),
+        eq(schema.runs.provider, provider),
+      ),
+    )
+    .orderBy(desc(schema.runs.createdAt))
+    .limit(6); // 방금 INSERT 한 것 1건 + 이전 5건
+
+  if (recent.length < 2) return; // 비교 대상 없음
+
+  const priorRuns = recent.slice(1); // 최근 5건 (방금 INSERT 제외)
+  const priorAvg =
+    priorRuns.reduce((s, r) => s + r.visibilityScore, 0) / priorRuns.length;
+  const delta = Math.round(newScore - priorAvg);
+
+  const absDelta = Math.abs(delta);
+  if (absDelta < 10) return; // 임계값 미만
+
+  const severity = absDelta >= 25 ? "critical" : absDelta >= 15 ? "warning" : "info";
+
+  await db.insert(schema.driftAlerts).values({
+    workspaceId,
+    promptText,
+    provider,
+    oldScore: Math.round(priorAvg),
+    newScore,
+    delta,
+    severity,
+    dismissed: false,
+  });
 }
 
 async function updateScheduleTiming(sched: Schedule, now: Date) {

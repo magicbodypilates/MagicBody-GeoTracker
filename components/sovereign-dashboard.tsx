@@ -204,10 +204,10 @@ const defaultState: AppState = {
   provider: "chatgpt",
   // Copilot / Grok 은 UI에서 숨김(types.ts HIDDEN_PROVIDERS) — 기본 조사대상에서도 제외
   activeProviders: ["chatgpt", "perplexity", "gemini", "google_ai"],
-  prompt: "{brand}의 재활 필라테스 강사 양성 과정은 어떤 특징이 있나요? 출처를 포함해서 알려주세요.",
+  prompt: "필라테스 강사 자격증 딸 수 있는 곳 추천해줘. 출처 링크도 포함해줘.",
   customPrompts: [
-    { text: "{brand}는 다른 필라테스 교육 브랜드와 비교했을 때 어떤 차별점이 있나요? 출처를 포함하세요.", tags: [] },
-    { text: "신뢰할 수 있는 출처를 기반으로 {brand}를 선택해야 하는 3가지 이유를 알려주세요.", tags: [] },
+    { text: "필라테스 강사 자격증 딸 수 있는 곳 추천해줘. 출처 링크도 포함해줘.", tags: [] },
+    { text: "필라테스 강사 자격증 따는 방법 알려줘. 출처 링크도 포함해줘.", tags: [] },
   ],
   personas: "필라테스 강사 지망생\n재활 필라테스 강사\n필라테스 센터 원장\n스포츠 재활 전문가",
   fanoutPrompts: [],
@@ -251,7 +251,7 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     title: "프롬프트 허브",
     tooltip: "추적 프롬프트 라이브러리를 관리합니다.",
     details:
-      "시간에 걸쳐 추적할 프롬프트 라이브러리를 구축합니다. {brand} 사용 시 브랜드명이 자동 삽입됩니다. 개별 실행 또는 선택한 모델들로 일괄 실행할 수 있습니다.",
+      "시간에 걸쳐 추적할 프롬프트 라이브러리를 구축합니다. 개별 실행 또는 선택한 모델들로 일괄 실행할 수 있습니다. 편향 측정을 위해 프롬프트는 있는 그대로 AI 에 전송됩니다.",
   },
   "Persona Fan-Out": {
     title: "페르소나 분화",
@@ -1259,9 +1259,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** Batch run all custom prompts across all active providers — fully parallel */
   async function batchRunAllPrompts() {
-    const prompts = state.customPrompts.map((p) =>
-      p.text.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
-    );
+    // 프롬프트를 그대로 사용 — {brand} 치환 제거 (브랜드 편향 방지)
+    // 브랜드 관련 질문이 필요하면 사용자가 직접 프롬프트에 브랜드명을 써야 함
+    const prompts = state.customPrompts.map((p) => p.text);
     if (prompts.length === 0) {
       setMessage("실행할 추적 프롬프트가 없습니다. 먼저 프롬프트를 추가하세요.");
       return;
@@ -1354,7 +1354,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       ...prev,
       customPrompts: prev.customPrompts.filter((entry) => entry.text !== value),
       runs: deleteResponses
-        ? prev.runs.filter((r) => r.prompt !== value && r.prompt !== value.replace(/\{brand\}/gi, prev.brand.brandName || "our brand"))
+        ? prev.runs.filter((r) => r.prompt !== value)
         : prev.runs,
     }));
   }
@@ -1437,7 +1437,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: `${brandCtx}다음 니치에 대해, 실제 한국 사용자가 ChatGPT/Perplexity/Gemini 같은 AI에게 물어볼 만한 고의도(high-intent) 검색 질문을 정확히 12개 한국어로 생성하세요: "${state.niche}".
+          prompt: `다음 니치에 대해, 실제 한국 사용자가 ChatGPT/Perplexity/Gemini 같은 AI에게 물어볼 만한 고의도(high-intent) 검색 질문을 정확히 12개 한국어로 생성하세요: "${state.niche}".
 
 요구사항:
 - 전부 한국어로 작성, 자연스럽고 구어체에 가까운 질문
@@ -1501,7 +1501,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: `${brandCtx}You are an AI search visibility analyst. Analyze how AI models (ChatGPT, Perplexity, Gemini, Copilot, Google AI, Grok) likely perceive each of these competitors: ${competitorList.join(", ")}.
+          prompt: `You are an AI search visibility analyst. Analyze how AI models (ChatGPT, Perplexity, Gemini, Copilot, Google AI, Grok) likely perceive each of these competitors: ${competitorList.join(", ")}.
 
 For EACH competitor, provide a JSON object with:
 - "competitor": the name exactly as given
@@ -1764,7 +1764,6 @@ Now analyze all ${competitorList.length} competitors:`,
       return (
         <PromptHubTab
           customPrompts={state.customPrompts}
-          brandName={state.brand.brandName}
           busy={busy}
           activeProviderCount={state.activeProviders.length}
           onAddCustomPrompt={addCustomPrompt}

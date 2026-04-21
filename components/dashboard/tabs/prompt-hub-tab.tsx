@@ -3,7 +3,6 @@ import type { TaggedPrompt } from "../types";
 
 type PromptHubTabProps = {
   customPrompts: TaggedPrompt[];
-  brandName?: string;
   busy: boolean;
   activeProviderCount: number;
   onAddCustomPrompt: (value: string) => void;
@@ -15,7 +14,6 @@ type PromptHubTabProps = {
 
 export function PromptHubTab({
   customPrompts,
-  brandName,
   busy,
   activeProviderCount,
   onAddCustomPrompt,
@@ -28,10 +26,8 @@ export function PromptHubTab({
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
   const [filterTag, setFilterTag] = useState<string | null>(null);
 
-  const interpolateBrand = (value: string) => {
-    if (!brandName?.trim()) return value;
-    return value.replaceAll("{brand}", brandName.trim());
-  };
+  // {brand} 치환 제거 — 편향 방지. 프롬프트를 리터럴 그대로 사용.
+  const interpolateBrand = (value: string) => value;
 
   // Collect all unique tags across prompts
   const allTags = Array.from(new Set(customPrompts.flatMap((p) => p.tags))).sort();

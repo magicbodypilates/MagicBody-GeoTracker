@@ -1171,52 +1171,58 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     setBusy(true);
     setMessage(`배치 실행: ${totalJobs}개 작업을 병렬 시작합니다...`);
 
-    // Fire ALL prompt × provider combinations at once
-    const jobs = prompts.flatMap((prompt) =>
-      providers.map((p) => callScrapeOne(prompt, p)),
-    );
-    const results = await Promise.allSettled(jobs);
+    // Fire ALL prompt × provider combinations — incremental state update on each completion
+    // (전체 대기 후 한꺼번에 setState 하면 사용자는 20개 작업이 전부 끝날 때까지 빈 화면을 보게 됨)
+    let firstArrived = false;
+    let completed = 0;
+    let succeeded = 0;
+    const failures: { provider: Provider; reason: string }[] = [];
 
-    // 초기화 이후에 완료된 batch는 결과를 state에 반영하지 않음
+    const jobs = prompts.flatMap((prompt) =>
+      providers.map((p) =>
+        callScrapeOne(prompt, p).then((result) => {
+          // 초기화 토큰 변경 시 stale 응답 폐기
+          if (resetTokenRef.current !== myToken) return result;
+          completed += 1;
+          if (result.ok) {
+            succeeded += 1;
+            setState((prev) => ({
+              ...prev,
+              runs: [result.run, ...prev.runs].slice(0, 500),
+            }));
+            if (serverWsId) {
+              serverAppendRun(serverWsId, result.run).catch((e) =>
+                console.error("[dashboard] 서버 run 저장 실패:", e),
+              );
+            }
+            if (!firstArrived) {
+              firstArrived = true;
+              setActiveTab("Responses");
+            }
+          } else if (result.reason !== "취소됨") {
+            failures.push({ provider: result.provider, reason: result.reason });
+          }
+          setMessage(
+            `배치 진행 중: ${completed}/${totalJobs} · 성공 ${succeeded}${completed < totalJobs ? " (나머지 대기 중...)" : ""}`,
+          );
+          return result;
+        }),
+      ),
+    );
+
+    await Promise.allSettled(jobs);
+
     if (resetTokenRef.current !== myToken) {
       setBusy(false);
       return;
-    }
-
-    const allRuns: ScrapeRun[] = [];
-    const failures: { provider: Provider; reason: string }[] = [];
-    for (const r of results) {
-      if (r.status !== "fulfilled") continue;
-      const value = r.value;
-      if (value.ok) {
-        allRuns.push(value.run);
-      } else if (value.reason !== "취소됨") {
-        failures.push({ provider: value.provider, reason: value.reason });
-      }
-    }
-
-    setState((prev) => ({
-      ...prev,
-      runs: [...allRuns, ...prev.runs].slice(0, 500),
-    }));
-    // 서버 DB 에도 저장 (병렬 fire-and-forget)
-    if (serverWsId && allRuns.length > 0) {
-      void Promise.all(
-        allRuns.map((r) =>
-          serverAppendRun(serverWsId, r).catch((e) =>
-            console.error("[dashboard] 서버 run 저장 실패:", e),
-          ),
-        ),
-      );
     }
 
     const failSummary = failures
       .map((f) => `${PROVIDER_LABELS[f.provider] ?? f.provider}(${f.reason})`)
       .join(", ");
     setMessage(
-      `배치 완료: ${prompts.length}개 프롬프트 × ${providers.length}개 모델 → ${allRuns.length}건 수집${failSummary ? ` · 실패: ${failSummary}` : ""}`,
+      `배치 완료: ${prompts.length}개 프롬프트 × ${providers.length}개 모델 → ${succeeded}건 수집${failSummary ? ` · 실패: ${failSummary}` : ""}`,
     );
-    if (allRuns.length > 0) setActiveTab("Responses");
     setBusy(false);
   }
 
@@ -1740,7 +1746,23 @@ Now analyze all ${competitorList.length} competitors:`,
       // 실패해도 UI 상태는 계속 초기화
     }
 
-    // 3) 클라이언트 상태 비우기
+    // 3) 서버 DB 의 응답/분석 이력 삭제 — 누락 시 새로고침하면 다시 복원됨
+    let serverDeleted: { runs?: number; audits?: number; drifts?: number; dailyStats?: number } = {};
+    if (serverWsId) {
+      try {
+        const resp = await fetch(BP + `/api/workspaces/${serverWsId}/reset-responses`, {
+          method: "POST",
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          serverDeleted = data.deleted ?? {};
+        }
+      } catch (e) {
+        console.error("[dashboard] 서버 응답 이력 삭제 실패:", e);
+      }
+    }
+
+    // 4) 클라이언트 상태 비우기
     setBusy(false);
     setState((prev) => ({
       ...prev,
@@ -1751,7 +1773,7 @@ Now analyze all ${competitorList.length} competitors:`,
       lastScheduledRun: null,
     }));
     setMessage(
-      `응답 이력 초기화 완료 (진행 중 ${pending}건 취소 · 서버 캐시 ${cacheCleared}건 삭제)`,
+      `응답 이력 초기화 완료 (진행 중 ${pending}건 취소 · 서버 DB runs ${serverDeleted.runs ?? 0}건 · 캐시 ${cacheCleared}건 삭제)`,
     );
   }
 

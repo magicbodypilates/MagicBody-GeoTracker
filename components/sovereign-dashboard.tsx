@@ -28,7 +28,7 @@ import { PromptHubTab } from "@/components/dashboard/tabs/prompt-hub-tab";
 import { ReputationSourcesTab } from "@/components/dashboard/tabs/reputation-sources-tab";
 import { VisibilityAnalyticsTab } from "@/components/dashboard/tabs/visibility-analytics-tab";
 import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab";
-import { HomeTab } from "@/components/dashboard/tabs/home-tab";
+import { HomeServerTab } from "@/components/dashboard/tabs/home-server-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-tab";
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
@@ -1773,8 +1773,7 @@ Now analyze all ${competitorList.length} competitors:`,
   function renderActiveTab() {
     if (activeTab === "Home") {
       return (
-        <HomeTab
-          runs={state.runs}
+        <HomeServerTab
           onOpenTab={(tab) => setActiveTab(tab as TabKey)}
         />
       );

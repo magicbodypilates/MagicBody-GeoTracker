@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { loadSovereignValue, saveSovereignValue, clearSovereignStore } from "@/lib/client/sovereign-store";
 import { DEMO_STATE } from "@/lib/demo-data";
 import { AeoAuditTab } from "@/components/dashboard/tabs/aeo-audit-tab";
-import { AutomationTab } from "@/components/dashboard/tabs/automation-tab-v2";
+import { AutomationServerTab } from "@/components/dashboard/tabs/automation-server-tab";
 import { BattlecardsTab } from "@/components/dashboard/tabs/battlecards-tab";
 import { CitationOpportunitiesTab } from "@/components/dashboard/tabs/citation-opportunities-tab";
 import { NicheExplorerTab } from "@/components/dashboard/tabs/niche-explorer-tab";
@@ -1807,22 +1807,10 @@ Now analyze all ${competitorList.length} competitors:`,
 
     if (activeTab === "Automation") {
       return (
-        <AutomationTab
-          scheduleEnabled={state.scheduleEnabled}
-          scheduleIntervalMs={state.scheduleIntervalMs}
-          lastScheduledRun={state.lastScheduledRun}
-          driftAlerts={state.driftAlerts}
-          runs={state.runs}
-          busy={busy}
-          onToggleSchedule={(enabled) =>
-            setState((prev) => ({ ...prev, scheduleEnabled: enabled }))
-          }
-          onIntervalChange={(interval) =>
-            setState((prev) => ({ ...prev, scheduleIntervalMs: interval }))
-          }
-          onRunNow={runScheduledBatch}
-          onDismissAlert={dismissAlert}
-          onDismissAllAlerts={dismissAllAlerts}
+        <AutomationServerTab
+          brand={state.brand}
+          competitors={state.competitors}
+          customPrompts={state.customPrompts}
         />
       );
     }

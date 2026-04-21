@@ -433,9 +433,21 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }, [applyTheme]);
 
+  /**
+   * 로드 완료 플래그 — 저장 useEffect 가 로드 전에 defaultState 를 덮어쓰지 않도록 차단.
+   * Race condition 방지:
+   *   - mount 직후: state=defaultState, activeWsId 설정됨
+   *   - 저장 useEffect 가 state 변경 감지 → IDB 에 defaultState 쓰기 시도
+   *   - 로드 useEffect 가 비동기로 IDB 읽기 → 이미 덮어써진 defaultState 를 읽음
+   *   → 기존에 저장된 사용자 데이터 소실
+   * 해결: loaded=true 가 될 때까지 저장을 막는다.
+   */
+  const [loaded, setLoaded] = useState(false);
+
   /** Load app state for active workspace */
   useEffect(() => {
     if (demoMode || !activeWsId) return;
+    setLoaded(false); // 워크스페이스 전환 시 재로드 — 일시적으로 저장 차단
     let mounted = true;
     const key = storageKeyForWorkspace(activeWsId);
     loadSovereignValue<AppState>(key, defaultState).then((data) => {
@@ -489,15 +501,17 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         }
         merged.brand.brandAliases = existingAliases.join(", ");
         setState(merged);
+        setLoaded(true); // 이제부터 저장 허용
       }
     });
     return () => {
       mounted = false;
     };
-  }, [activeWsId]);
+  }, [activeWsId, demoMode]);
 
   useEffect(() => {
     if (demoMode || !activeWsId) return;
+    if (!loaded) return; // 로드 완료 전엔 저장 금지 (기존 데이터 덮어쓰기 방지)
     saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
     // Update workspace brandName if changed
     if (state.brand.brandName) {
@@ -509,7 +523,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         return updated;
       });
     }
-  }, [state, activeWsId]);
+  }, [state, activeWsId, loaded, demoMode]);
 
   /** ref to the scheduler interval so we can clear/re-create it */
   const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);

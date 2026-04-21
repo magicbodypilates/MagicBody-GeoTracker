@@ -188,8 +188,10 @@ export function GscPerformanceTab({
   const [loadingSites, setLoadingSites] = useState(false);
   const [selectedSite, setSelectedSite] = useState<string>("");
   const [dimension, setDimension] = useState<Dimension>("query");
-  const [startDate, setStartDate] = useState<string>(isoDaysAgo(30));
-  const [endDate, setEndDate] = useState<string>(isoDaysAgo(3));
+  // 최근 30일 창으로 고정 — GSC 는 최신 데이터 2~3일 지연이 있어 종료일을 3일 전으로 설정
+  // (시작일 33일 전 ~ 종료일 3일 전 = 30일 구간)
+  const startDate = isoDaysAgo(33);
+  const endDate = isoDaysAgo(3);
   const [snapshot, setSnapshot] = useState<GscSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>("");
@@ -497,25 +499,11 @@ export function GscPerformanceTab({
         {/* Query controls */}
         <div className="rounded-lg border border-th-border bg-th-card p-4">
           <div className="mb-2 text-sm font-semibold text-th-text">Search Analytics 조회</div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">시작일</label>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
-                className="bd-input w-full rounded-lg p-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">종료일</label>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
-                className="bd-input w-full rounded-lg p-2 text-sm"
-              />
-            </div>
+          <div className="mb-2 text-xs text-th-text-muted">
+            조회 기간: 최근 30일 고정 ({startDate} ~ {endDate})
+            <span className="ml-1 text-th-text-muted/70">· GSC 데이터 2~3일 지연 반영</span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-1">
             <div>
               <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">차원</label>
               <select

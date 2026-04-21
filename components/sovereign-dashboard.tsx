@@ -1073,18 +1073,17 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const controller = new AbortController();
     activeControllersRef.current.add(controller);
     let timedOut = false;
+    // ChatGPT 는 Bright Data 특성상 응답 수집이 오래 걸리므로 타임아웃 여유 필요
+    const timeoutMs = provider === "chatgpt" ? 300000 : 180000; // 5분 / 3분
     const timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, 180000); // 3분 타임아웃
+    }, timeoutMs);
     try {
-      // 브랜드 컨텍스트는 프롬프트가 명시적으로 브랜드를 언급할 때만 주입한다
-      // (제너릭 쿼리에는 brandCtx를 넣지 않아야 AI의 자연스러운 응답을 측정할 수 있음)
-      const promptLower = prompt.toLowerCase();
-      const mentionsBrand = getBrandTerms().some(
-        (t) => t && promptLower.includes(t.toLowerCase()),
-      );
-      const finalPrompt = mentionsBrand ? brandCtx + prompt : prompt;
+      // 브랜드 편향 제거 — brandCtx 주입하지 않고 사용자 프롬프트를 그대로 전송.
+      // 응답 분석(brandMentions, citations 등)은 brand 설정 기반으로 별도 수행되므로
+      // 추적 기능은 그대로 동작. AI 가 자연스러운 답변을 할 때의 노출도를 정확히 측정.
+      const finalPrompt = prompt;
       const response = await fetch(BP + "/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1160,17 +1159,29 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       if (resetTokenRef.current !== myToken) {
         return { ok: false, provider, reason: "취소됨" };
       }
-      // 타임아웃이나 네트워크 오류는 1회 자동 재시도
-      if (attempt < 1) {
+      // 최대 2회 자동 재시도 (타임아웃/네트워크 오류 간헐적 실패 흡수)
+      const MAX_RETRIES = 2;
+      if (attempt < MAX_RETRIES) {
         clearTimeout(timeoutId);
         activeControllersRef.current.delete(controller);
+        const reason = timedOut
+          ? `타임아웃(${Math.round(timeoutMs / 1000)}s)`
+          : err instanceof Error
+            ? err.message
+            : "unknown";
+        console.warn(
+          `[scrape] ${provider} 실패 — 재시도 ${attempt + 1}/${MAX_RETRIES}. 사유: ${reason}`,
+        );
         return callScrapeOne(prompt, provider, attempt + 1);
       }
       // 최종 실패 — 사유 분류
       let reason: string;
-      if (timedOut) reason = "타임아웃(3분)";
+      if (timedOut) reason = `타임아웃(${Math.round(timeoutMs / 1000)}s)`;
       else if (err instanceof Error) reason = err.message || "네트워크 오류";
       else reason = "알 수 없는 오류";
+      console.error(
+        `[scrape] ${provider} 최종 실패 (시도 ${attempt + 1}/${MAX_RETRIES + 1}회). 사유: ${reason}`,
+      );
       return { ok: false, provider, reason };
     } finally {
       clearTimeout(timeoutId);

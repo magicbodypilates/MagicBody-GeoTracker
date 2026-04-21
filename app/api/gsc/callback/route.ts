@@ -4,10 +4,15 @@ import { exchangeCodeForTokens } from "@/lib/server/gsc-client";
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
   const error = req.nextUrl.searchParams.get("error");
+  const state = req.nextUrl.searchParams.get("state");
   const bp = process.env.NEXT_PUBLIC_BASE_PATH ?? "/geo-tracker";
 
-  const successRedirect = `${bp}/?gsc=connected`;
-  const failureRedirect = (msg: string) => `${bp}/?gsc=error&msg=${encodeURIComponent(msg)}`;
+  // state === "admin" 이면 최고관리자 경로로 복귀, 아니면 일반 경로
+  const returnRoot = state === "admin" ? `${bp}/admin` : `${bp}/`;
+
+  const successRedirect = `${returnRoot}?gsc=connected`;
+  const failureRedirect = (msg: string) =>
+    `${returnRoot}?gsc=error&msg=${encodeURIComponent(msg)}`;
 
   if (error) {
     return NextResponse.redirect(new URL(failureRedirect(error), req.url));

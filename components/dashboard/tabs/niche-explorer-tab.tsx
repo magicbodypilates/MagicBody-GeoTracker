@@ -10,13 +10,7 @@ type NicheExplorerTabProps = {
   onAddToTracking: (query: string) => void;
 };
 
-const NICHE_PRESETS: string[] = [
-  "국내 재활 필라테스 강사 자격증 과정",
-  "온라인 필라테스 강사 교육 프로그램",
-  "다이어트 전문 퍼스널 트레이닝",
-  "산후 회복 필라테스 센터",
-  "요가 강사 자격증 국내 인증 기관",
-];
+// 프리셋 제거됨 — 모든 입력은 사용자가 직접 작성 (편향 방지)
 
 function classifyQuery(q: string): "정보형" | "비교형" | "결정형" {
   const comparison = /(비교|차이|vs|대비|어느|어떤.*이(?:나|지))/;
@@ -102,24 +96,6 @@ export function NicheExplorerTab({
           <li>원하는 질문을 개별 또는 <strong>전체 추적</strong>으로 프롬프트 허브에 추가 → 허브에서 실제 조사 실행.</li>
         </ol>
       </details>
-
-      {/* 프리셋 */}
-      <div className="rounded-lg border border-th-border bg-th-card p-4">
-        <div className="mb-2 text-xs font-medium uppercase tracking-wider text-th-text-muted">
-          예시 프리셋 (클릭해 바로 입력)
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {NICHE_PRESETS.map((p) => (
-            <button
-              key={p}
-              onClick={() => onNicheChange(p)}
-              className="rounded-full border border-th-border bg-th-card-alt px-3 py-1 text-xs text-th-text-secondary hover:bg-th-card-hover"
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      </div>
 
       {/* 니치 입력 */}
       <div className="rounded-lg border border-th-border bg-th-card p-4">

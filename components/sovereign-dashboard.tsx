@@ -34,8 +34,8 @@ import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-t
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
 import { NaverAiTab } from "@/components/dashboard/tabs/naver-ai-tab";
 import { BingCitationsTab } from "@/components/dashboard/tabs/bing-citations-tab";
-import type { AppState, Battlecard, Citation, DriftAlert, Provider, RunDelta, ScheduleInterval, ScrapeRun, TabKey, TaggedPrompt, Workspace } from "@/components/dashboard/types";
-import { ALL_PROVIDERS, VISIBLE_PROVIDERS, PROVIDER_LABELS, SCHEDULE_OPTIONS, tabs, tabsForRole } from "@/components/dashboard/types";
+import type { AppState, Battlecard, Citation, Provider, RunDelta, ScrapeRun, TabKey, Workspace } from "@/components/dashboard/types";
+import { VISIBLE_PROVIDERS, PROVIDER_LABELS, tabsForRole } from "@/components/dashboard/types";
 import { useAuth } from "@/components/auth/auth-context";
 import { splitAnswerSections } from "@/components/dashboard/answer-utils";
 import {
@@ -191,14 +191,10 @@ const tabIcons: Record<TabKey, ReactNode> = {
   ),
 };
 
-const STORAGE_KEY = "sovereign-aeo-tracker-v1";
+/* Phase 5A: IndexedDB storage key 더 이상 사용 안 함. 서버 DB 가 source of truth. */
 const WORKSPACES_KEY = "sovereign-workspaces";
 const ACTIVE_WS_KEY = "sovereign-active-workspace";
 const THEME_KEY = "sovereign-theme";
-
-function storageKeyForWorkspace(wsId: string) {
-  return wsId === "default" ? STORAGE_KEY : `sovereign-aeo-tracker-${wsId}`;
-}
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -474,10 +470,11 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     (async () => {
       try {
         // 1) 워크스페이스 확보 (캐시 → 서버 조회 → 없으면 생성)
+        //    최초 생성 시에는 defaultState 의 기본 프롬프트·경쟁사도 함께 세팅.
         const wsId = await ensureWorkspace({
           brand: defaultState.brand,
-          competitors: [],
-          prompts: [],
+          competitors: defaultState.competitors,
+          prompts: defaultState.customPrompts,
         });
         if (cancelled) return;
         setServerWsId(wsId);
@@ -527,10 +524,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /**
    * 브랜드 설정 debounced 서버 동기화 (600ms)
-   * IndexedDB 전체 저장은 제거됨 — 개별 mutation 이 서버에 쓰기 때문.
+   * 초기 로드 직후 발생하는 불필요한 PATCH 방지 — brandInitializedRef 로 skip.
    */
+  const brandInitializedRef = useRef(false);
   useEffect(() => {
     if (demoMode || !activeWsId || !loaded || !serverWsId) return;
+    // 첫 번째 effect 실행 (로드 완료 직후) — PATCH 안 함
+    if (!brandInitializedRef.current) {
+      brandInitializedRef.current = true;
+      return;
+    }
     const wsId = serverWsId;
     const brandSnapshot = state.brand;
     const t = setTimeout(() => {
@@ -1260,17 +1263,20 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   async function addCustomPrompt(value: string) {
     const cleaned = value.trim();
     if (!cleaned) return;
+    if (!loaded || !serverWsId) {
+      setMessage("로드 중입니다. 잠시 후 다시 시도해주세요.");
+      return;
+    }
     // UI 낙관 업데이트
     setState((prev) => {
       if (prev.customPrompts.some((p) => p.text === cleaned)) return prev;
       return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts].slice(0, 50) };
     });
-    // 서버 동기
-    if (serverWsId) {
-      addPromptIfNew(serverWsId, { text: cleaned, tags: [] }).catch((e) =>
-        console.error("[dashboard] 서버 프롬프트 추가 실패:", e),
-      );
-    }
+    // 서버 동기 (실패 시 UI 롤백은 하지 않고 경고만 — 낙관 업데이트 유지)
+    addPromptIfNew(serverWsId, { text: cleaned, tags: [] }).catch((e) => {
+      console.error("[dashboard] 서버 프롬프트 추가 실패:", e);
+      setMessage("⚠️ 서버 저장 실패 — 새로고침 시 사라질 수 있습니다");
+    });
     setMessage("추적 프롬프트가 추가되었습니다.");
   }
 
@@ -1688,24 +1694,35 @@ Now analyze all ${competitorList.length} competitors:`,
     }
 
     // 1) 서버 워크스페이스 삭제 (cascade 로 prompts/competitors/runs/audits 전부 제거)
+    let purgeSucceeded = false;
     if (serverWsId) {
-      await purgeWorkspace(serverWsId).catch((e) =>
-        console.error("[dashboard] 서버 purge 실패:", e),
-      );
-      setServerWsId(null);
+      try {
+        await purgeWorkspace(serverWsId);
+        purgeSucceeded = true;
+      } catch (e) {
+        console.error("[dashboard] 서버 purge 실패:", e);
+        setMessage("서버 삭제 실패 — 네트워크 확인 후 다시 시도하세요.");
+        return; // 실패 시 중단 — 이중 상태 방지
+      }
     }
-    setCachedWorkspaceId(null);
+    if (purgeSucceeded || !serverWsId) {
+      setServerWsId(null);
+      setCachedWorkspaceId(null);
+    }
 
-    // 2) 새 워크스페이스 생성 (defaultState 브랜드로)
+    // 2) 새 워크스페이스 생성 (defaultState 기본값 전달)
     try {
       const newId = await ensureWorkspace({
         brand: defaultState.brand,
-        competitors: [],
-        prompts: [],
+        competitors: defaultState.competitors,
+        prompts: defaultState.customPrompts,
       });
       setServerWsId(newId);
+      // brand 초기화 플래그 리셋 — 새 워크스페이스 로드 후 첫 PATCH skip
+      brandInitializedRef.current = false;
     } catch (e) {
       console.error("[dashboard] 새 워크스페이스 생성 실패:", e);
+      setMessage("워크스페이스 재생성 실패 — 페이지를 새로고침하세요.");
     }
 
     setBusy(false);

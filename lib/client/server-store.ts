@@ -190,7 +190,8 @@ export async function ensureWorkspace(opts: {
  * 반환된 값을 기존 defaultState 와 병합(setState)하면 UI 가 서버 기반으로 동작.
  */
 export async function loadFromServer(wsId: string): Promise<Partial<AppState>> {
-  const [wsRes, promptsRes, competitorsRes, runsRes, auditsRes] = await Promise.all([
+  // allSettled 로 변경 — 일부 API 실패해도 나머지 데이터는 복구
+  const [wsSet, promptsSet, competitorsSet, runsSet, auditsSet] = await Promise.allSettled([
     j<{ workspaces: ServerWorkspace[] }>(`${BP}/api/workspaces`),
     j<{ prompts: ServerPrompt[] }>(`${BP}/api/workspaces/${wsId}/prompts`),
     j<{ competitors: ServerCompetitor[] }>(`${BP}/api/workspaces/${wsId}/competitors`),
@@ -198,36 +199,55 @@ export async function loadFromServer(wsId: string): Promise<Partial<AppState>> {
     j<{ audits: ServerAudit[] }>(`${BP}/api/workspaces/${wsId}/audits`),
   ]);
 
-  const ws = wsRes.workspaces.find((w) => w.id === wsId);
+  const log = (label: string, res: PromiseSettledResult<unknown>) => {
+    if (res.status === "rejected") {
+      console.error(`[server-store] ${label} 로드 실패:`, res.reason);
+    }
+  };
+  log("workspaces", wsSet);
+  log("prompts", promptsSet);
+  log("competitors", competitorsSet);
+  log("runs", runsSet);
+  log("audits", auditsSet);
 
-  const partial: Partial<AppState> = {
-    customPrompts: promptsRes.prompts
+  const partial: Partial<AppState> = {};
+
+  if (promptsSet.status === "fulfilled") {
+    partial.customPrompts = promptsSet.value.prompts
       .filter((p) => p.active)
-      .map((p) => ({ text: p.text, tags: p.tags ?? [] })),
-    competitors: competitorsRes.competitors.map((c) => ({
+      .map((p) => ({ text: p.text, tags: p.tags ?? [] }));
+  }
+  if (competitorsSet.status === "fulfilled") {
+    partial.competitors = competitorsSet.value.competitors.map((c) => ({
       name: c.name,
       aliases: c.aliases ?? [],
       websites: c.websites ?? [],
-    })),
-    runs: runsRes.runs.map((r) => scrapeRunFromServer(r)),
-    auditHistory: auditsRes.audits.map((a) => ({
+    }));
+  }
+  if (runsSet.status === "fulfilled") {
+    partial.runs = runsSet.value.runs.map((r) => scrapeRunFromServer(r));
+  }
+  if (auditsSet.status === "fulfilled") {
+    partial.auditHistory = auditsSet.value.audits.map((a) => ({
       id: a.id,
       url: a.url,
       createdAt: a.createdAt,
       report: a.report,
       note: a.note ?? undefined,
-    })) as AuditHistoryEntry[],
-  };
-
-  if (ws) {
-    partial.brand = {
-      brandName: ws.brandConfig.brandName ?? "",
-      brandAliases: ws.brandConfig.brandAliases ?? "",
-      websites: ws.brandConfig.websites ?? [],
-      industry: ws.brandConfig.industry ?? "",
-      keywords: ws.brandConfig.keywords ?? "",
-      description: ws.brandConfig.description ?? "",
-    };
+    }));
+  }
+  if (wsSet.status === "fulfilled") {
+    const ws = wsSet.value.workspaces.find((w) => w.id === wsId);
+    if (ws) {
+      partial.brand = {
+        brandName: ws.brandConfig.brandName ?? "",
+        brandAliases: ws.brandConfig.brandAliases ?? "",
+        websites: ws.brandConfig.websites ?? [],
+        industry: ws.brandConfig.industry ?? "",
+        keywords: ws.brandConfig.keywords ?? "",
+        description: ws.brandConfig.description ?? "",
+      };
+    }
   }
 
   return partial;

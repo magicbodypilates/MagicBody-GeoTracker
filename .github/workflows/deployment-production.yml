@@ -1,0 +1,158 @@
+name: Deployment to production
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "components/**"
+      - "lib/**"
+      - "middleware.ts"
+      - "public/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.ts"
+      - "tsconfig.json"
+      - "postcss.config.mjs"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/**"
+      - "deploy/**"
+  workflow_dispatch:
+
+concurrency:
+  group: geotracker-production-deploy-${{ github.ref }}
+  cancel-in-progress: false # prod는 진행 중 실행 유지 (안전성)
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/magicbody-geo-tracker
+
+jobs:
+  deploy_auto:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker build & push
+        env:
+          FB_API_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY || 'AIzaSyAd3yrWQSRWp97eEP5EwiafYDY0mpEfBLA' }}
+          FB_AUTH_DOMAIN: ${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || 'classnaom.firebaseapp.com' }}
+          FB_PROJECT_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'classnaom' }}
+          FB_STORAGE_BUCKET: ${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'classnaom.appspot.com' }}
+          FB_MESSAGING_SENDER_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '1014101877161' }}
+          FB_APP_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID || '1:1014101877161:web:b155683e62af755cbfa4b8' }}
+        run: |
+          DEPLOY_TAG="prod-${GITHUB_SHA}"
+          CACHE_TAG="prod-cache"
+          IMAGE_REPO_LC=$(echo "${IMAGE_REPO}" | tr '[:upper:]' '[:lower:]')
+          DOCKER_BUILDKIT=1 docker build \
+            --no-cache \
+            --build-arg NEXT_PUBLIC_FIREBASE_API_KEY="${FB_API_KEY}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${FB_AUTH_DOMAIN}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID="${FB_PROJECT_ID}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET="${FB_STORAGE_BUCKET}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="${FB_MESSAGING_SENDER_ID}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_APP_ID="${FB_APP_ID}" \
+            -t ${IMAGE_REPO_LC}:${DEPLOY_TAG} \
+            -t ${IMAGE_REPO_LC}:${CACHE_TAG} .
+          docker push ${IMAGE_REPO_LC}:${DEPLOY_TAG}
+          docker push ${IMAGE_REPO_LC}:${CACHE_TAG}
+          echo "IMAGE_REPO_LC=${IMAGE_REPO_LC}" >> $GITHUB_ENV
+
+      - name: SSH to Azure VM and deploy
+        uses: appleboy/ssh-action@master
+        env:
+          FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
+          CONTAINER_NAME: "mbd-geo-tracker"
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 20m
+          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC
+          script: |
+            DEPLOY_TAG="prod-${{ github.sha }}"
+            docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
+            docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
+            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
+            nohup sh -c "docker image prune --force >/tmp/docker-prune.log 2>&1" >/dev/null 2>&1 &
+
+  deploy_manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker build & push
+        env:
+          FB_API_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY || 'AIzaSyAd3yrWQSRWp97eEP5EwiafYDY0mpEfBLA' }}
+          FB_AUTH_DOMAIN: ${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || 'classnaom.firebaseapp.com' }}
+          FB_PROJECT_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'classnaom' }}
+          FB_STORAGE_BUCKET: ${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'classnaom.appspot.com' }}
+          FB_MESSAGING_SENDER_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '1014101877161' }}
+          FB_APP_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID || '1:1014101877161:web:b155683e62af755cbfa4b8' }}
+        run: |
+          DEPLOY_TAG="prod-${GITHUB_SHA}"
+          CACHE_TAG="prod-cache"
+          IMAGE_REPO_LC=$(echo "${IMAGE_REPO}" | tr '[:upper:]' '[:lower:]')
+          docker pull ${IMAGE_REPO_LC}:${CACHE_TAG} 2>/dev/null || true
+          DOCKER_BUILDKIT=1 docker build \
+            --no-cache \
+            --build-arg NEXT_PUBLIC_FIREBASE_API_KEY="${FB_API_KEY}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${FB_AUTH_DOMAIN}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID="${FB_PROJECT_ID}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET="${FB_STORAGE_BUCKET}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="${FB_MESSAGING_SENDER_ID}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_APP_ID="${FB_APP_ID}" \
+            -t ${IMAGE_REPO_LC}:${DEPLOY_TAG} \
+            -t ${IMAGE_REPO_LC}:${CACHE_TAG} .
+          docker push ${IMAGE_REPO_LC}:${DEPLOY_TAG}
+          docker push ${IMAGE_REPO_LC}:${CACHE_TAG}
+          echo "IMAGE_REPO_LC=${IMAGE_REPO_LC}" >> $GITHUB_ENV
+
+      - name: SSH to Azure VM and deploy
+        uses: appleboy/ssh-action@master
+        env:
+          FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
+          CONTAINER_NAME: "mbd-geo-tracker"
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 20m
+          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC
+          script: |
+            DEPLOY_TAG="prod-${{ github.sha }}"
+            docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
+            docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
+            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
+            nohup sh -c "docker image prune --force >/tmp/docker-prune.log 2>&1" >/dev/null 2>&1 &

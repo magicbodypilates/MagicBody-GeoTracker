@@ -14,6 +14,7 @@ const InputSchema = z.object({
   prompt: z.string().min(3),
   requireSources: z.boolean().optional(),
   country: z.string().optional(),
+  forceRefresh: z.boolean().optional(),
 });
 
 export async function POST(req: NextRequest) {

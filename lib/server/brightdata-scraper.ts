@@ -67,6 +67,8 @@ type ScrapeRequest = {
   prompt: string;
   requireSources?: boolean;
   country?: string;
+  /** true면 캐시 읽기를 건너뛰고 Bright Data 를 새로 호출한다. 수동 테스트용. 결과는 여전히 캐시에 기록된다. */
+  forceRefresh?: boolean;
 };
 
 type StructuredCitation = {
@@ -98,7 +100,9 @@ function getDatasetId(provider: Provider) {
 }
 
 function buildCacheKey(input: ScrapeRequest) {
-  return JSON.stringify(input);
+  // forceRefresh 는 캐시 키에서 제외 — 같은 입력은 같은 키로 저장/조회되어야 한다.
+  const { forceRefresh: _ignore, ...keyable } = input;
+  return JSON.stringify(keyable);
 }
 
 function withAuthHeaders() {
@@ -409,12 +413,14 @@ export async function runAiScraper(
   }
 
   const cacheKey = buildCacheKey(request);
-  const cacheHit = inMemoryCache.get(cacheKey);
-  if (cacheHit && cacheHit.expiresAt > Date.now()) {
-    return {
-      ...cacheHit.value,
-      cached: true,
-    };
+  if (!request.forceRefresh) {
+    const cacheHit = inMemoryCache.get(cacheKey);
+    if (cacheHit && cacheHit.expiresAt > Date.now()) {
+      return {
+        ...cacheHit.value,
+        cached: true,
+      };
+    }
   }
 
   const inputRecord: Record<string, unknown> = {

@@ -981,6 +981,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
           provider,
           prompt: finalPrompt,
           requireSources: true,
+          // 사용자가 수동으로 실행 버튼을 누르는 경로는 항상 캐시 우회 — 편향 테스트 재현성 확보.
+          // 자동화(server-side runAiScraper 직접 호출)는 기본값대로 캐시 사용.
+          forceRefresh: true,
         }),
         signal: controller.signal,
       });

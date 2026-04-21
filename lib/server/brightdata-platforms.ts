@@ -58,6 +58,15 @@ export const PLATFORMS: PlatformConfig[] = [
   },
 ];
 
+/**
+ * 현재 실제 조사에 사용할 플랫폼 목록. Copilot / Grok 은 안정성·비용 이슈로 임시 제외.
+ * 재활성화 시 HIDDEN_PLATFORM_IDS 에서 제거.
+ */
+const HIDDEN_PLATFORM_IDS: SROPlatform[] = ["copilot", "grok"];
+export const VISIBLE_PLATFORMS: PlatformConfig[] = PLATFORMS.filter(
+  (p) => !HIDDEN_PLATFORM_IDS.includes(p.id),
+);
+
 function getApiKey(): string {
   return process.env.BRIGHT_DATA_KEY ?? "";
 }
@@ -265,7 +274,7 @@ export async function scrapeAllPlatforms(
   targetUrl: string
 ): Promise<PlatformResult[]> {
   const results = await Promise.all(
-    PLATFORMS.map((p) => scrapePlatform(p, keyword, targetUrl))
+    VISIBLE_PLATFORMS.map((p) => scrapePlatform(p, keyword, targetUrl))
   );
   return results;
 }

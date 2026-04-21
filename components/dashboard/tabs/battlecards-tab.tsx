@@ -15,8 +15,8 @@ function SentimentBadge({ sentiment }: { sentiment: string }) {
     negative: "bg-th-danger-soft text-th-danger",
   };
   return (
-    <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium capitalize ${styles[sentiment] ?? styles.neutral}`}>
-      {sentiment}
+    <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[sentiment] ?? styles.neutral}`}>
+      {sentiment === "positive" ? "긍정" : sentiment === "negative" ? "부정" : "중립"}
     </span>
   );
 }
@@ -48,7 +48,7 @@ export function BattlecardsTab({
   return (
     <div className="space-y-4">
       <label className="text-sm font-medium uppercase tracking-wider text-th-text-muted">
-        Competitors
+        경쟁사
       </label>
 
       {/* Competitor list */}
@@ -60,13 +60,13 @@ export function BattlecardsTab({
                 <span className="text-sm font-semibold text-th-text">{comp.name}</span>
                 {comp.aliases.length > 0 && (
                   <span className="text-xs text-th-text-muted">
-                    aka {comp.aliases.join(", ")}
+                    별칭: {comp.aliases.join(", ")}
                   </span>
                 )}
                 <button
                   onClick={() => removeCompetitor(i)}
                   className="ml-auto rounded p-1 text-xs text-th-text-muted hover:bg-th-danger-soft hover:text-th-danger"
-                  title="Remove"
+                  title="제거"
                 >
                   ✕
                 </button>
@@ -79,7 +79,7 @@ export function BattlecardsTab({
                       aliases: e.target.value.split(",").map((a) => a.trim()).filter(Boolean),
                     })
                   }
-                  placeholder="Aliases (comma-separated)"
+                  placeholder="별칭 (쉼표로 구분)"
                   className="bd-input rounded-lg p-2 text-xs"
                 />
                 <input
@@ -89,7 +89,7 @@ export function BattlecardsTab({
                       websites: e.target.value.split(",").map((w) => w.trim()).filter(Boolean),
                     })
                   }
-                  placeholder="Websites (comma-separated)"
+                  placeholder="웹사이트 (쉼표로 구분)"
                   className="bd-input rounded-lg p-2 text-xs"
                 />
               </div>
@@ -104,7 +104,7 @@ export function BattlecardsTab({
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCompetitor(); } }}
-          placeholder="Competitor name…"
+          placeholder="경쟁사 이름…"
           className="bd-input flex-1 rounded-lg p-2.5 text-sm"
         />
         <button
@@ -112,7 +112,7 @@ export function BattlecardsTab({
           disabled={!newName.trim()}
           className="rounded-lg bg-th-accent px-4 py-2.5 text-sm font-medium text-white hover:bg-th-accent-hover disabled:opacity-50"
         >
-          Add
+          추가
         </button>
       </div>
 
@@ -120,12 +120,12 @@ export function BattlecardsTab({
         onClick={onBuildBattlecards}
         className="bd-btn-primary rounded-lg px-4 py-2.5 text-sm"
       >
-        Build Battlecards
+        배틀카드 생성
       </button>
 
       {battlecards.length === 0 && (
         <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center text-sm text-th-text-muted">
-          No battlecards yet. Add competitors and click Build Battlecards.
+          아직 배틀카드가 없습니다. 경쟁사를 추가하고 배틀카드 생성을 클릭하세요.
         </div>
       )}
 
@@ -182,7 +182,7 @@ export function BattlecardsTab({
               {!isExpanded && card.sections && card.sections.length > 0 && (
                 <div className="border-t border-th-border-subtle px-4 py-2">
                   <span className="text-xs text-th-text-muted">
-                    {card.sections.length} detailed section{card.sections.length > 1 ? "s" : ""} — click to expand
+                    상세 섹션 {card.sections.length}개 — 클릭하여 펼치기
                   </span>
                 </div>
               )}

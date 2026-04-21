@@ -33,6 +33,15 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# GSC OAuth tokens (contains refresh_token — never commit)
+.gsc-tokens.json
+
+# Local dev runtime logs
+dev-server.log
+server-err.txt
+server-log.txt
+server-*.txt
+
 # vercel
 .vercel
 

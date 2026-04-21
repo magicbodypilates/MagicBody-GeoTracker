@@ -1,0 +1,27 @@
+# ==========================================================
+# 운영(prod) 서버 배포용 docker-compose.yml
+# 경로: /datadrive/apps/geo-tracker/docker-compose.yml
+# 컨테이너명: mbd-geo-tracker
+# 포트: 외부 노출 없음 (nginx_proxy 가 내부 네트워크로 접근)
+# 이미지 저장소: GHCR
+# 네트워크: nginxproxy_default (NPM nginx_proxy 와 동일)
+# ==========================================================
+version: "3.9"
+
+services:
+  mbd-geo-tracker:
+    image: ghcr.io/magicbodypilates/magicbody-geo-tracker:latest
+    container_name: mbd-geo-tracker
+    restart: unless-stopped
+    # 운영은 포트를 외부에 노출하지 않음 — NPM 이 컨테이너명으로 직접 라우팅
+    env_file:
+      - /datadrive/apps/geo-tracker/.env
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    networks:
+      - nginxproxy_default
+
+networks:
+  nginxproxy_default:
+    external: true

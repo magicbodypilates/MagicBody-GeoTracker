@@ -24,6 +24,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("[/api/scrape] failed:", message);
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

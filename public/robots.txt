@@ -1,0 +1,6 @@
+User-agent: *
+Disallow: /admin
+Disallow: /geo-tracker/admin
+Disallow: /api
+
+# 일반 크롤러는 전체 차단 (로컬 대시보드)

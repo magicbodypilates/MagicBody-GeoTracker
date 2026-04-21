@@ -366,6 +366,7 @@ export const DEMO_STATE: AppState = {
   runs: generateRuns(),
   auditUrl: "https://geoaeotracker.com",
   auditReport: demoAuditReport,
+  auditHistory: [],
   scheduleEnabled: true,
   scheduleIntervalMs: 21600000,
   lastScheduledRun: "2026-02-14T06:00:00.000Z",

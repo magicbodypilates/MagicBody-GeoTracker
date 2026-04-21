@@ -103,9 +103,9 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
             <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
           </svg>
         </div>
-        <p className="text-sm font-medium text-th-text">No citations collected yet</p>
+        <p className="text-sm font-medium text-th-text">아직 수집된 인용이 없습니다</p>
         <p className="mt-1 text-sm text-th-text-secondary">
-          Run prompts across AI models to see which sources get cited.
+          AI 모델에 프롬프트를 실행하여 어떤 출처가 인용되는지 확인하세요.
         </p>
       </div>
     );
@@ -116,10 +116,10 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
       {/* ── Header row: stats + controls ── */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex items-center gap-5">
-          <Stat label="Domains" value={domainGroups.length} />
-          <Stat label="Citations" value={totalCitations} />
-          <Stat label="URLs" value={partnerLeaderboard.length} />
-          <Stat label="Prompts" value={uniquePrompts} />
+          <Stat label="도메인" value={domainGroups.length} />
+          <Stat label="인용" value={totalCitations} />
+          <Stat label="URL" value={partnerLeaderboard.length} />
+          <Stat label="프롬프트" value={uniquePrompts} />
         </div>
 
         <div className="flex items-center gap-2">
@@ -129,13 +129,13 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
               onClick={() => setView("domain")}
               className={`px-2.5 py-1 rounded-l-md transition-colors ${view === "domain" ? "bg-th-accent-soft text-th-text font-medium" : "text-th-text-muted hover:text-th-text-secondary"}`}
             >
-              Domains
+              도메인
             </button>
             <button
               onClick={() => setView("url")}
               className={`px-2.5 py-1 rounded-r-md transition-colors ${view === "url" ? "bg-th-accent-soft text-th-text font-medium" : "text-th-text-muted hover:text-th-text-secondary"}`}
             >
-              URLs
+              URL
             </button>
           </div>
 
@@ -144,16 +144,16 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
             onChange={(e) => setSortBy(e.target.value as SortKey)}
             className="bd-input rounded-md px-2 py-1 text-xs"
           >
-            <option value="citations">Sort: Citations</option>
-            <option value="pages">Sort: Pages</option>
-            <option value="prompts">Sort: Prompts</option>
-            <option value="domain">Sort: A-Z</option>
+            <option value="citations">정렬: 인용 수</option>
+            <option value="pages">정렬: 페이지 수</option>
+            <option value="prompts">정렬: 프롬프트 수</option>
+            <option value="domain">정렬: 가나다순</option>
           </select>
 
           <button
             onClick={exportCsv}
             className="rounded-md border border-th-border px-2 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text-secondary transition-colors"
-            title="Export CSV"
+            title="CSV 내보내기"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -172,7 +172,7 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Filter by domain or URL…"
+          placeholder="도메인 또는 URL로 필터…"
           className="bd-input w-full rounded-md py-1.5 pl-9 pr-8 text-sm"
         />
         {search && (
@@ -184,10 +184,10 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
       <div className="rounded-lg border border-th-border overflow-hidden">
         {/* Column headers */}
         <div className="grid grid-cols-[1fr_64px_64px_64px] gap-2 bg-th-card px-4 py-2 text-xs font-medium uppercase tracking-wider text-th-text-muted border-b border-th-border">
-          <span>{view === "domain" ? "Source" : "URL"}</span>
-          <span className="text-right">Cited</span>
-          <span className="text-right">{view === "domain" ? "Pages" : ""}</span>
-          <span className="text-right">Prompts</span>
+          <span>{view === "domain" ? "출처" : "URL"}</span>
+          <span className="text-right">인용</span>
+          <span className="text-right">{view === "domain" ? "페이지" : ""}</span>
+          <span className="text-right">프롬프트</span>
         </div>
 
         {/* Rows */}

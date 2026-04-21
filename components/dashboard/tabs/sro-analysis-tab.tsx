@@ -36,6 +36,8 @@ interface SROState {
   llmAnalysis: LLMAnalysisResult | null;
 }
 
+const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
 const INITIAL: SROState = {
   targetUrl: "",
   keyword: "",
@@ -51,15 +53,28 @@ const INITIAL: SROState = {
 };
 
 const STAGE_LABELS: Record<AnalysisStage, string> = {
-  idle: "Ready",
-  grounding: "Running Gemini Grounding…",
-  platforms: "Checking AI Platforms…",
-  serp: "Fetching SERP Data…",
-  scraping: "Scraping Pages…",
-  context: "Analyzing Site Context…",
-  analyzing: "Running SRO Analysis…",
-  done: "Complete",
-  error: "Error",
+  idle: "대기 중",
+  grounding: "Gemini 그라운딩 실행 중…",
+  platforms: "AI 플랫폼 확인 중…",
+  serp: "SERP 데이터 조회 중…",
+  scraping: "페이지 스크래핑 중…",
+  context: "사이트 컨텍스트 분석 중…",
+  analyzing: "SRO 분석 실행 중…",
+  done: "완료",
+  error: "오류",
+};
+
+const PRIORITY_LABELS: Record<string, string> = {
+  high: "높음",
+  medium: "중간",
+  low: "낮음",
+};
+
+const CATEGORY_LABELS: Record<string, string> = {
+  content: "콘텐츠",
+  structure: "구조",
+  technical: "기술",
+  strategy: "전략",
 };
 
 // ── Helper components ─────────────────────────────────────
@@ -103,7 +118,7 @@ function PriorityBadge({ priority }: { priority: LLMRecommendation["priority"] }
   };
   return (
     <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${colors[priority]}`}>
-      {priority}
+      {PRIORITY_LABELS[priority] ?? priority}
     </span>
   );
 }
@@ -117,7 +132,7 @@ function CategoryBadge({ category }: { category: LLMRecommendation["category"] }
   };
   return (
     <span className="inline-flex items-center gap-1 rounded-full border border-th-border bg-th-card-alt px-2 py-0.5 text-xs text-th-text-secondary">
-      {icons[category] || "📋"} {category}
+      {icons[category] || "📋"} {CATEGORY_LABELS[category] ?? category}
     </span>
   );
 }
@@ -169,19 +184,14 @@ export function SROAnalysisTab() {
     try {
       // 1. Gemini Grounding
       try {
-        const resp = await fetch("/api/analyze", {
+        const resp = await fetch(BP + "/api/grounding", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: `Analyze the Gemini grounding for "${s.keyword}" targeting ${s.targetUrl}. Call the /api/sro-analyze endpoint on the server side.`,
-            maxTokens: 256,
-          }),
+          body: JSON.stringify({ keyword: s.keyword, targetUrl: s.targetUrl }),
         });
-        // Actually call the dedicated grounding endpoint if available,
-        // but since there's no grounding API route (Gemini runs server-side only),
-        // we skip grounding on the client and let the final SRO analysis handle it.
-        // For now we'll try the grounding via the bulk proxy or skip gracefully.
-        void resp;
+        if (resp.ok) {
+          grounding = await resp.json();
+        }
       } catch {
         // Grounding is optional
       }
@@ -189,7 +199,7 @@ export function SROAnalysisTab() {
 
       // 2. Platform Citations
       try {
-        const resp = await fetch("/api/brightdata-platforms", {
+        const resp = await fetch(BP + "/api/brightdata-platforms", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ keyword: s.keyword, targetUrl: s.targetUrl }),
@@ -204,7 +214,7 @@ export function SROAnalysisTab() {
 
       // 3. SERP
       try {
-        const resp = await fetch("/api/serp", {
+        const resp = await fetch(BP + "/api/serp", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ keyword: s.keyword, targetUrl: s.targetUrl }),
@@ -219,7 +229,7 @@ export function SROAnalysisTab() {
 
       // 4. Scrape target + competitors
       try {
-        const resp = await fetch("/api/unlocker", {
+        const resp = await fetch(BP + "/api/unlocker", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: s.targetUrl }),
@@ -233,7 +243,7 @@ export function SROAnalysisTab() {
 
       if (serp && serp.topCompetitors.length > 0) {
         try {
-          const resp = await fetch("/api/unlocker", {
+          const resp = await fetch(BP + "/api/unlocker", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ urls: serp.topCompetitors.slice(0, 3) }),
@@ -249,7 +259,7 @@ export function SROAnalysisTab() {
 
       // 5. Site Context
       try {
-        const resp = await fetch("/api/site-context", {
+        const resp = await fetch(BP + "/api/site-context", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: s.targetUrl }),
@@ -264,7 +274,7 @@ export function SROAnalysisTab() {
 
       // 6. SRO Analysis
       try {
-        const resp = await fetch("/api/sro-analyze", {
+        const resp = await fetch(BP + "/api/sro-analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -311,7 +321,7 @@ export function SROAnalysisTab() {
     <div className="space-y-4">
       {/* Input Bar */}
       <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-        <div className="mb-3 text-sm font-semibold text-th-text">SRO Analysis</div>
+        <div className="mb-3 text-sm font-semibold text-th-text">SRO 분석</div>
         <div className="flex flex-col gap-2 sm:flex-row">
           <input
             value={s.targetUrl}
@@ -323,7 +333,7 @@ export function SROAnalysisTab() {
           <input
             value={s.keyword}
             onChange={(e) => setS((prev) => ({ ...prev, keyword: e.target.value }))}
-            placeholder="Target keyword"
+            placeholder="타겟 키워드"
             className="bd-input w-full rounded-lg p-2.5 text-sm sm:w-48"
             disabled={isRunning}
           />
@@ -332,7 +342,7 @@ export function SROAnalysisTab() {
             disabled={isRunning || !s.targetUrl || !s.keyword}
             className="bd-btn-primary whitespace-nowrap rounded-lg px-5 py-2.5 text-sm disabled:opacity-50"
           >
-            {isRunning ? "Running…" : "Analyze"}
+            {isRunning ? "실행 중…" : "분석"}
           </button>
         </div>
         {isRunning && (
@@ -355,7 +365,7 @@ export function SROAnalysisTab() {
             <div className="flex items-start gap-5 rounded-xl border border-th-border bg-th-card p-5 shadow-sm">
               <ScoreRing score={s.llmAnalysis.overallScore} />
               <div className="flex-1">
-                <div className="text-lg font-semibold text-th-text">SRO Score</div>
+                <div className="text-lg font-semibold text-th-text">SRO 점수</div>
                 <p className="mt-1 text-sm leading-relaxed text-th-text-secondary">
                   {s.llmAnalysis.summary}
                 </p>
@@ -366,16 +376,16 @@ export function SROAnalysisTab() {
           {/* Grounding Summary */}
           {s.grounding && (
             <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-              <div className="mb-2 text-sm font-semibold text-th-text">🔬 Gemini Grounding</div>
+              <div className="mb-2 text-sm font-semibold text-th-text">🔬 Gemini 그라운딩</div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Stat label="Selection Rate" value={`${(s.grounding.selectionRate * 100).toFixed(1)}%`} />
-                <Stat label="Target Found" value={s.grounding.targetUrlFound ? "Yes" : "No"} />
-                <Stat label="Sources" value={String(s.grounding.chunks.length)} />
-                <Stat label="Target Words" value={`${s.grounding.targetGroundingWords} / ${s.grounding.totalGroundingWords}`} />
+                <Stat label="선택률" value={`${(s.grounding.selectionRate * 100).toFixed(1)}%`} />
+                <Stat label="타겟 발견" value={s.grounding.targetUrlFound ? "예" : "아니오"} />
+                <Stat label="출처" value={String(s.grounding.chunks.length)} />
+                <Stat label="타겟 단어수" value={`${s.grounding.targetGroundingWords} / ${s.grounding.totalGroundingWords}`} />
               </div>
               {s.grounding.targetSnippets.length > 0 && (
                 <div className="mt-3 space-y-1">
-                  <div className="text-xs font-medium text-th-text-muted">Grounding snippets attributed to your page:</div>
+                  <div className="text-xs font-medium text-th-text-muted">내 페이지에 귀속된 그라운딩 스니펫:</div>
                   {s.grounding.targetSnippets.slice(0, 3).map((snip, i) => (
                     <div key={i} className="rounded-lg border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-secondary">
                       &ldquo;{snip.slice(0, 300)}&rdquo;
@@ -389,7 +399,7 @@ export function SROAnalysisTab() {
           {/* Platform Citations */}
           {s.platforms.length > 0 && (
             <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-              <div className="mb-2 text-sm font-semibold text-th-text">🌐 Cross-Platform Citations</div>
+              <div className="mb-2 text-sm font-semibold text-th-text">🌐 플랫폼 교차 인용</div>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                 {s.platforms.map((p) => (
                   <div
@@ -405,7 +415,7 @@ export function SROAnalysisTab() {
                       {p.status === "done" ? (p.targetUrlCited ? "✓" : "✗") : p.status === "error" ? "⚠" : "…"}
                     </div>
                     <div className="text-[10px] text-th-text-muted">
-                      {p.status === "done" ? `${p.citations.length} citations` : p.status}
+                      {p.status === "done" ? `${p.citations.length}건 인용` : p.status}
                     </div>
                   </div>
                 ))}
@@ -415,7 +425,7 @@ export function SROAnalysisTab() {
                 const done = s.platforms.filter((p) => p.status === "done").length;
                 return (
                   <div className="mt-2 text-xs text-th-text-muted">
-                    Cited on {cited}/{done} platforms
+                    {done}개 중 {cited}개 플랫폼에서 인용됨
                   </div>
                 );
               })()}
@@ -425,11 +435,11 @@ export function SROAnalysisTab() {
           {/* SERP Data */}
           {s.serp && (
             <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-              <div className="mb-2 text-sm font-semibold text-th-text">📊 SERP Ranking</div>
+              <div className="mb-2 text-sm font-semibold text-th-text">📊 SERP 순위</div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                <Stat label="Organic Rank" value={s.serp.targetRank ? `#${s.serp.targetRank}` : "Not found"} />
-                <Stat label="Total Results" value={String(s.serp.totalResults)} />
-                <Stat label="Top Competitors" value={String(s.serp.topCompetitors.length)} />
+                <Stat label="자연 검색 순위" value={s.serp.targetRank ? `#${s.serp.targetRank}` : "없음"} />
+                <Stat label="전체 결과 수" value={String(s.serp.totalResults)} />
+                <Stat label="상위 경쟁사" value={String(s.serp.topCompetitors.length)} />
               </div>
               {s.serp.organicResults.length > 0 && (
                 <div className="mt-3 space-y-1 max-h-48 overflow-y-auto">
@@ -455,7 +465,7 @@ export function SROAnalysisTab() {
           {/* Recommendations */}
           {s.llmAnalysis && s.llmAnalysis.recommendations.length > 0 && (
             <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-              <div className="mb-3 text-sm font-semibold text-th-text">💡 Recommendations</div>
+              <div className="mb-3 text-sm font-semibold text-th-text">💡 권장사항</div>
               <div className="space-y-3">
                 {s.llmAnalysis.recommendations.map((rec, i) => (
                   <div key={i} className="rounded-lg border border-th-border bg-th-card-alt p-3">
@@ -488,7 +498,7 @@ export function SROAnalysisTab() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {s.llmAnalysis.contentGaps.length > 0 && (
                 <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-                  <div className="mb-2 text-sm font-semibold text-th-text">🔍 Content Gaps</div>
+                  <div className="mb-2 text-sm font-semibold text-th-text">🔍 콘텐츠 갭</div>
                   <ul className="space-y-1">
                     {s.llmAnalysis.contentGaps.map((gap, i) => (
                       <li key={i} className="flex items-start gap-1.5 text-xs text-th-text-secondary">
@@ -501,7 +511,7 @@ export function SROAnalysisTab() {
               )}
               {s.llmAnalysis.competitorInsights.length > 0 && (
                 <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-                  <div className="mb-2 text-sm font-semibold text-th-text">🏆 Competitor Insights</div>
+                  <div className="mb-2 text-sm font-semibold text-th-text">🏆 경쟁사 인사이트</div>
                   <ul className="space-y-1">
                     {s.llmAnalysis.competitorInsights.map((insight, i) => (
                       <li key={i} className="flex items-start gap-1.5 text-xs text-th-text-secondary">
@@ -518,12 +528,12 @@ export function SROAnalysisTab() {
           {/* Target Page Info */}
           {s.targetPage && !s.targetPage.error && (
             <div className="rounded-xl border border-th-border bg-th-card p-4 shadow-sm">
-              <div className="mb-2 text-sm font-semibold text-th-text">📄 Target Page</div>
+              <div className="mb-2 text-sm font-semibold text-th-text">📄 타겟 페이지</div>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <Stat label="Title" value={s.targetPage.title || "—"} />
-                <Stat label="Word Count" value={String(s.targetPage.wordCount)} />
-                <Stat label="Headings" value={String(s.targetPage.headings.length)} />
-                <Stat label="Domain" value={s.targetPage.domain} />
+                <Stat label="제목" value={s.targetPage.title || "—"} />
+                <Stat label="단어 수" value={String(s.targetPage.wordCount)} />
+                <Stat label="헤딩 수" value={String(s.targetPage.headings.length)} />
+                <Stat label="도메인" value={s.targetPage.domain} />
               </div>
             </div>
           )}
@@ -534,11 +544,10 @@ export function SROAnalysisTab() {
       {s.stage === "idle" && !s.llmAnalysis && (
         <div className="rounded-xl border border-th-border bg-th-card-alt p-8 text-center">
           <div className="text-2xl mb-2">🎯</div>
-          <div className="text-sm font-medium text-th-text mb-1">Selection Rate Optimization</div>
+          <div className="text-sm font-medium text-th-text mb-1">선택률 최적화 (SRO)</div>
           <p className="text-xs text-th-text-muted max-w-md mx-auto leading-relaxed">
-            Enter a target URL and keyword to analyze how well your content is being selected by AI
-            systems as a grounding source. The analysis checks Gemini grounding, cross-platform
-            citations, SERP rankings, and provides actionable recommendations.
+            타겟 URL과 키워드를 입력하여 AI 시스템이 귀하의 콘텐츠를 그라운딩 출처로 얼마나 잘 선택하는지 분석합니다.
+            Gemini 그라운딩, 플랫폼 교차 인용, SERP 순위를 확인하고 실행 가능한 권장사항을 제공합니다.
           </p>
         </div>
       )}

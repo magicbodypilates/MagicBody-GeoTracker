@@ -36,21 +36,33 @@ Key SRO concepts:
 
 Your task: Analyze all provided data and produce a JSON response with specific, actionable recommendations to improve the target URL's Selection Rate for the given keyword.
 
+**IMPORTANT — LANGUAGE REQUIREMENT:**
+All user-facing text fields MUST be written in **Korean (한국어)**. Specifically:
+- "summary" — Korean
+- "title" — Korean
+- "description" — Korean
+- "actionItems" — Korean
+- "contentGaps" — Korean
+- "competitorInsights" — Korean
+
+Keep "category" and "priority" as English enum values only (content/structure/technical/strategy, high/medium/low) — these are translated in the UI.
+Technical terms (URL, API, SERP, schema, JSON-LD, AEO, SRO, LLM 등) may remain in English within otherwise-Korean sentences.
+
 Respond ONLY with valid JSON matching this schema:
 {
   "overallScore": <number 0-100>,
-  "summary": "<string: 2-3 sentence executive summary>",
+  "summary": "<한국어 2-3문장 요약>",
   "recommendations": [
     {
       "category": "<content|structure|technical|strategy>",
       "priority": "<high|medium|low>",
-      "title": "<short title>",
-      "description": "<detailed explanation>",
-      "actionItems": ["<specific action 1>", "<specific action 2>"]
+      "title": "<한국어 짧은 제목>",
+      "description": "<한국어 상세 설명>",
+      "actionItems": ["<한국어 구체적 액션 1>", "<한국어 구체적 액션 2>"]
     }
   ],
-  "contentGaps": ["<gap 1>", "<gap 2>"],
-  "competitorInsights": ["<insight 1>", "<insight 2>"]
+  "contentGaps": ["<한국어 갭 1>", "<한국어 갭 2>"],
+  "competitorInsights": ["<한국어 인사이트 1>", "<한국어 인사이트 2>"]
 }`;
 
 function truncate(text: string, maxLen: number): string {

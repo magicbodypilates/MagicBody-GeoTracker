@@ -182,9 +182,9 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
             <path d="M9 18h6" /><path d="M10 22h4" />
           </svg>
         </div>
-        <p className="text-sm font-medium text-th-text">No citation opportunities found yet</p>
+        <p className="text-sm font-medium text-th-text">아직 인용 기회가 발견되지 않았습니다</p>
         <p className="mt-1 text-sm text-th-text-secondary">
-          Run prompts to discover URLs that AI models cite in responses where your brand isn&apos;t mentioned. These are high-value outreach targets.
+          프롬프트를 실행하여 브랜드가 언급되지 않는 응답에서 AI 모델이 인용하는 URL을 찾아보세요. 높은 가치의 아웃리치 타겟입니다.
         </p>
       </div>
     );
@@ -195,13 +195,13 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
       {/* ── Header: stats + controls ── */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex items-center gap-5">
-          <Stat label="Opportunities" value={stats.totalOpportunities} accent />
-          <Stat label="Domains" value={stats.uniqueDomains} />
+          <Stat label="기회" value={stats.totalOpportunities} accent />
+          <Stat label="도메인" value={stats.uniqueDomains} />
           {stats.highPriorityCount > 0 && (
-            <Stat label="High Priority" value={stats.highPriorityCount} danger />
+            <Stat label="높은 우선순위" value={stats.highPriorityCount} danger />
           )}
           {stats.uniqueCompetitors > 0 && (
-            <Stat label="Competitors" value={stats.uniqueCompetitors} />
+            <Stat label="경쟁사" value={stats.uniqueCompetitors} />
           )}
         </div>
 
@@ -212,13 +212,13 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
               onClick={() => setView("domain")}
               className={`px-2.5 py-1 rounded-l-md transition-colors ${view === "domain" ? "bg-th-accent-soft text-th-text font-medium" : "text-th-text-muted hover:text-th-text-secondary"}`}
             >
-              Domains
+              도메인
             </button>
             <button
               onClick={() => setView("url")}
               className={`px-2.5 py-1 rounded-r-md transition-colors ${view === "url" ? "bg-th-accent-soft text-th-text font-medium" : "text-th-text-muted hover:text-th-text-secondary"}`}
             >
-              URLs
+              URL
             </button>
           </div>
 
@@ -227,16 +227,16 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
             onChange={(e) => setSortBy(e.target.value as SortKey)}
             className="bd-input rounded-md px-2 py-1 text-xs"
           >
-            <option value="citations">Sort: Citations</option>
-            <option value="prompts">Sort: Prompts</option>
-            <option value="competitors">Sort: Competitors</option>
-            <option value="domain">Sort: A-Z</option>
+            <option value="citations">정렬: 인용 수</option>
+            <option value="prompts">정렬: 프롬프트 수</option>
+            <option value="competitors">정렬: 경쟁사 수</option>
+            <option value="domain">정렬: 가나다순</option>
           </select>
 
           <button
             onClick={exportCsv}
             className="rounded-md border border-th-border px-2 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text-secondary transition-colors"
-            title="Export CSV"
+            title="CSV 내보내기"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -249,10 +249,10 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
 
       {/* ── Inline explanation ── */}
       <p className="text-xs text-th-text-muted leading-relaxed">
-        URLs cited by AI models in responses where <span className="font-medium text-th-text-secondary">your brand isn&apos;t mentioned</span>.
-        Getting listed on these pages could improve your AI visibility.
+        <span className="font-medium text-th-text-secondary">브랜드가 언급되지 않은</span> 응답에서 AI 모델이 인용한 URL입니다.
+        이 페이지에 등재되면 AI 가시성을 개선할 수 있습니다.
         {stats.highPriorityCount > 0 && (
-          <> Items marked <span className="font-semibold text-th-danger">high priority</span> also mention your competitors.</>
+          <> <span className="font-semibold text-th-danger">높은 우선순위</span>로 표시된 항목은 경쟁사도 함께 언급됩니다.</>
         )}
       </p>
 
@@ -264,7 +264,7 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Filter by domain, URL, or competitor…"
+          placeholder="도메인, URL 또는 경쟁사로 필터…"
           className="bd-input w-full rounded-md py-1.5 pl-9 pr-8 text-sm"
         />
         {search && (
@@ -277,18 +277,18 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
         {/* Column headers */}
         {view === "domain" ? (
           <div className="grid grid-cols-[1fr_72px_72px_72px_64px] gap-2 bg-th-card px-4 py-2 text-xs font-medium uppercase tracking-wider text-th-text-muted border-b border-th-border">
-            <span>Source</span>
-            <span className="text-right">Cited</span>
-            <span className="text-right">Pages</span>
-            <span className="text-right">Comp.</span>
-            <span className="text-center">Priority</span>
+            <span>출처</span>
+            <span className="text-right">인용</span>
+            <span className="text-right">페이지</span>
+            <span className="text-right">경쟁사</span>
+            <span className="text-center">우선순위</span>
           </div>
         ) : (
           <div className="grid grid-cols-[1fr_72px_96px_64px] gap-2 bg-th-card px-4 py-2 text-xs font-medium uppercase tracking-wider text-th-text-muted border-b border-th-border">
             <span>URL</span>
-            <span className="text-right">Cited</span>
-            <span className="text-right">Competitors</span>
-            <span className="text-center">Priority</span>
+            <span className="text-right">인용</span>
+            <span className="text-right">경쟁사</span>
+            <span className="text-center">우선순위</span>
           </div>
         )}
 
@@ -312,7 +312,7 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
                       <span className="text-right text-sm text-th-text-secondary tabular-nums">{item.competitors.length}</span>
                       <div className="flex justify-center">
                         {item.hasHighPriority ? (
-                          <span className="rounded bg-th-danger-soft px-1.5 py-0.5 text-[10px] font-bold text-th-danger uppercase tracking-wide">High</span>
+                          <span className="rounded bg-th-danger-soft px-1.5 py-0.5 text-[10px] font-bold text-th-danger uppercase tracking-wide">높음</span>
                         ) : (
                           <span className="rounded bg-th-card-alt px-1.5 py-0.5 text-[10px] font-medium text-th-text-muted uppercase tracking-wide">—</span>
                         )}
@@ -347,7 +347,7 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
                             <span className="text-right text-xs text-th-text-muted tabular-nums">{opp.competitorsMentioned.length}</span>
                             <div className="flex justify-center">
                               {opp.highPriority ? (
-                                <span className="h-2 w-2 rounded-full bg-th-danger" title="High priority" />
+                                <span className="h-2 w-2 rounded-full bg-th-danger" title="높은 우선순위" />
                               ) : (
                                 <span className="h-2 w-2 rounded-full bg-th-border" />
                               )}
@@ -407,7 +407,7 @@ export function CitationOpportunitiesTab({ runs, brandWebsites = [] }: CitationO
                   </div>
                   <div className="flex justify-center">
                     {opp.highPriority ? (
-                      <span className="rounded bg-th-danger-soft px-1.5 py-0.5 text-[10px] font-bold text-th-danger uppercase">High</span>
+                      <span className="rounded bg-th-danger-soft px-1.5 py-0.5 text-[10px] font-bold text-th-danger uppercase">높음</span>
                     ) : (
                       <span className="text-[10px] text-th-text-muted">—</span>
                     )}

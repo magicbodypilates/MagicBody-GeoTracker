@@ -72,10 +72,10 @@ export async function POST(req: NextRequest) {
       label: "llms.txt",
       category: "discovery",
       pass: llmsRes.ok,
-      value: llmsRes.ok ? "Present" : "Missing",
+      value: llmsRes.ok ? "있음" : "없음",
       detail: llmsRes.ok
-        ? `Found at ${target.origin}/llms.txt (${llmsRes.text.length} bytes)`
-        : "No llms.txt file found. This file tells AI models about your site\u2019s purpose and preferred content.",
+        ? `${target.origin}/llms.txt 에 존재 (${llmsRes.text.length} bytes)`
+        : "llms.txt 파일이 없습니다. 이 파일은 AI 모델에게 사이트의 목적과 우선 콘텐츠를 알려줍니다.",
     });
 
     // 2. llms-full.txt
@@ -84,10 +84,10 @@ export async function POST(req: NextRequest) {
       label: "llms-full.txt",
       category: "discovery",
       pass: llmsFullRes.ok,
-      value: llmsFullRes.ok ? "Present" : "Missing",
+      value: llmsFullRes.ok ? "있음" : "없음",
       detail: llmsFullRes.ok
-        ? `Found at ${target.origin}/llms-full.txt (${llmsFullRes.text.length} bytes)`
-        : "No llms-full.txt found. This extended file provides detailed context for AI models.",
+        ? `${target.origin}/llms-full.txt 에 존재 (${llmsFullRes.text.length} bytes)`
+        : "llms-full.txt 가 없습니다. AI 모델에 상세 컨텍스트를 제공하는 확장 파일입니다.",
     });
 
     // 3. robots.txt ‑ AI bot access
@@ -107,15 +107,15 @@ export async function POST(req: NextRequest) {
     const botAccessOk = robotsRes.ok && blockedBots.length <= 2;
     checks.push({
       id: "robots_ai_access",
-      label: "AI Bot Access (robots.txt)",
+      label: "AI 봇 접근 (robots.txt)",
       category: "discovery",
       pass: botAccessOk,
-      value: robotsRes.ok ? `${blockedBots.length} blocked / ${aiBots.length} checked` : "No robots.txt",
+      value: robotsRes.ok ? `${aiBots.length}개 중 ${blockedBots.length}개 차단` : "robots.txt 없음",
       detail: robotsRes.ok
         ? blockedBots.length > 0
-          ? `Blocked: ${blockedBots.join(", ")}. Allowed: ${allowedBots.slice(0, 5).join(", ")}${allowedBots.length > 5 ? "\u2026" : ""}`
-          : "All major AI bots are allowed to crawl."
-        : "No robots.txt found \u2014 AI bots will default to crawling all pages.",
+          ? `차단됨: ${blockedBots.join(", ")}. 허용됨: ${allowedBots.slice(0, 5).join(", ")}${allowedBots.length > 5 ? "\u2026" : ""}`
+          : "주요 AI 봇이 모두 크롤링 허용 상태입니다."
+        : "robots.txt 파일이 없습니다 \u2014 AI 봇이 기본적으로 모든 페이지를 크롤링합니다.",
     });
 
     // 4. Sitemap
@@ -123,13 +123,13 @@ export async function POST(req: NextRequest) {
     const sitemapUrlCount = (sitemapRes.text.match(/<url>/gi) ?? []).length;
     checks.push({
       id: "sitemap",
-      label: "XML Sitemap",
+      label: "XML 사이트맵",
       category: "discovery",
       pass: hasSitemap,
-      value: hasSitemap ? `${sitemapUrlCount} URLs` : "Missing",
+      value: hasSitemap ? `URL ${sitemapUrlCount}개` : "없음",
       detail: hasSitemap
-        ? `Sitemap found with ${sitemapUrlCount} URL entries.`
-        : "No sitemap.xml found. A sitemap helps AI systems discover and index your pages.",
+        ? `사이트맵에 ${sitemapUrlCount}개의 URL 항목이 등록되어 있습니다.`
+        : "sitemap.xml 파일이 없습니다. 사이트맵은 AI 시스템이 페이지를 발견하고 색인하도록 돕습니다.",
     });
 
     // ═══════════════════════════════════════════════════
@@ -154,13 +154,13 @@ export async function POST(req: NextRequest) {
     }
     checks.push({
       id: "json_ld",
-      label: "JSON-LD Structured Data",
+      label: "JSON-LD 구조화 데이터",
       category: "structure",
       pass: jsonLdBlocks.length > 0,
-      value: jsonLdBlocks.length > 0 ? `${jsonLdBlocks.length} blocks (${schemaTypes.length} types)` : "None found",
+      value: jsonLdBlocks.length > 0 ? `${jsonLdBlocks.length}개 블록 (${schemaTypes.length}개 타입)` : "없음",
       detail: schemaTypes.length > 0
-        ? `Schema types: ${[...new Set(schemaTypes)].join(", ")}`
-        : "No JSON-LD structured data found. Add Organization, Product, FAQPage, or Article schema.",
+        ? `스키마 타입: ${[...new Set(schemaTypes)].join(", ")}`
+        : "JSON-LD 구조화 데이터가 없습니다. Organization, Product, FAQPage, Article 등의 스키마를 추가하세요.",
     });
 
     // 6. FAQ Schema
@@ -168,15 +168,15 @@ export async function POST(req: NextRequest) {
     const hasFaqHtml = /<details|<summary|class="faq"|id="faq"|class="accordion"/i.test(html);
     checks.push({
       id: "faq_schema",
-      label: "FAQ / Q&A Schema",
+      label: "FAQ / Q&A 스키마",
       category: "structure",
       pass: hasFaqSchema || hasFaqHtml,
-      value: hasFaqSchema ? "Schema present" : hasFaqHtml ? "HTML only (no schema)" : "Missing",
+      value: hasFaqSchema ? "스키마 있음" : hasFaqHtml ? "HTML만 있음 (스키마 없음)" : "없음",
       detail: hasFaqSchema
-        ? "FAQPage schema found \u2014 AI models can extract Q&A pairs."
+        ? "FAQPage 스키마가 있습니다 \u2014 AI 모델이 Q&A 쌍을 추출할 수 있습니다."
         : hasFaqHtml
-          ? "FAQ-like HTML elements found but no FAQPage schema markup. Add JSON-LD FAQPage schema."
-          : "No FAQ content or schema detected. FAQ schema dramatically improves AI answer citations.",
+          ? "FAQ 형태의 HTML 요소는 있지만 FAQPage 스키마 마크업이 없습니다. JSON-LD FAQPage 스키마를 추가하세요."
+          : "FAQ 콘텐츠나 스키마가 감지되지 않습니다. FAQ 스키마는 AI 답변 인용률을 크게 향상시킵니다.",
     });
 
     // 7. Open Graph Tags
@@ -187,13 +187,13 @@ export async function POST(req: NextRequest) {
     const ogComplete = ogTitle && ogDesc && ogImage;
     checks.push({
       id: "open_graph",
-      label: "Open Graph Tags",
+      label: "Open Graph 태그",
       category: "structure",
       pass: ogComplete,
-      value: `${ogTags.length} tags${ogComplete ? " (complete)" : ""}`,
+      value: `태그 ${ogTags.length}개${ogComplete ? " (완전)" : ""}`,
       detail: ogComplete
-        ? "og:title, og:description, and og:image all present."
-        : `Missing: ${[!ogTitle && "og:title", !ogDesc && "og:description", !ogImage && "og:image"].filter(Boolean).join(", ")}. OG tags help AI tools preview and cite your content.`,
+        ? "og:title, og:description, og:image가 모두 존재합니다."
+        : `누락: ${[!ogTitle && "og:title", !ogDesc && "og:description", !ogImage && "og:image"].filter(Boolean).join(", ")}. OG 태그는 AI 도구가 콘텐츠를 미리보기하고 인용하는 데 도움이 됩니다.`,
     });
 
     // 8. Meta Description
@@ -202,28 +202,28 @@ export async function POST(req: NextRequest) {
     const metaDescOk = metaDesc.length >= 50 && metaDesc.length <= 300;
     checks.push({
       id: "meta_description",
-      label: "Meta Description",
+      label: "메타 설명 (Meta Description)",
       category: "structure",
       pass: metaDescOk,
-      value: metaDesc ? `${metaDesc.length} chars` : "Missing",
+      value: metaDesc ? `${metaDesc.length}자` : "없음",
       detail: metaDesc
         ? metaDescOk
-          ? `Good length (${metaDesc.length} chars): "${metaDesc.slice(0, 100)}\u2026"`
-          : `Length ${metaDesc.length} chars \u2014 ${metaDesc.length < 50 ? "too short" : "too long"}. Aim for 50\u2013160 characters.`
-        : "No meta description found. AI tools use this as a content summary.",
+          ? `적절한 길이 (${metaDesc.length}자): "${metaDesc.slice(0, 100)}\u2026"`
+          : `길이 ${metaDesc.length}자 \u2014 ${metaDesc.length < 50 ? "너무 짧음" : "너무 김"}. 50\u2013160자를 목표로 하세요.`
+        : "메타 설명이 없습니다. AI 도구가 콘텐츠 요약으로 사용합니다.",
     });
 
     // 9. Canonical Tag
     const hasCanonical = /<link[^>]*rel=["']canonical["']/i.test(html);
     checks.push({
       id: "canonical",
-      label: "Canonical Tag",
+      label: "Canonical 태그",
       category: "structure",
       pass: hasCanonical,
-      value: hasCanonical ? "Present" : "Missing",
+      value: hasCanonical ? "있음" : "없음",
       detail: hasCanonical
-        ? "Canonical tag found \u2014 helps prevent duplicate content issues."
-        : "No canonical tag. Add one to ensure AI models reference the correct URL.",
+        ? "Canonical 태그가 있습니다 \u2014 중복 콘텐츠 문제를 방지합니다."
+        : "Canonical 태그가 없습니다. AI 모델이 올바른 URL을 참조하도록 추가하세요.",
     });
 
     // ═══════════════════════════════════════════════════
@@ -238,13 +238,13 @@ export async function POST(req: NextRequest) {
     const blufScore = Math.min(1, (Number(hasDirectAnswer) + Number(bulletCount > 3) + Number(firstChunk.length > 100)) / 2);
     checks.push({
       id: "bluf_style",
-      label: "BLUF / Direct-Answer Style",
+      label: "BLUF / 직답형 스타일",
       category: "content",
       pass: blufScore >= 0.5,
       value: `${Math.round(blufScore * 100)}%`,
       detail: hasDirectAnswer
-        ? "Content leads with a direct answer \u2014 good for AI citation."
-        : "Content doesn\u2019t lead with a clear direct answer. Start with a BLUF (Bottom Line Up Front) statement.",
+        ? "콘텐츠가 직답으로 시작합니다 \u2014 AI 인용에 유리합니다."
+        : "콘텐츠가 명확한 직답으로 시작하지 않습니다. BLUF(Bottom Line Up Front, 결론 먼저) 형식으로 작성하세요.",
     });
 
     // 11. Heading Hierarchy
@@ -254,17 +254,17 @@ export async function POST(req: NextRequest) {
     const headingOk = h1Count === 1 && h2Count >= 2;
     checks.push({
       id: "heading_hierarchy",
-      label: "Heading Hierarchy",
+      label: "제목 계층 구조",
       category: "content",
       pass: headingOk,
       value: `H1:${h1Count} H2:${h2Count} H3:${h3Count}`,
       detail: h1Count === 0
-        ? "No H1 tag found. Every page should have exactly one H1."
+        ? "H1 태그가 없습니다. 모든 페이지에는 반드시 하나의 H1이 있어야 합니다."
         : h1Count > 1
-          ? `${h1Count} H1 tags found \u2014 use exactly one. AI models use H1 as primary topic signal.`
+          ? `H1 태그가 ${h1Count}개 \u2014 정확히 하나만 사용하세요. AI 모델은 H1을 주제 신호로 사용합니다.`
           : h2Count < 2
-            ? "Only 1 H2 or none. Use H2 subheadings to break content into scannable sections."
-            : "Good heading hierarchy \u2014 single H1 with multiple H2/H3 subheadings.",
+            ? "H2가 1개 이하입니다. H2 소제목으로 콘텐츠를 훑어보기 쉬운 섹션으로 나누세요."
+            : "좋은 제목 구조입니다 \u2014 단일 H1과 여러 H2/H3 소제목.",
     });
 
     // 12. Content Length
@@ -272,15 +272,15 @@ export async function POST(req: NextRequest) {
     const contentLengthOk = wordCount >= 300;
     checks.push({
       id: "content_length",
-      label: "Content Depth",
+      label: "콘텐츠 깊이",
       category: "content",
       pass: contentLengthOk,
-      value: `${wordCount.toLocaleString()} words`,
+      value: `${wordCount.toLocaleString()}개 단어`,
       detail: contentLengthOk
         ? wordCount > 2000
-          ? "Comprehensive content \u2014 great for in-depth AI citations."
-          : "Adequate content length for AI answer extraction."
-        : "Thin content \u2014 AI models prefer pages with 300+ words for citation. Add more substance.",
+          ? "풍부한 콘텐츠 \u2014 심층 AI 인용에 유리합니다."
+          : "AI 답변 추출에 적절한 콘텐츠 길이입니다."
+        : "콘텐츠가 빈약합니다 \u2014 AI 모델은 인용 대상으로 300단어 이상의 페이지를 선호합니다. 내용을 더 보강하세요.",
     });
 
     // 13. Internal Links
@@ -289,13 +289,13 @@ export async function POST(req: NextRequest) {
     const internalLinkOk = internalLinks >= 3;
     checks.push({
       id: "internal_links",
-      label: "Internal Links",
+      label: "내부 링크",
       category: "content",
       pass: internalLinkOk,
-      value: `${internalLinks} links`,
+      value: `${internalLinks}개 링크`,
       detail: internalLinkOk
-        ? "Good internal linking \u2014 helps AI models discover related content."
-        : "Few internal links. Add 3+ contextual internal links to help AI models map your content.",
+        ? "내부 링크가 잘 구성되어 있습니다 \u2014 AI 모델이 관련 콘텐츠를 발견하는 데 도움이 됩니다."
+        : "내부 링크가 적습니다. 문맥에 맞는 내부 링크를 3개 이상 추가하여 AI 모델이 콘텐츠를 연결하도록 도우세요.",
     });
 
     // ═══════════════════════════════════════════════════
@@ -309,8 +309,8 @@ export async function POST(req: NextRequest) {
       label: "HTTPS",
       category: "technical",
       pass: isHttps,
-      value: isHttps ? "Yes" : "No",
-      detail: isHttps ? "Site uses HTTPS \u2014 required for trust signals." : "Site is not using HTTPS. This hurts trust and AI citation likelihood.",
+      value: isHttps ? "적용" : "미적용",
+      detail: isHttps ? "사이트가 HTTPS를 사용합니다 \u2014 신뢰 신호에 필수적입니다." : "사이트가 HTTPS를 사용하지 않습니다. 신뢰도와 AI 인용 가능성이 떨어집니다.",
     });
 
     // 15. Page Size
@@ -318,13 +318,13 @@ export async function POST(req: NextRequest) {
     const pageSizeOk = pageSizeKb < 500;
     checks.push({
       id: "page_size",
-      label: "Page Size",
+      label: "페이지 크기",
       category: "technical",
       pass: pageSizeOk,
       value: `${pageSizeKb} KB`,
       detail: pageSizeOk
-        ? "Page size is reasonable for fast loading."
-        : "Page is large (>500 KB). Heavy pages may timeout AI crawlers.",
+        ? "페이지 크기가 빠른 로딩에 적절합니다."
+        : "페이지가 큽니다 (500KB 초과). 무거운 페이지는 AI 크롤러가 타임아웃될 수 있습니다.",
     });
 
     // 16. Language Tag
@@ -332,13 +332,13 @@ export async function POST(req: NextRequest) {
     const hasLang = !!langMatch;
     checks.push({
       id: "lang_tag",
-      label: "Language Attribute",
+      label: "언어 속성",
       category: "technical",
       pass: hasLang,
-      value: hasLang ? langMatch![1] : "Missing",
+      value: hasLang ? langMatch![1] : "없음",
       detail: hasLang
-        ? `Language set to "${langMatch![1]}" \u2014 helps AI models serve correct language results.`
-        : 'No lang attribute on <html>. Add lang="en" (or your language) for AI localization.',
+        ? `언어가 "${langMatch![1]}" 로 설정됨 \u2014 AI 모델이 올바른 언어로 결과를 제공하는 데 도움이 됩니다.`
+        : '<html> 에 lang 속성이 없습니다. AI 지역화를 위해 lang="ko" (또는 해당 언어)를 추가하세요.',
     });
 
     // ═══════════════════════════════════════════════════
@@ -368,19 +368,19 @@ export async function POST(req: NextRequest) {
     const csrCheckPass = !likelyCsr || hasSsrMarkers;
     checks.push({
       id: "csr_detection",
-      label: "Client-Side Rendering",
+      label: "클라이언트 렌더링 (CSR) 감지",
       category: "rendering",
       pass: csrCheckPass,
       value: likelyCsr
         ? hasSsrMarkers
-          ? "CSR detected but SSR markers present"
-          : `Likely CSR (${detectedCsrFrameworks.join(", ")})`
-        : "Server-rendered",
+          ? "CSR 감지됨, SSR 마커 존재"
+          : `CSR 가능성 높음 (${detectedCsrFrameworks.join(", ")})`
+        : "서버 렌더링됨",
       detail: likelyCsr && !hasSsrMarkers
-        ? `Detected ${detectedCsrFrameworks.join(", ")} with minimal server-rendered text (${plain.length} chars, ${(textToHtmlRatio * 100).toFixed(1)}% text ratio). LLM bots like GPTBot, ClaudeBot, and PerplexityBot cannot execute JavaScript — they will see a blank page. Use SSR or SSG.`
+        ? `${detectedCsrFrameworks.join(", ")} 감지됨, 서버 렌더링 텍스트 최소 (${plain.length}자, 텍스트 비율 ${(textToHtmlRatio * 100).toFixed(1)}%). GPTBot, ClaudeBot, PerplexityBot 같은 LLM 봇은 JavaScript를 실행할 수 없어 빈 페이지로 보입니다. SSR 또는 SSG를 사용하세요.`
         : likelyCsr && hasSsrMarkers
-          ? `Framework detected (${detectedCsrFrameworks.join(", ")}) but SSR markers found (${[hasNextData && "__NEXT_DATA__", hasReactRoot && "data-reactroot"].filter(Boolean).join(", ")}). Content appears to be server-rendered.`
-          : `Page content is server-rendered (${plain.length.toLocaleString()} chars text, ${(textToHtmlRatio * 100).toFixed(1)}% text ratio). LLM bots can read this content.`,
+          ? `프레임워크 감지됨 (${detectedCsrFrameworks.join(", ")}), SSR 마커 발견 (${[hasNextData && "__NEXT_DATA__", hasReactRoot && "data-reactroot"].filter(Boolean).join(", ")}). 콘텐츠가 서버에서 렌더링된 것으로 보입니다.`
+          : `페이지 콘텐츠가 서버에서 렌더링됨 (텍스트 ${plain.length.toLocaleString()}자, 비율 ${(textToHtmlRatio * 100).toFixed(1)}%). LLM 봇이 콘텐츠를 읽을 수 있습니다.`,
     });
 
     // 18. Noscript Fallback
@@ -389,15 +389,15 @@ export async function POST(req: NextRequest) {
     const noscriptHasContent = stripHtml(noscriptContent).length > 20;
     checks.push({
       id: "noscript_fallback",
-      label: "Noscript Fallback",
+      label: "Noscript 대체 콘텐츠",
       category: "rendering",
       pass: hasNoscript && noscriptHasContent,
-      value: hasNoscript ? (noscriptHasContent ? "Has content" : "Empty/minimal") : "Missing",
+      value: hasNoscript ? (noscriptHasContent ? "콘텐츠 있음" : "비어있음/빈약") : "없음",
       detail: hasNoscript && noscriptHasContent
-        ? "Good — <noscript> tag with meaningful fallback content. Bots that don't execute JS can still get context."
+        ? "양호 \u2014 <noscript> 태그에 의미 있는 대체 콘텐츠가 있습니다. JS를 실행하지 않는 봇도 컨텍스트를 얻을 수 있습니다."
         : hasNoscript
-          ? "<noscript> tag exists but contains minimal content. Add a meaningful fallback message or link for non-JS environments."
-          : "No <noscript> tag found. Add one with fallback content — LLM bots and crawlers that don't run JS will benefit from this.",
+          ? "<noscript> 태그는 있으나 콘텐츠가 부족합니다. JS 미실행 환경을 위한 의미 있는 대체 메시지나 링크를 추가하세요."
+          : "<noscript> 태그가 없습니다. 대체 콘텐츠와 함께 추가하세요 \u2014 JS를 실행하지 않는 LLM 봇과 크롤러에 도움이 됩니다.",
     });
 
     // 19. JavaScript Bundle Weight
@@ -409,13 +409,13 @@ export async function POST(req: NextRequest) {
     const jsHeavy = externalScriptCount > 15 || totalInlineScriptSize > 100_000;
     checks.push({
       id: "js_bundle_weight",
-      label: "JavaScript Weight",
+      label: "JavaScript 용량",
       category: "rendering",
       pass: !jsHeavy,
-      value: `${externalScriptCount} external, ${Math.round(totalInlineScriptSize / 1024)}KB inline`,
+      value: `외부 ${externalScriptCount}개, 인라인 ${Math.round(totalInlineScriptSize / 1024)}KB`,
       detail: jsHeavy
-        ? `Heavy JS detected: ${externalScriptCount} external scripts and ${Math.round(totalInlineScriptSize / 1024)}KB inline JS. Pages with heavy JavaScript are likely CSR-dependent. LLM bots will timeout or see partial content. Consider reducing JS or implementing SSR.`
-        : `Reasonable JS footprint: ${externalScriptCount} external scripts, ${Math.round(totalInlineScriptSize / 1024)}KB inline. This should not block LLM bot crawling.`,
+        ? `과도한 JS 감지됨: 외부 스크립트 ${externalScriptCount}개, 인라인 JS ${Math.round(totalInlineScriptSize / 1024)}KB. 무거운 JavaScript를 가진 페이지는 CSR에 의존할 가능성이 높습니다. LLM 봇이 타임아웃되거나 부분적인 콘텐츠만 볼 수 있습니다. JS를 줄이거나 SSR 도입을 검토하세요.`
+        : `JS 용량 적정: 외부 스크립트 ${externalScriptCount}개, 인라인 ${Math.round(totalInlineScriptSize / 1024)}KB. LLM 봇 크롤링에 지장을 주지 않을 수준입니다.`,
     });
 
     // 20. Server-Rendered Content Quality
@@ -427,15 +427,15 @@ export async function POST(req: NextRequest) {
     const serverContentOk = serverContentLen > 500 && (hasSemanticHtml || !hasDataAttributes);
     checks.push({
       id: "server_content_quality",
-      label: "Server-Rendered Content Quality",
+      label: "서버 렌더링 콘텐츠 품질",
       category: "rendering",
       pass: serverContentOk,
-      value: serverContentOk ? `${serverContentLen.toLocaleString()} chars` : `Only ${serverContentLen} chars`,
+      value: serverContentOk ? `${serverContentLen.toLocaleString()}자` : `${serverContentLen}자에 불과`,
       detail: serverContentOk
-        ? `Server-rendered HTML contains ${serverContentLen.toLocaleString()} characters of text content${hasSemanticHtml ? " with semantic HTML elements (article/main/section)" : ""}. LLM bots can extract meaningful information.`
+        ? `서버 렌더링 HTML이 ${serverContentLen.toLocaleString()}자의 텍스트 콘텐츠를 포함${hasSemanticHtml ? "하며 시맨틱 HTML 요소(article/main/section)도 사용되었습니다" : "합니다"}. LLM 봇이 의미 있는 정보를 추출할 수 있습니다.`
         : serverContentLen <= 500
-          ? `Very little server-rendered text (${serverContentLen} chars). LLM bots see the initial HTML without JavaScript — ensure your key content is rendered server-side, not injected by JS.`
-          : "Server-rendered HTML lacks semantic structure. Use <article>, <main>, or <section> elements to help bots identify key content areas.",
+          ? `서버 렌더링 텍스트가 매우 적습니다 (${serverContentLen}자). LLM 봇은 JavaScript 없이 초기 HTML만 봅니다 \u2014 핵심 콘텐츠가 JS로 주입되지 않고 서버에서 렌더링되도록 하세요.`
+          : "서버 렌더링 HTML에 시맨틱 구조가 부족합니다. <article>, <main>, <section> 요소를 사용하여 봇이 핵심 콘텐츠 영역을 식별하도록 도우세요.",
     });
 
     // ── Compute score ──────────────────────────────────

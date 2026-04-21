@@ -1,0 +1,135 @@
+name: Deployment to development
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - "app/**"
+      - "components/**"
+      - "lib/**"
+      - "public/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.ts"
+      - "tsconfig.json"
+      - "postcss.config.mjs"
+      - "Dockerfile"
+      - ".dockerignore"
+  workflow_dispatch:
+
+concurrency:
+  group: geotracker-development-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy_auto:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker registry login
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Docker build & push
+        env:
+          # Firebase Web SDK 설정 (브라우저에 노출되는 공개값 — CMS common.js 와 동일)
+          # GitHub repo variables(`vars`)로 덮어쓸 수 있음. 설정 안 하면 Dockerfile 기본값 사용.
+          FB_API_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY || 'AIzaSyAd3yrWQSRWp97eEP5EwiafYDY0mpEfBLA' }}
+          FB_AUTH_DOMAIN: ${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || 'classnaom.firebaseapp.com' }}
+          FB_PROJECT_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'classnaom' }}
+          FB_STORAGE_BUCKET: ${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 'classnaom.appspot.com' }}
+          FB_MESSAGING_SENDER_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || '1014101877161' }}
+          FB_APP_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID || '1:1014101877161:web:b155683e62af755cbfa4b8' }}
+        run: |
+          IMAGE_REPO="${{ secrets.REGISTRY_LOGIN_SERVER }}/magicbody-geo-tracker"
+          DEPLOY_TAG="dev-${GITHUB_SHA}"
+          CACHE_TAG="dev-cache"
+          DOCKER_BUILDKIT=1 docker build \
+            --no-cache \
+            --build-arg NEXT_PUBLIC_FIREBASE_API_KEY="${FB_API_KEY}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN="${FB_AUTH_DOMAIN}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID="${FB_PROJECT_ID}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET="${FB_STORAGE_BUCKET}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID="${FB_MESSAGING_SENDER_ID}" \
+            --build-arg NEXT_PUBLIC_FIREBASE_APP_ID="${FB_APP_ID}" \
+            -t ${IMAGE_REPO}:${DEPLOY_TAG} \
+            -t ${IMAGE_REPO}:${CACHE_TAG} .
+          docker push ${IMAGE_REPO}:${DEPLOY_TAG}
+          docker push ${IMAGE_REPO}:${CACHE_TAG}
+
+      - name: SSH to Azure VM and deploy
+        uses: appleboy/ssh-action@master
+        env:
+          FILE_PATH: "/appdata/apps/geo-tracker/docker-compose.yml"
+          CONTAINER_NAME: "mbd-geo-tracker"
+        with:
+          host: ${{ secrets.AZURE_DEV_HOST }}
+          port: ${{ secrets.AZURE_DEV_PORT }}
+          username: ${{ secrets.AZURE_DEV_USER }}
+          key: ${{ secrets.AZURE_DEV_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 20m
+          envs: FILE_PATH,CONTAINER_NAME
+          script: |
+            IMAGE_REPO="${{ secrets.REGISTRY_LOGIN_SERVER }}/magicbody-geo-tracker"
+            DEPLOY_TAG="dev-${{ github.sha }}"
+            docker pull ${IMAGE_REPO}:${DEPLOY_TAG}
+            docker tag ${IMAGE_REPO}:${DEPLOY_TAG} ${IMAGE_REPO}:latest
+            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
+            nohup sh -c "docker image prune --force >/tmp/docker-prune.log 2>&1" >/dev/null 2>&1 &
+
+  deploy_manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: development
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker registry login
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Docker build & push
+        run: |
+          IMAGE_REPO="${{ secrets.REGISTRY_LOGIN_SERVER }}/magicbody-geo-tracker"
+          DEPLOY_TAG="dev-${GITHUB_SHA}"
+          CACHE_TAG="dev-cache"
+          docker pull ${IMAGE_REPO}:${CACHE_TAG} 2>/dev/null || true
+          DOCKER_BUILDKIT=1 docker build \
+            --no-cache \
+            -t ${IMAGE_REPO}:${DEPLOY_TAG} \
+            -t ${IMAGE_REPO}:${CACHE_TAG} .
+          docker push ${IMAGE_REPO}:${DEPLOY_TAG}
+          docker push ${IMAGE_REPO}:${CACHE_TAG}
+
+      - name: SSH to Azure VM and deploy
+        uses: appleboy/ssh-action@master
+        env:
+          FILE_PATH: "/appdata/apps/geo-tracker/docker-compose.yml"
+          CONTAINER_NAME: "mbd-geo-tracker"
+        with:
+          host: ${{ secrets.AZURE_DEV_HOST }}
+          port: ${{ secrets.AZURE_DEV_PORT }}
+          username: ${{ secrets.AZURE_DEV_USER }}
+          key: ${{ secrets.AZURE_DEV_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 20m
+          envs: FILE_PATH,CONTAINER_NAME
+          script: |
+            IMAGE_REPO="${{ secrets.REGISTRY_LOGIN_SERVER }}/magicbody-geo-tracker"
+            DEPLOY_TAG="dev-${{ github.sha }}"
+            docker pull ${IMAGE_REPO}:${DEPLOY_TAG}
+            docker tag ${IMAGE_REPO}:${DEPLOY_TAG} ${IMAGE_REPO}:latest
+            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
+            nohup sh -c "docker image prune --force >/tmp/docker-prune.log 2>&1" >/dev/null 2>&1 &

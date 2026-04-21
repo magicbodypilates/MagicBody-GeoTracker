@@ -1,0 +1,26 @@
+# ==========================================================
+# 서버 배포용 docker-compose.yml
+# 경로: /appdata/apps/geo-tracker/docker-compose.yml
+# 컨테이너명: mbd-geo-tracker
+# 포트: 8040 → 3000 (내부)
+# ==========================================================
+version: "3.9"
+
+services:
+  mbd-geo-tracker:
+    image: ${REGISTRY_LOGIN_SERVER}/magicbody-geo-tracker:latest
+    container_name: mbd-geo-tracker
+    restart: unless-stopped
+    ports:
+      - "8040:3000"
+    env_file:
+      - /appdata/apps/geo-tracker/.env
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    networks:
+      - nginx-proxy-network
+
+networks:
+  nginx-proxy-network:
+    external: true

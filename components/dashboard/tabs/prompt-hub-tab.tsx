@@ -58,30 +58,30 @@ export function PromptHubTab({
       <div className="rounded-xl border border-th-border bg-th-card-alt p-4">
         <div className="mb-2 flex items-center justify-between">
           <div className="text-sm font-medium uppercase tracking-wider text-th-text-muted">
-            Tracking Prompt Library
+            추적 프롬프트 라이브러리
           </div>
           {customPrompts.length > 0 && (
             <button
               disabled={busy}
               onClick={onBatchRunAll}
               className="bd-btn-primary rounded-lg px-3 py-1.5 text-sm disabled:opacity-60"
-              title={`Run all ${customPrompts.length} prompts × ${activeProviderCount} model${activeProviderCount > 1 ? "s" : ""}`}
+              title={`전체 프롬프트 ${customPrompts.length}개 × ${activeProviderCount}개 모델 실행`}
             >
-              ▶ Run All ({customPrompts.length} × {activeProviderCount})
+              ▶ 전체 실행 ({customPrompts.length} × {activeProviderCount})
             </button>
           )}
         </div>
         <p className="mb-3 text-sm text-th-text-secondary">
-          Add the exact prompts you want to track over time. Use <span className="font-semibold">{"{brand}"}</span> to inject your brand name.
+          시간 경과에 따라 추적할 프롬프트를 추가하세요. <span className="font-semibold">{"{brand}"}</span>를 쓰면 브랜드명이 자동 삽입됩니다.
           {activeProviderCount > 1 && (
-            <span className="ml-1 text-th-text-accent">· Runs across {activeProviderCount} selected models in parallel.</span>
+            <span className="ml-1 text-th-text-accent">· 선택한 {activeProviderCount}개 AI 모델을 병렬로 실행합니다.</span>
           )}
         </p>
 
         {/* Tag filter bar */}
         {allTags.length > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-1.5">
-            <span className="text-xs font-medium text-th-text-muted">Filter:</span>
+            <span className="text-xs font-medium text-th-text-muted">필터:</span>
             <button
               onClick={() => setFilterTag(null)}
               className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
@@ -90,7 +90,7 @@ export function PromptHubTab({
                   : "bd-chip hover:bg-th-border"
               }`}
             >
-              All ({customPrompts.length})
+              전체 ({customPrompts.length})
             </button>
             {allTags.map((tag) => (
               <button
@@ -118,7 +118,7 @@ export function PromptHubTab({
                 setNewPrompt("");
               }
             }}
-            placeholder="e.g. Best alternatives to {brand} for B2B SEO analytics"
+            placeholder="예: 재활 필라테스 자격증 추천, {brand} 수업 후기"
             className="bd-input w-full rounded-lg px-3 py-2 text-sm"
           />
           <button
@@ -128,14 +128,14 @@ export function PromptHubTab({
             }}
             className="bd-btn-primary rounded-lg px-4 py-2 text-sm"
           >
-            Add
+            추가
           </button>
         </div>
 
-        <ul className="max-h-[400px] space-y-2 overflow-auto pr-1 text-sm">
+        <ul className="space-y-2 pr-1 text-sm">
           {filteredPrompts.length === 0 && (
             <li className="text-th-text-secondary">
-              {customPrompts.length === 0 ? "No custom prompts added yet." : "No prompts match this filter."}
+              {customPrompts.length === 0 ? "아직 추가된 프롬프트가 없습니다." : "해당 필터에 일치하는 프롬프트가 없습니다."}
             </li>
           )}
           {filteredPrompts.map((item, index) => (
@@ -170,7 +170,7 @@ export function PromptHubTab({
                     onKeyDown={(e) => {
                       if (e.key === "Enter") handleAddTag(item.text, item.tags);
                     }}
-                    placeholder="+ tag"
+                    placeholder="+ 태그"
                     className="w-16 rounded-md border border-th-border bg-transparent px-1.5 py-0.5 text-xs focus:w-24 focus:outline-none focus:ring-1 focus:ring-th-accent transition-all"
                   />
                 </div>
@@ -181,23 +181,23 @@ export function PromptHubTab({
                   onClick={() => onRunPrompt(interpolateBrand(item.text))}
                   className="bd-btn-primary rounded-md px-3 py-1.5 text-xs"
                 >
-                  Run
+                  실행
                 </button>
                 <button
                   onClick={() => onRemoveCustomPrompt(item.text)}
                   className="bd-chip rounded-md px-3 py-1.5 text-xs"
                 >
-                  Remove
+                  제거
                 </button>
                 <button
                   onClick={() => {
-                    if (window.confirm("Remove this prompt AND delete all its collected responses?")) {
+                    if (window.confirm("이 프롬프트와 수집된 모든 응답 데이터를 함께 삭제하시겠습니까?")) {
                       onRemoveCustomPrompt(item.text, true);
                     }
                   }}
                   className="bd-chip rounded-md px-3 py-1.5 text-xs text-th-danger hover:bg-th-danger-soft"
                 >
-                  Remove + Delete Data
+                  제거 + 데이터 삭제
                 </button>
               </div>
             </li>

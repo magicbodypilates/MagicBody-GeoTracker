@@ -1,0 +1,26 @@
+# MagicBody GEO/AEO Tracker
+# 서버 통합 시 기존 docker-compose에 병합하세요 (포트 8040 사용)
+version: "3.9"
+
+services:
+  geo-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: magicbody/geo-tracker:latest
+    container_name: magicbody-geo-tracker
+    restart: unless-stopped
+    ports:
+      - "8040:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    networks:
+      - magicbody-net
+
+networks:
+  magicbody-net:
+    external: true
+    name: magicbody-net

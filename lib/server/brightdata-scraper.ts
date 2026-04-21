@@ -13,10 +13,27 @@ type Provider = z.infer<typeof ProviderSchema>;
 
 const OUTPUT_CACHE_TTL_MS = 1000 * 60 * 20;
 
-const inMemoryCache = new Map<
-  string,
-  { expiresAt: number; value: NormalizedScrapeResult }
->();
+/**
+ * 프로세스 전역 싱글톤 Map.
+ * Next.js dev(Turbopack) HMR은 route handler 모듈을 재평가하면서
+ * module-level `new Map()`을 매번 새 인스턴스로 생성한다. 그 결과
+ * `/api/cache/clear`가 비운 Map과 `/api/scrape`가 읽는 Map이 다른 인스턴스가 되어
+ * clear가 제대로 작동하지 않는 문제가 발생 → 초기화 후에도 캐시된 응답이 즉시 반환됨.
+ * globalThis에 얹어 Node 프로세스 생애 동안 동일 Map을 재사용한다.
+ */
+type CacheEntry = { expiresAt: number; value: NormalizedScrapeResult };
+const globalForCache = globalThis as unknown as {
+  __brightdataScrapeCache?: Map<string, CacheEntry>;
+};
+const inMemoryCache: Map<string, CacheEntry> =
+  globalForCache.__brightdataScrapeCache ??
+  (globalForCache.__brightdataScrapeCache = new Map());
+
+export function clearScrapeCache(): number {
+  const count = inMemoryCache.size;
+  inMemoryCache.clear();
+  return count;
+}
 
 const providerToDatasetEnv: Record<Provider, string> = {
   chatgpt: "BRIGHT_DATA_DATASET_CHATGPT",
@@ -25,6 +42,15 @@ const providerToDatasetEnv: Record<Provider, string> = {
   gemini: "BRIGHT_DATA_DATASET_GEMINI",
   google_ai: "BRIGHT_DATA_DATASET_GOOGLE_AI",
   grok: "BRIGHT_DATA_DATASET_GROK",
+};
+
+const defaultDatasetIds: Record<Provider, string> = {
+  chatgpt: "gd_m7aof0k82r803d5bjm",
+  perplexity: "gd_m7dhdot1vw9a7gc1n",
+  copilot: "gd_m7di5jy6s9geokz8w",
+  gemini: "gd_mbz66arm2mf9cu856y",
+  google_ai: "gd_mcswdt6z2elth3zqr2",
+  grok: "gd_m8ve0u141icu75ae74",
 };
 
 const providerBaseUrl: Record<Provider, string> = {
@@ -43,11 +69,20 @@ type ScrapeRequest = {
   country?: string;
 };
 
+type StructuredCitation = {
+  url: string;
+  domain: string;
+  title: string;
+  description: string;
+};
+
 type NormalizedScrapeResult = {
   provider: Provider;
   prompt: string;
   answer: string;
   sources: string[];
+  /** 구조화된 인용 (title/description/domain 포함) */
+  citations: StructuredCitation[];
   snapshotId?: string;
   cached: boolean;
   raw: unknown;
@@ -59,7 +94,7 @@ function getApiKey() {
 }
 
 function getDatasetId(provider: Provider) {
-  return process.env[providerToDatasetEnv[provider]];
+  return process.env[providerToDatasetEnv[provider]] || defaultDatasetIds[provider];
 }
 
 function buildCacheKey(input: ScrapeRequest) {
@@ -284,18 +319,13 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
   const deepText = extractDeepText(rawRecord, 0);
   if (deepText) return deepText;
 
-  // Last resort: stringify but strip obvious noise
-  const raw = JSON.stringify(rawRecord);
-  // If it's tiny JSON, just return it — user will see something
-  if (raw.length < 500) return raw;
-  // For large blobs, try to extract readable text by stripping JSON structure
-  return raw
-    .replace(/[{}\[\]"]/g, " ")
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim()
-    .slice(0, 2000);
+  // 정상 필드에서 답변을 추출하지 못한 경우: 원본 JSON을 섞어 넣지 않는다.
+  // 과거엔 JSON.stringify(rawRecord) 결과를 answer에 넣었는데, 그러면
+  // 우리가 보낸 prompt·브랜드 컨텍스트·메타데이터·검색 결과 카드의 title 등이
+  // answer에 유입되어 findMentions/calcVisibilityScore가 가짜 mention=true로 판정.
+  // 파싱 실패는 정직하게 공백 메시지로 기록한다.
+  const keyList = Object.keys(rawRecord).slice(0, 20).join(", ");
+  return `[응답 파싱 실패 — 확인 가능한 최상위 키: ${keyList}]`;
 }
 
 async function monitorUntilReady(snapshotId: string) {
@@ -428,32 +458,47 @@ export async function runAiScraper(
   // Extract sources from answer text
   const textSources = extractSourcesFromAnswer(answer);
 
-  // Also extract from Bright Data's structured citation fields
-  const structuredSources: string[] = [];
+  // Also extract from Bright Data's structured citation fields (title/desc 포함)
+  const structuredCitations: StructuredCitation[] = [];
+  const seenUrls = new Set<string>();
   for (const field of ["citations", "links_attached", "sources"]) {
     const arr = rawRecord[field];
-    if (Array.isArray(arr)) {
-      for (const item of arr) {
-        if (typeof item === "string" && item.startsWith("http")) {
-          structuredSources.push(item);
-        } else if (item && typeof item === "object") {
-          const url = (item as Record<string, unknown>).url;
-          if (typeof url === "string" && url.startsWith("http")) {
-            structuredSources.push(url);
-          }
-        }
+    if (!Array.isArray(arr)) continue;
+    for (const item of arr) {
+      let url = "";
+      let title = "";
+      let description = "";
+      if (typeof item === "string" && item.startsWith("http")) {
+        url = item;
+      } else if (item && typeof item === "object") {
+        const obj = item as Record<string, unknown>;
+        if (typeof obj.url === "string" && obj.url.startsWith("http")) url = obj.url;
+        if (typeof obj.title === "string") title = obj.title;
+        if (typeof obj.description === "string") description = obj.description;
       }
+      if (!url || seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      let domain = "";
+      try {
+        domain = new URL(url).hostname.replace(/^www\./, "");
+      } catch {
+        continue;
+      }
+      structuredCitations.push({ url, domain, title, description });
     }
   }
 
-  // Merge and deduplicate
-  const allSources = [...new Set([...textSources, ...structuredSources])];
+  // Merge and deduplicate URL-level sources (기존 sources[] 호환용)
+  const allSources = [
+    ...new Set([...textSources, ...structuredCitations.map((c) => c.url)]),
+  ];
 
   const normalized: NormalizedScrapeResult = {
     provider: parsed,
     prompt: request.prompt,
     answer,
     sources: allSources,
+    citations: structuredCitations,
     snapshotId:
       typeof record.snapshot_id === "string" ? record.snapshot_id : undefined,
     cached: false,

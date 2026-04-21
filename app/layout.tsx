@@ -15,8 +15,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "GEO/AEO Tracker",
-  description: "BYOK AEO/GEO intelligence dashboard with local-first persistence",
+  title: "매직바디 GEO/AEO 트래커",
+  description: "AI 답변 엔진에서의 브랜드 가시성을 추적하는 로컬 저장 기반 대시보드",
 };
 
 /** Inline script to apply theme before first paint — prevents flash */
@@ -28,7 +28,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="ko" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

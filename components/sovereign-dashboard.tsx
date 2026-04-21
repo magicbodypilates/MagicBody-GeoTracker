@@ -1756,6 +1756,7 @@ Now analyze all ${competitorList.length} competitors:`,
           }
           onReset={handleResetData}
           onResetResponses={handleResetResponses}
+          fullState={state}
         />
       );
     }

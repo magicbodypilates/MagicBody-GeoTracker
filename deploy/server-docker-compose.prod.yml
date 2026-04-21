@@ -19,6 +19,9 @@ services:
     environment:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
+    volumes:
+      # GSC OAuth 토큰 파일 등 재배포 후에도 유지돼야 하는 상태 저장용
+      - /datadrive/apps/geo-tracker/data:/app/data
     networks:
       - nginxproxy_default
 

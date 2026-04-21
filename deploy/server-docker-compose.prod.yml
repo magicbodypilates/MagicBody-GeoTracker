@@ -52,6 +52,24 @@ services:
     networks:
       - nginxproxy_default
 
+  # Phase 5B — 자동화 Worker (node-cron 이 1분마다 앱 내부 API 호출)
+  # 앱 이미지와 동일한 이미지 사용 — 실행 명령만 다름
+  mbd-geo-tracker-worker:
+    image: ghcr.io/magicbodypilates/magicbody-geo-tracker:latest
+    container_name: mbd-geo-tracker-worker
+    restart: unless-stopped
+    command: ["node", "scripts/worker.mjs"]
+    environment:
+      - NODE_ENV=production
+      - CRON_TARGET_URL=http://mbd-geo-tracker:3000
+      # INTERNAL_CRON_SECRET 은 .env 에서 주입
+    env_file:
+      - /datadrive/apps/geo-tracker/.env
+    depends_on:
+      - mbd-geo-tracker
+    networks:
+      - nginxproxy_default
+
 networks:
   nginxproxy_default:
     external: true

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "uq_runs_auto_slot" ON "runs" USING btree ("workspace_id","interval_slot","prompt_text","provider") WHERE interval_slot IS NOT NULL;

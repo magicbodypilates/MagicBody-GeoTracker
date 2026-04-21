@@ -9,14 +9,23 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 import { runTick } from "@/lib/server/automation-runner";
 
 export const dynamic = "force-dynamic";
 // 자동화 한 tick 은 여러 스크레이핑을 직렬 실행하므로 최대 15분 허용
 export const maxDuration = 900;
 
+/** Timing-safe 문자열 비교 — 길이 다른 입력은 false, 같으면 바이트 단위 상수시간 비교 */
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
 export async function POST(req: NextRequest) {
-  const providedSecret = req.headers.get("x-cron-secret");
+  const providedSecret = req.headers.get("x-cron-secret") ?? "";
   const expectedSecret = process.env.INTERNAL_CRON_SECRET;
 
   if (!expectedSecret) {
@@ -25,7 +34,7 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
-  if (providedSecret !== expectedSecret) {
+  if (!safeEqual(providedSecret, expectedSecret)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 

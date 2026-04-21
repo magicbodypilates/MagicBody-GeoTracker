@@ -143,10 +143,14 @@ async function executeSchedule(
   let skippedDuplicates = 0;
 
   // 프롬프트 × 프로바이더 전부 — 순차 실행 (Bright Data 안정성)
+  // 중복 실행 방지:
+  //   1) DB unique index (uq_runs_auto_slot) — 실제 무결성 보증
+  //   2) 사전 SELECT — Bright Data 비용 낭비 방지 (pre-check)
+  //   3) INSERT 시 onConflictDoNothing — 경쟁 상황에서 조용히 스킵
   for (const prompt of promptRows) {
     for (const provider of sched.providers) {
       try {
-        // 이미 이 슬롯 + prompt + provider 조합이 runs 에 있으면 스킵
+        // pre-check: 이미 이 슬롯 + prompt + provider 조합이 있으면 스킵 (API 호출 절약)
         const [existing] = await db
           .select({ id: schema.runs.id })
           .from(schema.runs)
@@ -184,32 +188,42 @@ async function executeSchedule(
         const visibilityScore = calcVisibility(answerText, brandTerms, citedBrandDomains.length > 0);
         const sentiment = detectSentiment(answerText, brandTerms);
 
-        await db.insert(schema.runs).values({
-          workspaceId: sched.workspaceId,
-          scheduleId: sched.id,
-          promptText: prompt.text,
-          provider,
-          answer: answerText,
-          sources: result.sources ?? [],
-          citations: citations as never,
-          visibilityScore,
-          sentiment,
-          brandMentions,
-          competitorMentions,
-          citedBrandDomains,
-          citedCompetitorDomains,
-          attachedBrandMentions: [],
-          attachedCompetitorMentions: [],
-          geolocation: sched.geolocation ?? null,
-          isAuto: true,
-          intervalSlot,
-          parseQuality: answerText.length > 100 ? "high" : answerText.length > 20 ? "medium" : "low",
-          isCachedResponse: Boolean(result.cached),
-          responseLength: answerText.length,
-          executionDurationMs,
-        });
+        const inserted = await db
+          .insert(schema.runs)
+          .values({
+            workspaceId: sched.workspaceId,
+            scheduleId: sched.id,
+            promptText: prompt.text,
+            provider,
+            answer: answerText,
+            sources: result.sources ?? [],
+            citations: citations as never,
+            visibilityScore,
+            sentiment,
+            brandMentions,
+            competitorMentions,
+            citedBrandDomains,
+            citedCompetitorDomains,
+            attachedBrandMentions: [],
+            attachedCompetitorMentions: [],
+            geolocation: sched.geolocation ?? null,
+            isAuto: true,
+            intervalSlot,
+            parseQuality:
+              answerText.length > 100 ? "high" : answerText.length > 20 ? "medium" : "low",
+            isCachedResponse: Boolean(result.cached),
+            responseLength: answerText.length,
+            executionDurationMs,
+          })
+          .onConflictDoNothing()
+          .returning({ id: schema.runs.id });
 
-        executedRuns += 1;
+        if (inserted.length > 0) {
+          executedRuns += 1;
+        } else {
+          // 동시에 다른 워커/틱이 먼저 INSERT 한 경우 — unique constraint 로 스킵됨
+          skippedDuplicates += 1;
+        }
       } catch (err) {
         console.error(
           `[automation] 스케줄 ${sched.id} prompt="${prompt.text.slice(0, 40)}..." provider=${provider} 실패:`,

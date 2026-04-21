@@ -19,10 +19,12 @@ export async function POST(
 ) {
   const { id } = await params;
   try {
-    // next_run_at 을 epoch 으로 설정 → 다음 tick 에서 실행 대상으로 집계
+    // next_run_at 을 과거 시점(1분 전)으로 설정 → 다음 tick 에서 실행 대상으로 집계
+    // epoch(1970) 을 쓰지 않는 이유: UI 에 "다음 실행: 1970년..." 이 잠시 노출되는 것 방지
+    const pastMoment = new Date(Date.now() - 60_000);
     const [updated] = await db
       .update(schema.schedules)
-      .set({ nextRunAt: new Date(0) })
+      .set({ nextRunAt: pastMoment, active: true })
       .where(eq(schema.schedules.id, id))
       .returning();
     if (!updated) return NextResponse.json({ error: "not_found" }, { status: 404 });

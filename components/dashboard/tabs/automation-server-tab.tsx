@@ -83,6 +83,7 @@ export function AutomationServerTab({
   const [recentRuns, setRecentRuns] = useState<ServerRun[]>([]);
   const [serverPrompts, setServerPrompts] = useState<ServerPrompt[]>([]);
   const [busy, setBusy] = useState(false);
+  const [rowActionIds, setRowActionIds] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string>("");
 
   // 스케줄 추가 폼 상태
@@ -134,7 +135,12 @@ export function AutomationServerTab({
 
         // 경쟁사 + 프롬프트 동기화 (자동 생성 시 최초 1회)
         if (ws) {
-          await syncInitialSetup(ws.id);
+          const sync = await syncInitialSetup(ws.id);
+          if (sync.promptFails > 0 || sync.competitorFails > 0) {
+            setMessage(
+              `경고: 초기 동기화 일부 실패 — 프롬프트 ${sync.promptFails}개 · 경쟁사 ${sync.competitorFails}개. 재시도 또는 수동 추가 필요.`,
+            );
+          }
         }
       }
 
@@ -151,23 +157,32 @@ export function AutomationServerTab({
     }
   }, [brand]);
 
-  /** 신규 워크스페이스에 경쟁사/프롬프트 최초 복사 */
-  async function syncInitialSetup(wsId: string) {
-    try {
-      // 프롬프트 복사
-      for (const p of customPrompts) {
-        if (!p.text?.trim()) continue;
-        await fetch(`${BP}/api/workspaces/${wsId}/prompts`, {
+  /**
+   * 신규 워크스페이스에 경쟁사/프롬프트 최초 복사.
+   * 실패 항목 수를 반환해 사용자에게 경고 표시 가능.
+   */
+  async function syncInitialSetup(wsId: string): Promise<{ promptFails: number; competitorFails: number }> {
+    let promptFails = 0;
+    let competitorFails = 0;
+    for (const p of customPrompts) {
+      if (!p.text?.trim()) continue;
+      try {
+        const res = await fetch(`${BP}/api/workspaces/${wsId}/prompts`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({ text: p.text, tags: p.tags ?? [] }),
-        }).catch(() => {});
+        });
+        // 409 (중복) 은 실패로 치지 않음 — 이미 존재하는 프롬프트
+        if (!res.ok && res.status !== 409) promptFails += 1;
+      } catch {
+        promptFails += 1;
       }
-      // 경쟁사 복사
-      for (const c of competitors) {
-        if (!c.name?.trim()) continue;
-        await fetch(`${BP}/api/workspaces/${wsId}/competitors`, {
+    }
+    for (const c of competitors) {
+      if (!c.name?.trim()) continue;
+      try {
+        const res = await fetch(`${BP}/api/workspaces/${wsId}/competitors`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -176,11 +191,13 @@ export function AutomationServerTab({
             aliases: c.aliases ?? [],
             websites: c.websites ?? [],
           }),
-        }).catch(() => {});
+        });
+        if (!res.ok) competitorFails += 1;
+      } catch {
+        competitorFails += 1;
       }
-    } catch {
-      // 초기 동기화 실패는 치명적이지 않음 — 사용자가 수동으로 다시 설정 가능
     }
+    return { promptFails, competitorFails };
   }
 
   const reloadSchedules = useCallback(async () => {
@@ -223,13 +240,16 @@ export function AutomationServerTab({
     void reloadSchedules();
     void reloadRecentRuns();
     void reloadPrompts();
-    // 자동 실행 결과는 1분마다 갱신
+    // 자동 실행 결과는 1분마다 갱신.
+    // dependency 는 workspaceId 만 — reload 함수들은 내부 state 변화에 반응해 재생성되지만
+    // interval 은 한 번만 설정하고 최신 함수를 클로저로 잡지 않도록 setInterval 안에서 직접 호출.
     const t = setInterval(() => {
       void reloadRecentRuns();
       void reloadSchedules();
     }, 60_000);
     return () => clearInterval(t);
-  }, [workspaceId, reloadSchedules, reloadRecentRuns, reloadPrompts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
 
   async function addSchedule() {
     if (!workspaceId || busy || !newName.trim() || newProviders.length === 0) return;
@@ -256,6 +276,23 @@ export function AutomationServerTab({
     } finally {
       setBusy(false);
     }
+  }
+
+  /** 행 단위 액션 중복 실행 방지용 락 */
+  function withRowLock(id: string, fn: () => Promise<void>) {
+    return async () => {
+      if (rowActionIds.has(id)) return;
+      setRowActionIds((prev) => new Set(prev).add(id));
+      try {
+        await fn();
+      } finally {
+        setRowActionIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    };
   }
 
   async function deleteSchedule(id: string) {
@@ -288,11 +325,19 @@ export function AutomationServerTab({
 
   async function toggleActive(sch: ServerSchedule) {
     try {
+      // 재개(active: true) 시엔 nextRunAt 을 현재 시각으로 초기화 → 다음 tick 에 실행
+      // 일시정지(active: false) 시엔 nextRunAt 유지 (재개 시 즉시 실행하지 않는 옵션도 있으나
+      // 사용자가 일시정지 후 재개하면 "지금부터 주기 시작" 이 자연스러움)
+      const patch: Record<string, unknown> = { active: !sch.active };
+      if (!sch.active) {
+        // false → true (재개)
+        patch.nextRunAt = new Date(Date.now() - 60_000).toISOString();
+      }
       const res = await fetch(`${BP}/api/schedules/${sch.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ active: !sch.active }),
+        body: JSON.stringify(patch),
       });
       if (!res.ok) throw new Error("변경 실패");
       await reloadSchedules();
@@ -399,8 +444,9 @@ export function AutomationServerTab({
                     <td className="py-2 text-th-text-muted">{formatKst(s.nextRunAt)}</td>
                     <td className="py-2">
                       <button
-                        onClick={() => toggleActive(s)}
-                        className={`rounded-full px-2 py-0.5 text-xs ${
+                        onClick={withRowLock(s.id, () => toggleActive(s))}
+                        disabled={rowActionIds.has(s.id)}
+                        className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
                           s.active
                             ? "bg-th-success-soft text-th-success"
                             : "bg-th-text-muted/10 text-th-text-muted"
@@ -411,15 +457,17 @@ export function AutomationServerTab({
                     </td>
                     <td className="py-2 text-right">
                       <button
-                        onClick={() => triggerSchedule(s.id)}
-                        className="mr-2 rounded border border-th-border bg-th-card-alt px-2 py-1 text-xs hover:bg-th-card-hover"
+                        onClick={withRowLock(s.id, () => triggerSchedule(s.id))}
+                        disabled={rowActionIds.has(s.id)}
+                        className="mr-2 rounded border border-th-border bg-th-card-alt px-2 py-1 text-xs hover:bg-th-card-hover disabled:opacity-50"
                         title="즉시 실행 — 다음 tick 에 곧바로 실행됨"
                       >
                         ⏱ 즉시
                       </button>
                       <button
-                        onClick={() => deleteSchedule(s.id)}
-                        className="rounded border border-th-danger/40 bg-th-danger-soft px-2 py-1 text-xs text-th-danger hover:bg-th-danger/20"
+                        onClick={withRowLock(s.id, () => deleteSchedule(s.id))}
+                        disabled={rowActionIds.has(s.id)}
+                        className="rounded border border-th-danger/40 bg-th-danger-soft px-2 py-1 text-xs text-th-danger hover:bg-th-danger/20 disabled:opacity-50"
                       >
                         삭제
                       </button>

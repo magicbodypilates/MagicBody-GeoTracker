@@ -11,6 +11,7 @@
  * - TIMESTAMPTZ: 타임존 보존 — KST/UTC 혼용 시 안전
  */
 
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -172,6 +173,13 @@ export const runs = pgTable(
       t.promptText,
       t.provider,
     ),
+    /**
+     * 동일 (workspace, interval_slot, prompt_text, provider) 조합 중복 실행 방지.
+     * interval_slot 이 NULL 인 행(수동 실행) 은 제외 — 부분 인덱스 사용.
+     */
+    autoSlotUnique: uniqueIndex("uq_runs_auto_slot")
+      .on(t.workspaceId, t.intervalSlot, t.promptText, t.provider)
+      .where(sql`interval_slot IS NOT NULL`),
   }),
 );
 

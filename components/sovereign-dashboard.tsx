@@ -525,25 +525,11 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }, [state, activeWsId, loaded, demoMode]);
 
-  /** ref to the scheduler interval so we can clear/re-create it */
-  const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  /** ref to latest state so the scheduler callback doesn't close over stale state */
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
-
-  /** ref to latest callScrapeOne so the scheduler callback doesn't use stale brand terms */
-  const callScrapeOneRef = useRef<
-    (prompt: string, provider: Provider) => Promise<ScrapeOneResult>
-  >(
-    // placeholder — will be assigned after callScrapeOne is defined
-    async (_p: string, pr: Provider) => ({
-      ok: false as const,
-      provider: pr,
-      reason: "초기화 안됨",
-    }),
-  );
+  /**
+   * Phase 5B 이후 브라우저 기반 스케줄러 제거 완료.
+   * 자동 실행은 mbd-geo-tracker-worker 컨테이너 → /api/internal/cron/tick 이 전담.
+   * 수동 실행(단일 / 배치) 은 기존 callScrapeOne / batchRunAllPrompts 로 유지.
+   */
 
   /** 진행 중인 모든 scrape 요청 취소용 AbortController 집합 */
   const activeControllersRef = useRef<Set<AbortController>>(new Set());
@@ -556,122 +542,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
    */
   const resetTokenRef = useRef(0);
 
-  /** Detect drift after a batch of new runs */
-  function detectDrift(newRuns: ScrapeRun[], existingRuns: ScrapeRun[]): DriftAlert[] {
-    const alerts: DriftAlert[] = [];
-    const DRIFT_THRESHOLD = 10; // minimum score change to trigger alert
-
-    newRuns.forEach((newRun) => {
-      // Find the most recent existing run with same prompt+provider
-      const prev = existingRuns.find(
-        (r) => r.prompt === newRun.prompt && r.provider === newRun.provider,
-      );
-      if (!prev) return;
-      const delta = (newRun.visibilityScore ?? 0) - (prev.visibilityScore ?? 0);
-      if (Math.abs(delta) >= DRIFT_THRESHOLD) {
-        alerts.push({
-          id: `drift-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          prompt: newRun.prompt,
-          provider: newRun.provider,
-          oldScore: prev.visibilityScore ?? 0,
-          newScore: newRun.visibilityScore ?? 0,
-          delta,
-          createdAt: new Date().toISOString(),
-          dismissed: false,
-        });
-      }
-    });
-
-    return alerts;
-  }
-
-  /** Run a scheduled batch and detect drift */
-  const runScheduledBatch = useCallback(async () => {
-    const s = stateRef.current;
-    if (busyRef.current) return; // skip if already running
-    const prompts = s.customPrompts.length > 0 ? s.customPrompts.map((p) => p.text) : [s.prompt];
-    const providers = s.activeProviders;
-    if (prompts.length === 0 || providers.length === 0) return;
-
-    // 초기화 토큰 캡처 — 자동 배치 진행 중 사용자가 초기화 누르면 이 batch 폐기
-    const myToken = resetTokenRef.current;
-    setBusy(true);
-    setMessage("자동 실행: 스케줄된 배치를 시작합니다…");
-
-    const allRuns: ScrapeRun[] = [];
-    const failures: { provider: Provider; reason: string }[] = [];
-    for (const prompt of prompts) {
-      const results = await Promise.allSettled(
-        providers.map((p) => callScrapeOneRef.current(prompt, p)),
-      );
-      // 각 프롬프트 루프 이터레이션마다 확인 — 초기화되면 더 이상 쌓지 않고 즉시 종료
-      if (resetTokenRef.current !== myToken) {
-        setBusy(false);
-        return;
-      }
-      for (const r of results) {
-        if (r.status !== "fulfilled") continue;
-        const value = r.value;
-        if (value.ok) {
-          allRuns.push({ ...value.run, auto: true });
-        } else if (value.reason !== "취소됨") {
-          failures.push({ provider: value.provider, reason: value.reason });
-        }
-      }
-    }
-
-    // Detect drift against existing runs
-    const newAlerts = detectDrift(allRuns, s.runs);
-
-    setState((prev) => ({
-      ...prev,
-      runs: [...allRuns, ...prev.runs].slice(0, 500),
-      lastScheduledRun: new Date().toISOString(),
-      driftAlerts: [...newAlerts, ...prev.driftAlerts].slice(0, 100),
-    }));
-
-    const failSummary = failures
-      .map((f) => `${PROVIDER_LABELS[f.provider] ?? f.provider}(${f.reason})`)
-      .join(", ");
-    setMessage(
-      `자동 실행 완료: ${allRuns.length}건 수집${failSummary ? ` · 실패: ${failSummary}` : ""}${newAlerts.length > 0 ? ` · 변동 알림 ${newAlerts.length}건` : ""}`,
-    );
-    setBusy(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /** Set up / tear down the scheduler interval */
-  useEffect(() => {
-    if (schedulerRef.current) {
-      clearInterval(schedulerRef.current);
-      schedulerRef.current = null;
-    }
-    if (!demoMode && state.scheduleEnabled && state.scheduleIntervalMs > 0) {
-      schedulerRef.current = setInterval(runScheduledBatch, state.scheduleIntervalMs);
-    }
-    return () => {
-      if (schedulerRef.current) {
-        clearInterval(schedulerRef.current);
-        schedulerRef.current = null;
-      }
-    };
-  }, [state.scheduleEnabled, state.scheduleIntervalMs, runScheduledBatch]);
-
-  function dismissAlert(id: string) {
-    setState((prev) => ({
-      ...prev,
-      driftAlerts: prev.driftAlerts.map((a) =>
-        a.id === id ? { ...a, dismissed: true } : a,
-      ),
-    }));
-  }
-
-  function dismissAllAlerts() {
-    setState((prev) => ({
-      ...prev,
-      driftAlerts: prev.driftAlerts.map((a) => ({ ...a, dismissed: true })),
-    }));
-  }
+  /*
+   * 제거됨 (Phase 5B):
+   *   - detectDrift()
+   *   - runScheduledBatch()
+   *   - scheduler useEffect (브라우저 setInterval)
+   *   - dismissAlert / dismissAllAlerts
+   * → 자동화는 서버 Worker 담당. 드리프트 감지는 Phase 5C 에서 서버 측으로 이전 예정.
+   */
 
   function switchWorkspace(wsId: string) {
     if (demoMode) { setMessage("데모 모드 — 워크스페이스는 읽기 전용입니다"); return; }
@@ -1188,9 +1066,6 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       activeControllersRef.current.delete(controller);
     }
   }
-
-  // Keep the ref up-to-date so the scheduler always uses latest brand/competitor terms
-  callScrapeOneRef.current = callScrapeOne;
 
   /** Run a prompt across all activeProviders — results stream in as they arrive */
   async function callScrape(prompt: string) {

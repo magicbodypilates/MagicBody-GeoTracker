@@ -12,6 +12,9 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { asc } from "drizzle-orm";
 
+// API route — 항상 동적 처리 (build time 에 DB 접속 시도 방지)
+export const dynamic = "force-dynamic";
+
 const BrandConfigSchema = z.object({
   brandName: z.string().default(""),
   brandAliases: z.string().default(""),

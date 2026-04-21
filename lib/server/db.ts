@@ -40,7 +40,6 @@ export function getDb() {
       max: 10,
       idle_timeout: 30,
       connect_timeout: 10,
-      // prepare: true  — Drizzle 이 내부적으로 관리
     });
     g.__geotracker_pg_client = client;
     g.__geotracker_db = drizzle(client, { schema });
@@ -48,5 +47,16 @@ export function getDb() {
   return g.__geotracker_db;
 }
 
-export const db = getDb();
+/**
+ * db — lazy Proxy. 실제 접근 시점에 getDb() 호출.
+ * Next.js build 단계에서 page/route 를 collect 할 때 POSTGRES_URL 이 없어도
+ * import 자체는 안전하도록 처리. 첫 쿼리가 실행될 때 DB 연결이 생성된다.
+ */
+export const db = new Proxy({} as ReturnType<typeof getDb>, {
+  get(_target, prop, receiver) {
+    const real = getDb();
+    return Reflect.get(real, prop, receiver);
+  },
+});
+
 export { schema };

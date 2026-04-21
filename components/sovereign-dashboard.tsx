@@ -2127,7 +2127,7 @@ Now analyze all ${competitorList.length} competitors:`,
         {/* Footer info */}
         <div className="border-t border-th-border px-4 py-2 text-center text-xs leading-relaxed text-th-text-muted">
           {demoMode && <div>읽기 전용 데모</div>}
-          <div className={demoMode ? "mt-1" : ""}>매직바디 GEO 트래커</div>
+          <div className={demoMode ? "mt-1" : ""}>GEO 트래커</div>
         </div>
       </aside>
 

@@ -1,15 +1,11 @@
 import { useState } from "react";
-import type { AppState, BrandConfig } from "@/components/dashboard/types";
-
-const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+import type { BrandConfig } from "@/components/dashboard/types";
 
 type ProjectSettingsTabProps = {
   brand: BrandConfig;
   onBrandChange: (patch: Partial<BrandConfig>) => void;
   onReset?: () => void;
   onResetResponses?: () => void;
-  /** 현재 IndexedDB 에 저장된 전체 상태 — 서버 이관·다운로드용 */
-  fullState?: AppState;
 };
 
 export function ProjectSettingsTab({
@@ -17,7 +13,6 @@ export function ProjectSettingsTab({
   onBrandChange,
   onReset,
   onResetResponses,
-  fullState,
 }: ProjectSettingsTabProps) {
   return (
     <div className="space-y-5">
@@ -25,20 +20,20 @@ export function ProjectSettingsTab({
         <div className="mb-3 text-base font-semibold text-th-text">브랜드 &amp; 웹사이트</div>
         <p className="mb-4 text-sm leading-relaxed text-th-text-muted">
           브랜드 정보를 설정하면 모든 프롬프트, AEO 감사, 분석이 해당 웹사이트 기준으로 실행됩니다.
-          입력한 데이터는 브라우저에 로컬로 저장됩니다.
+          입력한 데이터는 서버 DB 에 저장되어 여러 관리자가 공유합니다.
         </p>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Field
           label="브랜드 / 회사명"
-          placeholder="매직바디"
+          placeholder="예: 내 브랜드명"
           value={brand.brandName}
           onChange={(v) => onBrandChange({ brandName: v })}
         />
         <Field
           label="브랜드 별칭 (쉼표로 구분)"
-          placeholder="MAGICBODY, 매직바디필라테스"
+          placeholder="예: 영문명, 줄임말, 운영사 이름"
           value={brand.brandAliases}
           onChange={(v) => onBrandChange({ brandAliases: v })}
         />
@@ -50,13 +45,13 @@ export function ProjectSettingsTab({
         </div>
         <Field
           label="산업 / 업종"
-          placeholder="필라테스 교육, 재활 필라테스, 온라인 강의 등"
+          placeholder="예: 업종, 분야, 전문 영역"
           value={brand.industry}
           onChange={(v) => onBrandChange({ industry: v })}
         />
         <Field
           label="타깃 키워드 (쉼표로 구분)"
-          placeholder="필라테스 자격증, 재활 필라테스, 필라테스 강사 양성"
+          placeholder="예: 주요 검색 키워드"
           value={brand.keywords}
           onChange={(v) => onBrandChange({ keywords: v })}
         />
@@ -90,10 +85,7 @@ export function ProjectSettingsTab({
         />
       </div>
 
-      {/* Phase 5A — 서버 DB 이관 도구 */}
-      {fullState && (
-        <ServerImportSection fullState={fullState} defaultName={brand.brandName || "매직바디"} />
-      )}
+      {/* Phase 5A 이관 UI 제거됨 — 서버 DB 가 source of truth */}
 
       {/* 부분 초기화 — 응답 이력만 */}
       {onResetResponses && (
@@ -121,144 +113,6 @@ export function ProjectSettingsTab({
             모든 데이터 초기화
           </button>
         </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * 서버 DB 이관 섹션.
- *
- * 제공 기능:
- *  - IndexedDB 덤프를 JSON 파일로 다운로드 (백업)
- *  - 서버에 새 워크스페이스 만들고 전체 데이터 일괄 업로드
- *  - 업로드 결과 요약 (각 항목별 건수)
- *
- * 현재 UI 는 이관만 담당. 이후 세션에서 클라이언트가 서버 데이터를 읽도록 전환 예정.
- */
-function ServerImportSection({
-  fullState,
-  defaultName,
-}: {
-  fullState: AppState;
-  defaultName: string;
-}) {
-  const [name, setName] = useState(defaultName);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string>("");
-  const [error, setError] = useState<string>("");
-
-  function downloadBackup() {
-    try {
-      const blob = new Blob([JSON.stringify(fullState, null, 2)], {
-        type: "application/json",
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const stamp = new Date().toISOString().slice(0, 10);
-      a.download = `geo-tracker-backup-${stamp}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setMessage("백업 JSON 파일을 다운로드했습니다.");
-      setError("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "다운로드 실패");
-    }
-  }
-
-  async function uploadToServer() {
-    if (busy) return;
-    if (!name.trim()) {
-      setError("워크스페이스 이름을 입력하세요.");
-      return;
-    }
-    if (
-      !window.confirm(
-        `현재 브라우저의 모든 데이터를 서버에 "${name.trim()}" 워크스페이스로 업로드합니다. 이어갈까요?`,
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    setMessage("");
-    setError("");
-    try {
-      const res = await fetch(`${BP}/api/admin/import`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceName: name.trim(),
-          appState: fullState,
-        }),
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || `HTTP ${res.status}`);
-      }
-      const c = data.counts ?? {};
-      setMessage(
-        `업로드 완료 — 프롬프트 ${c.prompts ?? 0} · 경쟁사 ${c.competitors ?? 0} · 실행 이력 ${c.runs ?? 0} · 감사 ${c.audits ?? 0}건. 워크스페이스 ID: ${data.workspace?.id ?? "?"}`,
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "업로드 실패");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-4">
-      <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-accent">
-        Phase 5A — 서버 DB 이관 (베타)
-      </div>
-      <p className="mb-3 text-sm text-th-text-secondary">
-        현재 브라우저에 저장된 데이터를 서버 DB 로 이관합니다. 이관 후에도 기존 IndexedDB 는
-        자동 삭제되지 않습니다. 이관 전 백업 JSON 을 먼저 받아두세요.
-      </p>
-
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <button
-          onClick={downloadBackup}
-          className="rounded-lg border border-th-border bg-th-card px-3 py-2 text-sm font-medium text-th-text hover:bg-th-card-hover"
-        >
-          💾 백업 JSON 다운로드
-        </button>
-      </div>
-
-      <div className="mb-3">
-        <label className="mb-1 block text-xs font-medium text-th-text-secondary">
-          서버에 만들 워크스페이스 이름
-        </label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          disabled={busy}
-          className="w-full rounded-md border border-th-border bg-th-card px-3 py-2 text-sm outline-none focus:border-th-accent"
-          placeholder="예: 매직바디 프로덕션"
-        />
-      </div>
-
-      <button
-        onClick={uploadToServer}
-        disabled={busy || !name.trim()}
-        className="rounded-lg bg-th-accent px-4 py-2 text-sm font-medium text-th-text-inverse hover:bg-th-accent-hover disabled:opacity-50"
-      >
-        {busy ? "업로드 중…" : "☁️ 서버로 이관"}
-      </button>
-
-      {message && (
-        <p className="mt-3 rounded-md border border-th-success/30 bg-th-success-soft p-2 text-xs text-th-success">
-          {message}
-        </p>
-      )}
-      {error && (
-        <p className="mt-3 rounded-md border border-th-danger/30 bg-th-danger-soft p-2 text-xs text-th-danger">
-          {error}
-        </p>
       )}
     </div>
   );
@@ -309,7 +163,7 @@ function WebsiteListField({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addUrl(); } }}
-          placeholder="https://www.magicbodypilates.co.kr"
+          placeholder="https://example.com"
           className="bd-input flex-1 rounded-lg p-2.5 text-sm"
         />
         <button

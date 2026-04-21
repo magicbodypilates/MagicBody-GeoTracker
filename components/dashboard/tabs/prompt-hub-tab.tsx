@@ -114,7 +114,7 @@ export function PromptHubTab({
                 setNewPrompt("");
               }
             }}
-            placeholder="예: 재활 필라테스 자격증 추천, {brand} 수업 후기"
+            placeholder="예: AI 에게 물어볼 실제 질문 (카테고리 · 추천 · 비교)"
             className="bd-input w-full rounded-lg px-3 py-2 text-sm"
           />
           <button

@@ -100,7 +100,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-th-bg text-th-text p-6">
       <div className="w-full max-w-md rounded-xl border border-th-border bg-th-card p-8 shadow-lg">
-        <h1 className="text-xl font-semibold mb-2">매직바디 GEO 트래커</h1>
+        <h1 className="text-xl font-semibold mb-2">GEO 트래커</h1>
         <p className="text-sm text-th-text-muted mb-6">관리자 로그인 확인 중</p>
 
         {status === "checking" && (

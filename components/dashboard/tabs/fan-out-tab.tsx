@@ -10,7 +10,7 @@ type FanOutTabProps = {
 };
 
 const PERSONA_PLACEHOLDER =
-  "재활 목적 수강생\n강사 자격증 준비생\n필라테스 스튜디오 원장\n초보 회원";
+  "예시 페르소나 1\n예시 페르소나 2\n예시 페르소나 3";
 
 export function FanOutTab({
   prompt,

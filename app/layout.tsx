@@ -15,8 +15,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "매직바디 GEO/AEO 트래커",
-  description: "AI 답변 엔진에서의 브랜드 가시성을 추적하는 로컬 저장 기반 대시보드",
+  title: "GEO/AEO 트래커",
+  description: "AI 답변 엔진에서의 브랜드 가시성을 추적하는 대시보드",
 };
 
 /** Inline script to apply theme before first paint — prevents flash */

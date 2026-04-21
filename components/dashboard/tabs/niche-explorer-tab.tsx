@@ -91,7 +91,7 @@ export function NicheExplorerTab({
           사용법 — 3단계
         </summary>
         <ol className="mt-2 list-inside list-decimal space-y-1 text-th-text-secondary">
-          <li>타겟 니치를 한 줄로 구체화 (예: "국내 재활 필라테스 강사 자격증 과정")</li>
+          <li>타겟 니치를 한 줄로 구체화 (예: 카테고리 · 대상 · 지역 · 차별점 조합)</li>
           <li><strong>쿼리 생성</strong> 클릭 → AI가 정보형/비교형/결정형 질문을 고르게 뽑아냅니다.</li>
           <li>원하는 질문을 개별 또는 <strong>전체 추적</strong>으로 프롬프트 허브에 추가 → 허브에서 실제 조사 실행.</li>
         </ol>
@@ -107,7 +107,7 @@ export function NicheExplorerTab({
             value={niche}
             onChange={(e) => onNicheChange(e.target.value)}
             className="bd-input flex-1 rounded-lg p-2.5 text-sm"
-            placeholder="예: 국내 재활 필라테스 강사 자격증 과정"
+            placeholder="예: 타겟 시장 · 대상 · 지역 조합"
           />
           <button
             onClick={onGenerateQueries}

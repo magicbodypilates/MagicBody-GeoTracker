@@ -50,8 +50,8 @@ export function normalizeTargetKey(url: string): NormalizedKey | null {
 
 /**
  * 매칭 키 문자열화 — 비교·저장·표시를 위해 단일 문자열로 직렬화.
- * - 일반 도메인: "magicbodypilates.co.kr"
- * - 소셜 플랫폼 + 핸들: "youtube.com/@magicbody1"
+ * - 일반 도메인: "example.com"
+ * - 소셜 플랫폼 + 핸들: "youtube.com/@channel_handle"
  */
 function keyToString(host: string, seg: string): string {
   if (SOCIAL_PLATFORM_DOMAINS.has(host)) return `${host}/${seg}`;

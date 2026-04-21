@@ -4,6 +4,7 @@
 # 컨테이너명: mbd-geo-tracker
 # 포트: 8040 → 3000 (내부)
 # 이미지 저장소: GHCR (GitHub Container Registry)
+# 네트워크: magicbody (NPM `nginx_proxy` 와 동일 네트워크)
 # ==========================================================
 version: "3.9"
 
@@ -20,8 +21,10 @@ services:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
     networks:
-      - nginx-proxy-network
+      broker-net:
+        ipv4_address: 172.20.0.6
 
 networks:
-  nginx-proxy-network:
-    external: true
+  broker-net:
+    external:
+      name: magicbody

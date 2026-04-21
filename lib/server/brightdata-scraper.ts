@@ -328,8 +328,17 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
   return `[응답 파싱 실패 — 확인 가능한 최상위 키: ${keyList}]`;
 }
 
-async function monitorUntilReady(snapshotId: string) {
-  const maxAttempts = 60;
+/**
+ * Bright Data snapshot 이 ready 될 때까지 폴링.
+ * 프로바이더별로 최적 전략이 다름 — ChatGPT 는 응답 속도가 다른 프로바이더 대비 느리지만
+ * 대부분 10~30초 내에 완료되므로 **고정 짧은 간격**이 지수 백오프보다 감지 시간이 짧음.
+ */
+async function monitorUntilReady(snapshotId: string, provider?: Provider) {
+  // ChatGPT 는 3초 고정 (지수 백오프가 오히려 완료 감지를 늦춤)
+  // 나머지는 2→4→8→10초 지수 백오프 유지
+  const isChatGPT = provider === "chatgpt";
+  const maxAttempts = isChatGPT ? 90 : 60; // 3초 × 90 = 최대 4.5분 / 지수 = 최대 8분
+  const FIXED_DELAY_CHATGPT = 3000;
   const BASE_DELAY = 2000;
   const MAX_DELAY = 10000;
   let elapsed = 0;
@@ -359,14 +368,15 @@ async function monitorUntilReady(snapshotId: string) {
       throw new Error("Snapshot failed");
     }
 
-    // Exponential backoff: 2s → 4s → 8s → 10s (capped)
-    const delay = Math.min(BASE_DELAY * Math.pow(2, Math.floor(attempt / 5)), MAX_DELAY);
+    const delay = isChatGPT
+      ? FIXED_DELAY_CHATGPT
+      : Math.min(BASE_DELAY * Math.pow(2, Math.floor(attempt / 5)), MAX_DELAY);
     elapsed += delay;
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
 
   throw new Error(
-    `Timed out after ~${Math.round(elapsed / 1000)}s waiting for snapshot ${snapshotId}`,
+    `Timed out after ~${Math.round(elapsed / 1000)}s waiting for snapshot ${snapshotId} (provider=${provider ?? "unknown"})`,
   );
 }
 
@@ -432,7 +442,7 @@ export async function runAiScraper(
     const pending = (await scrapeResponse.json()) as {
       snapshot_id: string;
     };
-    await monitorUntilReady(pending.snapshot_id);
+    await monitorUntilReady(pending.snapshot_id, parsed);
     payload = await downloadSnapshot(pending.snapshot_id);
   } else {
     if (!scrapeResponse.ok) {

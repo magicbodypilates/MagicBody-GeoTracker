@@ -16,10 +16,11 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || "/geo-tracker";
 export const USER_SESSION_COOKIE = "geo_user_session";
 export const ADMIN_SESSION_COOKIE = "geo_admin_session";
 
-// 일반관리자 쿠키는 basePath 전체에서 유효
+// 두 쿠키 모두 basePath 전체에서 유효 — API 경로(/geo-tracker/api/*)에도 전송되도록
+// 최고관리자 쿠키는 내용(kind: "admin") 으로 식별되므로 path 제한 없이 안전.
+// middleware 가 /admin(/*) 접근 시 geo_admin_session 필수 여부를 검사.
 export const USER_COOKIE_PATH = BASE_PATH || "/";
-// 최고관리자 쿠키는 /admin 서브경로에 제한
-export const ADMIN_COOKIE_PATH = `${BASE_PATH}/admin`;
+export const ADMIN_COOKIE_PATH = BASE_PATH || "/";
 
 const DEFAULT_TTL_SECONDS = 60 * 60 * 12; // 12시간
 

@@ -1,7 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { loadSovereignValue, saveSovereignValue, clearSovereignStore } from "@/lib/client/sovereign-store";
+import {
+  ensureWorkspace,
+  loadFromServer,
+  upsertBrand,
+  addPromptIfNew,
+  removePromptByText,
+  updatePromptTags as serverUpdatePromptTags,
+  addCompetitor as serverAddCompetitor,
+  removeCompetitorByName,
+  appendRun as serverAppendRun,
+  recordAudit as serverRecordAudit,
+  purgeWorkspace,
+  setCachedWorkspaceId,
+} from "@/lib/client/server-store";
 import { DEMO_STATE } from "@/lib/demo-data";
 import { AeoAuditTab } from "@/components/dashboard/tabs/aeo-audit-tab";
 import { AutomationServerTab } from "@/components/dashboard/tabs/automation-server-tab";
@@ -444,51 +457,46 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
    */
   const [loaded, setLoaded] = useState(false);
 
-  /** Load app state for active workspace */
+  /** 활성 서버 워크스페이스 ID — ensureWorkspace 로 설정 */
+  const [serverWsId, setServerWsId] = useState<string | null>(null);
+
+  /**
+   * Load app state — Phase 5A 이후 서버 DB 에서 로드.
+   * IndexedDB 는 폴백 캐시로만 유지 (서버 오류 시 참조).
+   * brand / prompts / competitors / runs / auditHistory → 서버 기준
+   * 기타 UI 선호도 (provider, activeProviders, niche, 등) → defaultState 기본값 사용
+   */
   useEffect(() => {
     if (demoMode || !activeWsId) return;
-    setLoaded(false); // 워크스페이스 전환 시 재로드 — 일시적으로 저장 차단
-    let mounted = true;
-    const key = storageKeyForWorkspace(activeWsId);
-    loadSovereignValue<AppState>(key, defaultState).then((data) => {
-      if (mounted) {
-        // Merge saved state with defaults so new fields are never undefined
+    setLoaded(false);
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // 1) 워크스페이스 확보 (캐시 → 서버 조회 → 없으면 생성)
+        const wsId = await ensureWorkspace({
+          brand: defaultState.brand,
+          competitors: [],
+          prompts: [],
+        });
+        if (cancelled) return;
+        setServerWsId(wsId);
+
+        // 2) 서버에서 전체 데이터 로드
+        const serverData = await loadFromServer(wsId);
+        if (cancelled) return;
+
+        // 3) defaultState + 서버 데이터 병합 — 서버에 없는 UI 선호도는 기본값
         const merged: AppState = {
           ...defaultState,
-          ...data,
-          brand: { ...defaultState.brand, ...(data.brand ?? {}) },
-          provider: ALL_PROVIDERS.includes(data.provider as Provider)
-            ? (data.provider as Provider)
-            : defaultState.provider,
-          activeProviders: Array.isArray(data.activeProviders)
-            ? data.activeProviders.filter((provider): provider is Provider =>
-                ALL_PROVIDERS.includes(provider as Provider),
-              )
-            : [],
+          ...serverData,
+          brand: { ...defaultState.brand, ...(serverData.brand ?? {}) },
         };
-        // Migrate legacy single website → websites array
-        const brandAny = data.brand as Record<string, unknown> | undefined;
-        if (brandAny && typeof brandAny.website === "string" && !Array.isArray(brandAny.websites)) {
-          merged.brand.websites = brandAny.website ? [brandAny.website] : [];
-        }
-        // Migrate legacy comma-separated competitors string → Competitor[]
-        if (typeof (data as Record<string, unknown>).competitors === "string") {
-          merged.competitors = (data as Record<string, unknown>).competitors
-            ? ((data as Record<string, unknown>).competitors as string)
-                .split(",")
-                .map((c: string) => c.trim())
-                .filter(Boolean)
-                .map((name: string) => ({ name, aliases: [], websites: [] }))
-            : [];
-        }
-        // Migrate legacy plain-string customPrompts → TaggedPrompt[]
-        if (Array.isArray(merged.customPrompts) && merged.customPrompts.length > 0 && typeof merged.customPrompts[0] === "string") {
-          merged.customPrompts = (merged.customPrompts as unknown as string[]).map((t) => ({ text: t, tags: [] }));
-        }
-        if (merged.activeProviders.length === 0) {
+        // activeProviders 빈 배열이면 provider 1개로 초기화
+        if (!merged.activeProviders || merged.activeProviders.length === 0) {
           merged.activeProviders = [merged.provider];
         }
-        // 필수 브랜드 별칭 자동 추가 — 저장된 데이터에 없으면 병합
+        // 필수 브랜드 별칭 보정
         const REQUIRED_ALIASES = ["MAGICBODY", "매직바디필라테스", "국제재활필라테스협회"];
         const existingAliases = merged.brand.brandAliases
           .split(",")
@@ -500,20 +508,42 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
           }
         }
         merged.brand.brandAliases = existingAliases.join(", ");
+
         setState(merged);
-        setLoaded(true); // 이제부터 저장 허용
+        setLoaded(true);
+      } catch (err) {
+        console.error("[dashboard] 서버 로드 실패 — 기본값으로 시작:", err);
+        if (!cancelled) {
+          setState(defaultState);
+          setLoaded(true);
+        }
       }
-    });
+    })();
+
     return () => {
-      mounted = false;
+      cancelled = true;
     };
   }, [activeWsId, demoMode]);
 
+  /**
+   * 브랜드 설정 debounced 서버 동기화 (600ms)
+   * IndexedDB 전체 저장은 제거됨 — 개별 mutation 이 서버에 쓰기 때문.
+   */
   useEffect(() => {
-    if (demoMode || !activeWsId) return;
-    if (!loaded) return; // 로드 완료 전엔 저장 금지 (기존 데이터 덮어쓰기 방지)
-    saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
-    // Update workspace brandName if changed
+    if (demoMode || !activeWsId || !loaded || !serverWsId) return;
+    const wsId = serverWsId;
+    const brandSnapshot = state.brand;
+    const t = setTimeout(() => {
+      upsertBrand(wsId, brandSnapshot).catch((e) =>
+        console.error("[dashboard] 서버 브랜드 저장 실패:", e),
+      );
+    }, 600);
+    return () => clearTimeout(t);
+  }, [state.brand, activeWsId, loaded, demoMode, serverWsId]);
+
+  /** 워크스페이스 목록 UI 의 브랜드명 레이블 유지 */
+  useEffect(() => {
+    if (demoMode || !activeWsId || !loaded) return;
     if (state.brand.brandName) {
       setWorkspaces((prev) => {
         const updated = prev.map((ws) =>
@@ -523,7 +553,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         return updated;
       });
     }
-  }, [state, activeWsId, loaded, demoMode]);
+  }, [state.brand.brandName, activeWsId, loaded, demoMode]);
 
   /**
    * Phase 5B 이후 브라우저 기반 스케줄러 제거 완료.
@@ -553,8 +583,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   function switchWorkspace(wsId: string) {
     if (demoMode) { setMessage("데모 모드 — 워크스페이스는 읽기 전용입니다"); return; }
-    // Save current state first
-    saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
+    // Phase 5A 이후 단일 서버 워크스페이스만 사용 — 로컬 탭 전환만 갱신
     setActiveWsId(wsId);
     localStorage.setItem(ACTIVE_WS_KEY, wsId);
     setShowWsPicker(false);
@@ -567,8 +596,6 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const updated = [...workspaces, ws];
     setWorkspaces(updated);
     localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
-    // Save current, switch to new
-    saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
     setState({ ...defaultState, brand: { ...defaultState.brand, brandName: name } });
     setActiveWsId(ws.id);
     localStorage.setItem(ACTIVE_WS_KEY, ws.id);
@@ -583,7 +610,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const updated = workspaces.filter((w) => w.id !== wsId);
     setWorkspaces(updated);
     localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
-    clearSovereignStore(storageKeyForWorkspace(wsId));
+    // 서버 워크스페이스는 별개 — handleResetData 에서 관리
     if (activeWsId === wsId) {
       switchWorkspace(updated[0].id);
     }
@@ -1093,6 +1120,12 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
             ...prev,
             runs: [result.run, ...prev.runs].slice(0, 500),
           }));
+          // 서버 DB 에도 저장 (fire-and-forget)
+          if (serverWsId) {
+            serverAppendRun(serverWsId, result.run).catch((e) =>
+              console.error("[dashboard] 서버 run 저장 실패:", e),
+            );
+          }
           if (!firstArrived) {
             firstArrived = true;
             setActiveTab("Responses");
@@ -1178,6 +1211,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       ...prev,
       runs: [...allRuns, ...prev.runs].slice(0, 500),
     }));
+    // 서버 DB 에도 저장 (병렬 fire-and-forget)
+    if (serverWsId && allRuns.length > 0) {
+      void Promise.all(
+        allRuns.map((r) =>
+          serverAppendRun(serverWsId, r).catch((e) =>
+            console.error("[dashboard] 서버 run 저장 실패:", e),
+          ),
+        ),
+      );
+    }
 
     const failSummary = failures
       .map((f) => `${PROVIDER_LABELS[f.provider] ?? f.provider}(${f.reason})`)
@@ -1214,17 +1257,24 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     setMessage(`페르소나 ${personas.length}개 기준으로 분화 프롬프트가 생성되었습니다.`);
   }
 
-  function addCustomPrompt(value: string) {
+  async function addCustomPrompt(value: string) {
     const cleaned = value.trim();
     if (!cleaned) return;
+    // UI 낙관 업데이트
     setState((prev) => {
       if (prev.customPrompts.some((p) => p.text === cleaned)) return prev;
       return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts].slice(0, 50) };
     });
+    // 서버 동기
+    if (serverWsId) {
+      addPromptIfNew(serverWsId, { text: cleaned, tags: [] }).catch((e) =>
+        console.error("[dashboard] 서버 프롬프트 추가 실패:", e),
+      );
+    }
     setMessage("추적 프롬프트가 추가되었습니다.");
   }
 
-  function removeCustomPrompt(value: string, deleteResponses?: boolean) {
+  async function removeCustomPrompt(value: string, deleteResponses?: boolean) {
     setState((prev) => ({
       ...prev,
       customPrompts: prev.customPrompts.filter((entry) => entry.text !== value),
@@ -1232,15 +1282,25 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         ? prev.runs.filter((r) => r.prompt !== value)
         : prev.runs,
     }));
+    if (serverWsId) {
+      removePromptByText(serverWsId, value).catch((e) =>
+        console.error("[dashboard] 서버 프롬프트 삭제 실패:", e),
+      );
+    }
   }
 
-  function updatePromptTags(text: string, tags: string[]) {
+  async function updatePromptTags(text: string, tags: string[]) {
     setState((prev) => ({
       ...prev,
       customPrompts: prev.customPrompts.map((p) =>
         p.text === text ? { ...p, tags } : p,
       ),
     }));
+    if (serverWsId) {
+      serverUpdatePromptTags(serverWsId, text, tags).catch((e) =>
+        console.error("[dashboard] 서버 태그 수정 실패:", e),
+      );
+    }
   }
 
   function deleteRun(index: number) {
@@ -1516,6 +1576,12 @@ Now analyze all ${competitorList.length} competitors:`,
         auditReport: data,
         auditHistory: [newEntry, ...(prev.auditHistory ?? [])].slice(0, 30),
       }));
+      // 서버 DB 저장
+      if (serverWsId) {
+        serverRecordAudit(serverWsId, { url: data.url, report: data }).catch((e) =>
+          console.error("[dashboard] 서버 감사 저장 실패:", e),
+        );
+      }
       setMessage("감사 완료 — 이력에 자동 저장되었습니다.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "감사 실행 실패.");
@@ -1552,9 +1618,64 @@ Now analyze all ${competitorList.length} competitors:`,
     setMessage(`이력 로드: ${entry.createdAt.replace("T", " ").slice(0, 16)} · ${entry.url}`);
   }
 
+  /**
+   * Competitor 목록의 prev → next diff 를 서버에 반영.
+   * - 이름 기반 매칭 (ID 는 서버 내부)
+   * - prev 에만 있음 → 삭제
+   * - next 에만 있음 → 추가
+   * - 양쪽에 있지만 aliases/websites 변경됨 → PATCH
+   */
+  async function syncCompetitorsDiff(
+    wsId: string,
+    prev: typeof state.competitors,
+    next: typeof state.competitors,
+  ) {
+    const prevNames = new Set(prev.map((c) => c.name));
+    const nextNames = new Set(next.map((c) => c.name));
+    const removed = prev.filter((c) => !nextNames.has(c.name));
+    const added = next.filter((c) => !prevNames.has(c.name));
+    const unchangedNames = prev.filter((c) => nextNames.has(c.name)).map((c) => c.name);
+    const changed = unchangedNames
+      .map((name) => {
+        const p = prev.find((c) => c.name === name)!;
+        const n = next.find((c) => c.name === name)!;
+        if (
+          JSON.stringify(p.aliases ?? []) !== JSON.stringify(n.aliases ?? []) ||
+          JSON.stringify(p.websites ?? []) !== JSON.stringify(n.websites ?? [])
+        ) {
+          return { prev: p, next: n };
+        }
+        return null;
+      })
+      .filter((x): x is { prev: typeof prev[0]; next: typeof next[0] } => !!x);
+
+    for (const r of removed) {
+      await removeCompetitorByName(wsId, r.name).catch((e) =>
+        console.error("[dashboard] 경쟁사 삭제 실패:", e),
+      );
+    }
+    for (const a of added) {
+      await serverAddCompetitor(wsId, a).catch((e) =>
+        console.error("[dashboard] 경쟁사 추가 실패:", e),
+      );
+    }
+    // 이름 변경은 배제 (삭제→추가로 처리해야 함). 여기선 별칭/웹사이트만.
+    for (const { next: n } of changed) {
+      await removeCompetitorByName(wsId, n.name).catch(() => {});
+      await serverAddCompetitor(wsId, n).catch((e) =>
+        console.error("[dashboard] 경쟁사 재생성 실패:", e),
+      );
+    }
+  }
+
   async function handleResetData() {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
-    if (!window.confirm("저장된 모든 데이터(실행 이력, 프롬프트, 설정)가 삭제됩니다. 계속하시겠습니까?")) return;
+    if (
+      !window.confirm(
+        "저장된 모든 데이터(실행 이력, 프롬프트, 설정)가 서버와 브라우저에서 삭제됩니다. 계속하시겠습니까?",
+      )
+    )
+      return;
 
     // 진행 중이던 scrape/batch 응답이 초기화 이후 state에 유입되는 걸 차단
     resetTokenRef.current += 1;
@@ -1563,10 +1684,30 @@ Now analyze all ${competitorList.length} competitors:`,
     try {
       await fetch(BP + "/api/cache/clear", { method: "POST" });
     } catch {
-      // 서버 캐시 클리어 실패는 무시 — UI 초기화는 진행
+      // 서버 캐시 클리어 실패는 무시
     }
 
-    await clearSovereignStore(storageKeyForWorkspace(activeWsId));
+    // 1) 서버 워크스페이스 삭제 (cascade 로 prompts/competitors/runs/audits 전부 제거)
+    if (serverWsId) {
+      await purgeWorkspace(serverWsId).catch((e) =>
+        console.error("[dashboard] 서버 purge 실패:", e),
+      );
+      setServerWsId(null);
+    }
+    setCachedWorkspaceId(null);
+
+    // 2) 새 워크스페이스 생성 (defaultState 브랜드로)
+    try {
+      const newId = await ensureWorkspace({
+        brand: defaultState.brand,
+        competitors: [],
+        prompts: [],
+      });
+      setServerWsId(newId);
+    } catch (e) {
+      console.error("[dashboard] 새 워크스페이스 생성 실패:", e);
+    }
+
     setBusy(false);
     setState(defaultState);
     setMessage("모든 데이터가 초기화되었습니다.");
@@ -1626,12 +1767,12 @@ Now analyze all ${competitorList.length} competitors:`,
       return (
         <ProjectSettingsTab
           brand={state.brand}
-          onBrandChange={(patch) =>
-            setState((prev) => ({ ...prev, brand: { ...prev.brand, ...patch } }))
-          }
+          onBrandChange={(patch) => {
+            setState((prev) => ({ ...prev, brand: { ...prev.brand, ...patch } }));
+            // 서버 동기 — 디바운스는 useEffect 로 별도 처리
+          }}
           onReset={handleResetData}
           onResetResponses={handleResetResponses}
-          fullState={state}
         />
       );
     }
@@ -1695,7 +1836,14 @@ Now analyze all ${competitorList.length} competitors:`,
         <BattlecardsTab
           competitors={state.competitors}
           battlecards={state.battlecards}
-          onCompetitorsChange={(competitors) => setState((prev) => ({ ...prev, competitors }))}
+          onCompetitorsChange={(next) => {
+            const prev = state.competitors;
+            setState((s) => ({ ...s, competitors: next }));
+            // 서버 diff 동기
+            if (serverWsId) {
+              void syncCompetitorsDiff(serverWsId, prev, next);
+            }
+          }}
           onBuildBattlecards={runBattlecards}
         />
       );

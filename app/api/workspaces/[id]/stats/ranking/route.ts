@@ -21,10 +21,11 @@ export const dynamic = "force-dynamic";
 
 const MIN_SAMPLES = 3;
 
-function parseInt32(v: string | null, def: number): number {
+function parseInt32(v: string | null, def: number, max = 365): number {
   if (!v) return def;
   const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : def;
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(Math.floor(n), max);
 }
 
 export async function GET(

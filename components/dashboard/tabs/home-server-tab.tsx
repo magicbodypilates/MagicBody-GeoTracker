@@ -30,9 +30,9 @@ import {
 } from "recharts";
 import type { Provider } from "@/components/dashboard/types";
 import { PROVIDER_LABELS, VISIBLE_PROVIDERS } from "@/components/dashboard/types";
+import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const WORKSPACE_ID_KEY = "geotracker:server-workspace-id";
 
 const PROVIDER_COLORS: Record<Provider, string> = {
   chatgpt: "#10a37f",
@@ -94,9 +94,11 @@ type BenchmarkResult = {
 
 type HomeServerTabProps = {
   onOpenTab: (tab: string) => void;
+  /** 현재 브랜드명 — 벤치마크 차트의 "우리 브랜드" 라벨 대체 */
+  brandName?: string;
 };
 
-export function HomeServerTab({ onOpenTab }: HomeServerTabProps) {
+export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
   const [wsId, setWsId] = useState<string | null>(null);
   const [days, setDays] = useState(30);
   const [autoOnly, setAutoOnly] = useState(true);
@@ -155,14 +157,19 @@ export function HomeServerTab({ onOpenTab }: HomeServerTabProps) {
     return () => clearInterval(t);
   }, [wsId, fetchAll]);
 
-  // 시계열 차트 데이터 — recharts 형식으로 변환
+  // 시계열 차트 데이터 — O(days × providers) 로 변환 (find() 대신 Map 조회)
   const chartData = useMemo(() => {
     if (!timeseries) return [];
+    const lookup: Record<string, Record<string, number>> = {};
+    for (const [provider, list] of Object.entries(timeseries.providers)) {
+      const m: Record<string, number> = {};
+      for (const r of list) m[r.date] = r.avgVisibility;
+      lookup[provider] = m;
+    }
     return timeseries.days.map((day) => {
       const row: Record<string, string | number> = { day: day.slice(5) };
       for (const p of VISIBLE_PROVIDERS) {
-        const found = timeseries.providers[p]?.find((r) => r.date === day);
-        row[p] = found ? found.avgVisibility : 0;
+        row[p] = lookup[p]?.[day] ?? 0;
       }
       return row;
     });
@@ -170,9 +177,10 @@ export function HomeServerTab({ onOpenTab }: HomeServerTabProps) {
 
   const benchmarkChart = useMemo(() => {
     if (!benchmark) return [];
+    const ourLabel = brandName?.trim() || "우리 브랜드";
     const rows = [
       {
-        name: `우리 브랜드 (${Math.round(benchmark.brand.mentionRate * 100)}%)`,
+        name: `${ourLabel} (${Math.round(benchmark.brand.mentionRate * 100)}%)`,
         mentionRate: Math.round(benchmark.brand.mentionRate * 1000) / 10,
         isBrand: true,
       },
@@ -183,7 +191,7 @@ export function HomeServerTab({ onOpenTab }: HomeServerTabProps) {
       })),
     ];
     return rows;
-  }, [benchmark]);
+  }, [benchmark, brandName]);
 
   if (!wsId) {
     return (

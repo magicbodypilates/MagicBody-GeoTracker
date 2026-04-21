@@ -8,8 +8,8 @@
  *     competitors: [{ name, mentionRate, citedRate }, ...]
  *   }
  *
- * "우리 브랜드 언급" = brand_mentions 배열 length > 0
- * "경쟁사 XX 언급" = competitor_mentions 배열에 XX 포함
+ * 구현: 경쟁사별로 쿼리를 돌리지 않고, 기간 내 runs 전체를 한 번 로드해
+ * 자바스크립트에서 배열 교집합 계산. DB 커넥션 풀 고갈·N+1 회피.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -18,10 +18,11 @@ import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-function parseInt32(v: string | null, def: number): number {
+function parseInt32(v: string | null, def: number, max = 365): number {
   if (!v) return def;
   const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : def;
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(Math.floor(n), max);
 }
 
 export async function GET(
@@ -49,7 +50,7 @@ export async function GET(
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
 
   try {
-    // 1) 브랜드 기준
+    // 1) 브랜드 기준 집계 + runs 의 competitorMentions/citedCompetitorDomains 배열 로드
     const [brandRow] = await db
       .select({
         sampleCount: sql<number>`count(*)::int`,
@@ -63,40 +64,46 @@ export async function GET(
     const brandMentionRate = brandSample > 0 ? (brandRow!.mentionCount ?? 0) / brandSample : 0;
     const brandCitedRate = brandSample > 0 ? (brandRow!.citedCount ?? 0) / brandSample : 0;
 
-    // 2) 경쟁사 목록 조회
+    // 2) 경쟁사 목록
     const competitors = await db
       .select()
       .from(schema.competitors)
       .where(eq(schema.competitors.workspaceId, id));
 
-    // 3) 각 경쟁사별로 competitor_mentions 에 name 혹은 aliases 가 포함된 runs 카운트
-    const compStats = await Promise.all(
-      competitors.map(async (c) => {
-        const targets = [c.name, ...(c.aliases ?? [])].filter(Boolean);
-        if (targets.length === 0) {
-          return {
-            name: c.name,
-            sampleCount: brandSample,
-            mentionRate: 0,
-            citedRate: 0,
-          };
-        }
-        // competitor_mentions && targets 교집합 비어있지 않음
-        const [row] = await db
-          .select({
-            mentionCount: sql<number>`count(*) filter (where ${schema.runs.competitorMentions} && ${targets})::int`,
-            citedCount: sql<number>`count(*) filter (where ${schema.runs.citedCompetitorDomains} && ${c.websites ?? []})::int`,
-          })
-          .from(schema.runs)
-          .where(and(...conditions));
-        return {
-          name: c.name,
-          sampleCount: brandSample,
-          mentionRate: brandSample > 0 ? (row?.mentionCount ?? 0) / brandSample : 0,
-          citedRate: brandSample > 0 ? (row?.citedCount ?? 0) / brandSample : 0,
-        };
-      }),
-    );
+    // 3) runs 의 경쟁사 언급/인용 배열만 로드 (답변 · 소스 · 기타 JSONB 제외 — 메모리 절약)
+    const runsForComp =
+      competitors.length === 0
+        ? []
+        : await db
+            .select({
+              competitorMentions: schema.runs.competitorMentions,
+              citedCompetitorDomains: schema.runs.citedCompetitorDomains,
+            })
+            .from(schema.runs)
+            .where(and(...conditions));
+
+    // 4) 자바스크립트에서 교집합 계산 — 경쟁사 수가 많아도 단일 루프
+    const compStats = competitors.map((c) => {
+      const targets = new Set(
+        [c.name, ...(c.aliases ?? [])].filter(Boolean).map((s) => s.toLowerCase()),
+      );
+      const sites = new Set((c.websites ?? []).map((s) => s.toLowerCase()));
+
+      let mentions = 0;
+      let cited = 0;
+      for (const r of runsForComp) {
+        const mArr = r.competitorMentions ?? [];
+        if (mArr.some((m) => targets.has(m.toLowerCase()))) mentions += 1;
+        const dArr = r.citedCompetitorDomains ?? [];
+        if (dArr.some((d) => sites.has(d.toLowerCase()))) cited += 1;
+      }
+      return {
+        name: c.name,
+        sampleCount: brandSample,
+        mentionRate: brandSample > 0 ? mentions / brandSample : 0,
+        citedRate: brandSample > 0 ? cited / brandSample : 0,
+      };
+    });
 
     return NextResponse.json({
       days,

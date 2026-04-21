@@ -27,8 +27,9 @@ import type {
   Citation,
 } from "@/components/dashboard/types";
 
+import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
+
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const WORKSPACE_ID_KEY = "geotracker:server-workspace-id";
 
 /* ==========================================================
  * 서버 타입 (DB 스키마와 1:1)

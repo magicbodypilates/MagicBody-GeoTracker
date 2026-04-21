@@ -21,8 +21,9 @@ import type {
 } from "@/components/dashboard/types";
 import { PROVIDER_LABELS, VISIBLE_PROVIDERS } from "@/components/dashboard/types";
 
+import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
+
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const WORKSPACE_ID_KEY = "geotracker:server-workspace-id";
 
 type ServerSchedule = {
   id: string;

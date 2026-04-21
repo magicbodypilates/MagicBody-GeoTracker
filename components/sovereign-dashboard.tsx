@@ -1775,6 +1775,7 @@ Now analyze all ${competitorList.length} competitors:`,
       return (
         <HomeServerTab
           onOpenTab={(tab) => setActiveTab(tab as TabKey)}
+          brandName={state.brand.brandName}
         />
       );
     }

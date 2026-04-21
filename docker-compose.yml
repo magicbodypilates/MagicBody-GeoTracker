@@ -1,4 +1,4 @@
-# MagicBody GEO/AEO Tracker
+# MagicBody GEO/AEO Tracker — 로컬 개발용 docker-compose
 # 서버 통합 시 기존 docker-compose에 병합하세요 (포트 8040 사용)
 version: "3.9"
 
@@ -17,8 +17,37 @@ services:
     environment:
       - NODE_ENV=production
       - NEXT_TELEMETRY_DISABLED=1
+      - POSTGRES_URL=postgres://geotracker:${POSTGRES_PASSWORD:-dev-change-me}@postgres:5432/geotracker
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - magicbody-net
+
+  # Phase 5A — PostgreSQL (공용 데이터 저장소)
+  postgres:
+    image: postgres:16-alpine
+    container_name: magicbody-geo-tracker-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=geotracker
+      - POSTGRES_USER=geotracker
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-dev-change-me}
+    volumes:
+      - geotracker-pgdata:/var/lib/postgresql/data
+    # 로컬 개발 편의 — 호스트에서 직접 psql 접속
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geotracker -d geotracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - magicbody-net
+
+volumes:
+  geotracker-pgdata:
 
 networks:
   magicbody-net:

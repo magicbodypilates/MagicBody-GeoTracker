@@ -49,7 +49,7 @@ export async function POST(req: Request) {
   } else {
     if (!isAdminSdkAvailable()) {
       return NextResponse.json(
-        { error: "admin_sdk_unavailable", hint: "FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON 설정 필요" },
+        { error: "firebase_project_not_configured", hint: "FIREBASE_PROJECT_ID 환경변수 설정 필요" },
         { status: 500 },
       );
     }

@@ -89,10 +89,9 @@ CMS_API_DOMAIN=https://api.magicbodypilates.co.kr
 CMS_API_APP_ID=<<CMS common.js 의 AppID>>
 CMS_API_APP_KEY=<<CMS common.js 의 AppKey>>
 
-# Firebase Admin SDK (ID 토큰 검증)
-# Firebase 콘솔 → classnaom 프로젝트 → 프로젝트 설정 → 서비스 계정 → 새 비공개 키 생성
-# 받은 JSON 전체를 한 줄로 만들어서 아래에 붙여넣기
-FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON=<<서비스 계정 JSON 한 줄로>>
+# Firebase ID 토큰 검증 (서비스 계정 JSON 불필요)
+# Google 공개키로 직접 검증하므로 프로젝트 ID 만 있으면 됨
+FIREBASE_PROJECT_ID=classnaom
 
 # 개발/테스트 편의 — CMS 세션 검증을 우회하고 아무 로그인도 통과시킴
 # 초기 배포 검증용. 실제 운영에선 false 또는 제거.
@@ -177,13 +176,10 @@ curl -I http://localhost:8040/geo-tracker
 - **`/geo-tracker`** (일반관리자): CMS Firebase 로그인 세션 필요. 비로그인 시 CMS 로그인 페이지로 리다이렉트. 일반관리자(role > 0)는 12개 탭만 노출.
 - **`/geo-tracker/admin`** (최고관리자): 자체 비밀번호 로그인. CMS와 무관하게 항상 접속 가능. 전체 18개 탭 노출.
 
-### Firebase 콘솔 설정 (1회)
-1. [Firebase Console](https://console.firebase.google.com) → `classnaom` 프로젝트 선택
-2. Authentication → Settings → Authorized domains → Add domain
-   - `cms.magicbodypilates.co.kr` 추가 (없으면 CMS 세션 감지 실패)
-3. 프로젝트 설정 → 서비스 계정 → "새 비공개 키 생성" → JSON 파일 다운로드
-   - JSON 전체를 한 줄로 만들어 서버 `.env` 의 `FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON` 에 입력
-   - 예: `jq -c . service-account.json` 으로 한 줄 변환
+### Firebase 설정 (콘솔 접속 불필요)
+- ID 토큰 검증은 Google 공개키로 직접 수행 (`lib/server/firebase-admin.ts` 참조)
+- 서비스 계정 JSON 관리 불필요, 프로젝트 ID 만 `.env` 의 `FIREBASE_PROJECT_ID` 에 설정
+- 기존 CMS 로그인이 도메인 `cms.magicbodypilates.co.kr` 에서 이미 동작 중이면 Authorized domains 추가 작업도 불필요
 
 ### 최고관리자 비밀번호 변경
 ```bash
@@ -199,7 +195,7 @@ cd /appdata/apps/geo-tracker && docker compose restart mbd-geo-tracker
 ```
 
 ### DEV_AUTH_BYPASS 전환 절차
-초기 테스트서버 배포는 `DEV_AUTH_BYPASS=true` 로 시작해 최고관리자 경로만 먼저 검증 → Firebase 서비스 계정 설정 후 `false` 로 전환:
+초기 테스트서버 배포는 `DEV_AUTH_BYPASS=true` 로 시작해 최고관리자 경로만 먼저 검증 → `FIREBASE_PROJECT_ID` 설정 후 `false` 로 전환:
 ```bash
 sudo nano /appdata/apps/geo-tracker/.env
 # DEV_AUTH_BYPASS=false 로 수정

@@ -200,38 +200,31 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+/**
+ * defaultState — 완전 백지 (Phase 5C-2 테스트 이후).
+ * 사용자가 Project Settings / Prompt Hub / Battlecards 에서 직접 입력.
+ * 서버 DB 가 source of truth — 이 값은 첫 로드 시 플레이스홀더일 뿐.
+ */
 const defaultState: AppState = {
   brand: {
-    brandName: "매직바디",
-    brandAliases: "MAGICBODY, 매직바디필라테스, 국제재활필라테스협회",
-    websites: ["https://www.magicbodypilates.co.kr"],
-    industry: "필라테스 교육 / 재활 필라테스 / 강사 양성",
-    keywords: "필라테스 자격증, 재활 필라테스, 필라테스 강사 양성, 온라인 필라테스 강의",
-    description:
-      "매직바디는 재활 필라테스 전문 강사 양성과 온라인 강의를 제공하는 필라테스 교육 브랜드입니다. 국제재활필라테스협회가 운영합니다.",
+    brandName: "",
+    brandAliases: "",
+    websites: [],
+    industry: "",
+    keywords: "",
+    description: "",
   },
   provider: "chatgpt",
-  // Copilot / Grok 은 UI에서 숨김(types.ts HIDDEN_PROVIDERS) — 기본 조사대상에서도 제외
   activeProviders: ["chatgpt", "perplexity", "gemini", "google_ai"],
-  prompt: "필라테스 강사 자격증 딸 수 있는 곳 추천해줘. 출처 링크도 포함해줘.",
-  customPrompts: [
-    { text: "필라테스 강사 자격증 딸 수 있는 곳 추천해줘. 출처 링크도 포함해줘.", tags: [] },
-    { text: "필라테스 강사 자격증 따는 방법 알려줘. 출처 링크도 포함해줘.", tags: [] },
-  ],
-  personas: "필라테스 강사 지망생\n재활 필라테스 강사\n필라테스 센터 원장\n스포츠 재활 전문가",
+  prompt: "",
+  customPrompts: [],
+  personas: "",
   fanoutPrompts: [],
-  niche: "국내 재활 필라테스 강사 자격증 과정",
+  niche: "",
   nicheQueries: [],
   cronExpr: "0 */6 * * *",
-  githubWorkflow:
-    "name: magicbody-geo-tracker\non:\n  schedule:\n    - cron: '0 */6 * * *'\njobs:\n  track:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run test:scraper",
-  competitors: [
-    { name: "이과마스터", aliases: ["이과마스터필라테스"], websites: [] },
-    { name: "모던필라테스", aliases: [], websites: [] },
-    { name: "스팟필라테스", aliases: [], websites: [] },
-    { name: "바시필라테스", aliases: ["Basi Pilates"], websites: [] },
-    { name: "KPIA", aliases: ["한국필라테스지도자협회"], websites: [] },
-  ],
+  githubWorkflow: "",
+  competitors: [],
   battlecards: [],
   runs: [],
   auditUrl: "https://example.com",
@@ -493,18 +486,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         if (!merged.activeProviders || merged.activeProviders.length === 0) {
           merged.activeProviders = [merged.provider];
         }
-        // 필수 브랜드 별칭 보정
-        const REQUIRED_ALIASES = ["MAGICBODY", "매직바디필라테스", "국제재활필라테스협회"];
-        const existingAliases = merged.brand.brandAliases
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        for (const alias of REQUIRED_ALIASES) {
-          if (!existingAliases.some((a) => a.toLowerCase() === alias.toLowerCase())) {
-            existingAliases.push(alias);
-          }
-        }
-        merged.brand.brandAliases = existingAliases.join(", ");
+        // REQUIRED_ALIASES 자동 주입 제거 — 사용자가 Project Settings 에서 직접 관리
 
         setState(merged);
         setLoaded(true);

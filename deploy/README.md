@@ -5,19 +5,42 @@
 - **도메인**: `https://cms.magicbodypilates.co.kr/geo-tracker`
 - **내부 포트**: 8040 (컨테이너 3000 → 호스트 8040)
 - **컨테이너명**: `mbd-geo-tracker`
-- **이미지**: `${REGISTRY_LOGIN_SERVER}/magicbody-geo-tracker:latest`
+- **이미지 저장소**: GHCR (`ghcr.io/magicbodypilates/magicbody-geo-tracker`)
+- **인증 방식**: GHCR 는 GitHub 내장 `GITHUB_TOKEN` 사용 → ACR 관련 시크릿 불필요
 
-## 1. GitHub Secrets 확인 (이미 설정되어 있음)
+## 1. GitHub Secrets (필요한 것만)
 
-기존 MagicBody-Web과 동일한 시크릿 재사용:
+GHCR 전환으로 **레지스트리 시크릿 3개 제거**. SSH 관련 4개만 설정하면 됨.
 
-- `REGISTRY_LOGIN_SERVER`
-- `REGISTRY_USERNAME`
-- `REGISTRY_PASSWORD`
-- `AZURE_DEV_HOST`, `AZURE_DEV_PORT`, `AZURE_DEV_USER`, `AZURE_DEV_SSH_KEY`
+| Secret | 용도 |
+|---|---|
+| `AZURE_DEV_HOST` | dev VM 접속 주소 |
+| `AZURE_DEV_PORT` | dev VM SSH 포트 (`2222`) |
+| `AZURE_DEV_USER` | dev VM 접속 계정 |
+| `AZURE_DEV_SSH_KEY` | dev VM SSH 개인키 |
 
-> 포크 repo(`magicbodypilates/MagicBody-GeoTracker`)에는 별도 시크릿을 복사해 넣어야 합니다.
-> GitHub 웹에서 Settings → Secrets and variables → Actions 에서 동일 이름으로 추가.
+> 기존 MagicBody-Web repo 에 설정된 동일 시크릿 4개를 `MagicBody-GeoTracker` repo 에도 그대로 복사.
+> GitHub 웹 → Settings → Secrets and variables → Actions → New repository secret.
+
+### 1-1. GHCR 관련 1회 작업 (서버에서)
+
+첫 배포 전에 **서버에서 1회** GHCR 로그인 필요 (private 이미지 pull 권한).
+
+1. **GitHub Personal Access Token (classic) 발급**
+   - https://github.com/settings/tokens → Generate new token (classic)
+   - 권한: `read:packages` 만 체크
+   - 생성된 토큰을 안전한 곳에 임시 저장
+
+2. **서버에서 docker login**
+   ```bash
+   ssh <AZURE_DEV_USER>@<AZURE_DEV_HOST> -p 2222
+   echo "<PAT>" | docker login ghcr.io -u magicbodypilates --password-stdin
+   # 성공: "Login Succeeded" 메시지
+   # 인증 정보는 ~/.docker/config.json 에 저장 → 서버 재시작해도 유지
+   ```
+
+3. (선택) 이미지를 public 으로 전환하면 서버 측 로그인 자체가 불필요
+   - GitHub → 프로필 → Packages → `magicbody-geo-tracker` → Package settings → Change visibility → Public
 
 ## 2. 서버 최초 설정 (1회만)
 
@@ -34,8 +57,6 @@ nano docker-compose.yml
 
 # 3) .env 파일 생성 (실제 코드가 읽는 변수명 기준)
 cat > .env <<'EOF'
-REGISTRY_LOGIN_SERVER=mbdacrkr.azurecr.io
-
 # Bright Data (필수)
 BRIGHT_DATA_KEY=<<여기에 Bright Data API 토큰 입력>>
 BRIGHT_DATA_DATASET_CHATGPT=<<ChatGPT 스크래퍼 Dataset ID>>
@@ -83,8 +104,8 @@ chmod 600 .env
 # 4) 외부 네트워크 확인 (기존 nginx-proxy-network 재사용)
 docker network ls | grep nginx-proxy-network
 
-# 5) 도커 레지스트리 로그인 (이미 되어 있으면 생략)
-docker login mbdacrkr.azurecr.io
+# 5) GHCR 로그인 (1-1 항목 참조 — 1회만)
+# echo "<PAT>" | docker login ghcr.io -u magicbodypilates --password-stdin
 ```
 
 ## 3. 서버 docker-compose.yml
@@ -96,8 +117,8 @@ docker login mbdacrkr.azurecr.io
 ## 4. 최초 이미지 배포
 
 로컬에서 코드를 dev 브랜치에 push하면 GitHub Actions가 자동으로:
-1. 도커 이미지 빌드 → ACR push
-2. SSH로 서버 접속 → `docker compose up -d --force-recreate mbd-geo-tracker`
+1. 도커 이미지 빌드 → GHCR push (`ghcr.io/magicbodypilates/magicbody-geo-tracker`)
+2. SSH로 서버 접속 → `docker pull` → `docker compose up -d --force-recreate mbd-geo-tracker`
 
 ```bash
 # GitHub 웹에서 수동 트리거도 가능:
@@ -204,7 +225,7 @@ dev 브랜치 테스트 완료 후 운영 배포용 워크플로우는 `deployme
 ```bash
 # 서버 SSH 접속 후
 cd /appdata/apps/geo-tracker
-IMAGE_REPO="mbdacrkr.azurecr.io/magicbody-geo-tracker"
+IMAGE_REPO="ghcr.io/magicbodypilates/magicbody-geo-tracker"
 docker pull ${IMAGE_REPO}:<이전 dev-SHA>
 docker tag ${IMAGE_REPO}:<이전 dev-SHA> ${IMAGE_REPO}:latest
 docker compose up -d --force-recreate mbd-geo-tracker

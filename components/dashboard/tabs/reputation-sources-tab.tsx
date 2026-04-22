@@ -718,7 +718,7 @@ export function ReputationSourcesTab({
           <span className="font-semibold text-th-text">{filteredRuns.length}</span> responses across{" "}
           <span className="font-semibold text-th-text">{promptGroups.length}</span> prompt{promptGroups.length > 1 ? "s" : ""}
         </span>
-        {onResetManualResponses && runs.some((r) => r.auto !== true) && (
+        {onResetManualResponses && runs.length > 0 && (
           <button
             type="button"
             onClick={onResetManualResponses}

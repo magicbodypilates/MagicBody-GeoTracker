@@ -407,7 +407,7 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
                     <BarChart data={benchmarkChart} layout="vertical" margin={{ left: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
                       <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} unit="%" />
-                      <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 10 }} />
+                      <YAxis type="category" dataKey="name" width={180} tick={{ fontSize: 10 }} />
                       <Tooltip />
                       <Bar dataKey="mentionRate" fill="var(--th-accent)" />
                     </BarChart>

@@ -249,13 +249,36 @@ export function AutomationServerTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
-  // 프롬프트·경쟁사가 외부에서 변경되면 서버 목록 갱신 (추적 프롬프트 카운트 동기화)
+  // 프롬프트·경쟁사가 외부에서 변경되면 서버 DB에 동기화 후 목록 갱신
+  // syncInitialSetup 과 동일 로직이나 409(중복)는 조용히 무시 → 새로 추가된 항목만 서버에 저장됨
   useEffect(() => {
-    if (workspaceId && initState === "ready") {
-      void reloadPrompts();
-    }
+    if (!workspaceId || initState !== "ready") return;
+    let cancelled = false;
+    const sync = async () => {
+      for (const p of customPrompts) {
+        if (!p.text?.trim() || cancelled) continue;
+        await fetch(`${BP}/api/workspaces/${workspaceId}/prompts`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ text: p.text, tags: p.tags ?? [] }),
+        }).catch(() => null); // 409 포함 모든 에러 무시
+      }
+      for (const c of competitors) {
+        if (!c.name?.trim() || cancelled) continue;
+        await fetch(`${BP}/api/workspaces/${workspaceId}/competitors`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ name: c.name, aliases: c.aliases ?? [], websites: c.websites ?? [] }),
+        }).catch(() => null);
+      }
+      if (!cancelled) void reloadPrompts();
+    };
+    void sync();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customPrompts.length, competitors.length, workspaceId]);
+  }, [customPrompts.length, competitors.length, workspaceId, initState]);
 
   async function addSchedule() {
     if (!workspaceId || busy || !newName.trim() || newProviders.length === 0) return;

@@ -55,12 +55,39 @@ const defaultDatasetIds: Record<Provider, string> = {
 
 const providerBaseUrl: Record<Provider, string> = {
   chatgpt: "https://chatgpt.com/",
-  perplexity: "https://www.perplexity.ai/",
+  perplexity: "https://www.perplexity.ai",
   copilot: "https://copilot.microsoft.com/",
   gemini: "https://gemini.google.com/",
-  google_ai: "https://www.google.com/",
+  google_ai: "https://google.com/aimode",
   grok: "https://grok.com/",
 };
+
+function buildInputRecord(
+  provider: Provider,
+  prompt: string,
+  country?: string,
+): Record<string, unknown> {
+  const url = providerBaseUrl[provider];
+  const countryValue = country ?? "";
+
+  switch (provider) {
+    case "chatgpt":
+      return { url, prompt, country: countryValue, web_search: false, additional_prompt: "" };
+    case "perplexity":
+      return { url, prompt, country: countryValue, index: 1 };
+    case "gemini":
+      return { url, prompt, index: 1 };
+    case "google_ai":
+      return { url, prompt, country: countryValue };
+    case "copilot":
+    case "grok":
+    default: {
+      const rec: Record<string, unknown> = { url, prompt, index: 1 };
+      if (country) rec.geolocation = country;
+      return rec;
+    }
+  }
+}
 
 type ScrapeRequest = {
   provider: Provider;
@@ -423,15 +450,7 @@ export async function runAiScraper(
     }
   }
 
-  const inputRecord: Record<string, unknown> = {
-    url: providerBaseUrl[parsed],
-    prompt: request.prompt,
-    index: 1,
-  };
-
-  if (request.country) {
-    inputRecord.geolocation = request.country;
-  }
+  const inputRecord = buildInputRecord(parsed, request.prompt, request.country);
 
   const scrapeResponse = await fetch(
     `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,

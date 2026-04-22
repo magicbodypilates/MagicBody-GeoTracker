@@ -24,6 +24,7 @@ import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { CronExpressionParser } from "cron-parser";
 import { db, schema } from "@/lib/server/db";
 import { runAiScraper } from "@/lib/server/brightdata-scraper";
+import { classifySentiment } from "@/lib/server/llm-sentiment";
 import { matchCitationDomains } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt } from "@/drizzle/schema";
@@ -203,8 +204,23 @@ async function executeSchedule(
         const citedBrandDomains = matchCitationDomains(citations, brandWebsites);
         const citedCompetitorDomains = matchCitationDomains(citations, competitorWebsites);
 
-        const visibilityScore = calcVisibility(answerText, brandTerms, citedBrandDomains.length > 0);
-        const sentiment = detectSentiment(answerText, brandTerms);
+        // Sentiment: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 로 즉시 결정 (LLM 호출 낭비 방지).
+        // 언급이 있을 때만 LLM 에 "positive/neutral/negative" 판정 요청, 실패하면 키워드 휴리스틱으로 폴백.
+        let sentiment = detectSentiment(answerText, brandTerms);
+        if (sentiment !== "not-mentioned") {
+          const llm = await classifySentiment({
+            answerText,
+            brandName: brandTerms[0] ?? "",
+            brandAliases: brandTerms.slice(1),
+          });
+          if (llm) sentiment = llm;
+        }
+        const visibilityScore = calcVisibility(
+          answerText,
+          brandTerms,
+          citedBrandDomains.length > 0,
+          sentiment,
+        );
 
         const inserted = await db
           .insert(schema.runs)
@@ -443,7 +459,12 @@ function findMentions(text: string, terms: string[]): string[] {
   return [...found];
 }
 
-function calcVisibility(text: string, brandTerms: string[], hasCitation: boolean): number {
+function calcVisibility(
+  text: string,
+  brandTerms: string[],
+  hasCitation: boolean,
+  sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
+): number {
   if (!text) return 0;
   const lower = text.toLowerCase();
   let mentions = 0;
@@ -463,7 +484,6 @@ function calcVisibility(text: string, brandTerms: string[], hasCitation: boolean
   if (mentions >= 3) score += 15;
   else if (mentions >= 2) score += 8;
   if (hasCitation) score += 20;
-  const sentiment = detectSentiment(text, brandTerms);
   if (sentiment === "positive") score += 15;
   else if (sentiment === "neutral") score += 5;
   return Math.min(score, 100);

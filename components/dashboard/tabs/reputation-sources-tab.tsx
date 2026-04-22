@@ -718,14 +718,14 @@ export function ReputationSourcesTab({
           <span className="font-semibold text-th-text">{filteredRuns.length}</span> responses across{" "}
           <span className="font-semibold text-th-text">{promptGroups.length}</span> prompt{promptGroups.length > 1 ? "s" : ""}
         </span>
-        {onResetManualResponses && runs.length > 0 && (
+        {onResetManualResponses && runs.some((r) => r.auto !== true) && (
           <button
             type="button"
             onClick={onResetManualResponses}
             className="shrink-0 rounded-md border border-th-border bg-th-card-alt px-3 py-1.5 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text"
             title="수동으로 실행한 응답 이력만 삭제 (자동 실행 이력은 유지)"
           >
-            실행 결과 초기화
+            수동 응답 삭제
           </button>
         )}
       </div>

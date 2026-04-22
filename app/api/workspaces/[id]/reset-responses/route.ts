@@ -55,13 +55,19 @@ export async function POST(
       });
     }
 
-    // scope=all (기본)
+    // scope=all (기본) — runs, 분석 이력, 스케줄 타이밍도 초기화
     const [runsDeleted, auditsDeleted, driftsDeleted, statsDeleted] = await Promise.all([
       db.delete(schema.runs).where(eq(schema.runs.workspaceId, id)).returning({ id: schema.runs.id }),
       db.delete(schema.auditHistory).where(eq(schema.auditHistory.workspaceId, id)).returning({ id: schema.auditHistory.id }),
       db.delete(schema.driftAlerts).where(eq(schema.driftAlerts.workspaceId, id)).returning({ id: schema.driftAlerts.id }),
       db.delete(schema.dailyStats).where(eq(schema.dailyStats.workspaceId, id)),
     ]);
+
+    // 스케줄 마지막 실행 시각 초기화 (응답 이력을 지웠으니 실행 기록도 리셋)
+    await db
+      .update(schema.schedules)
+      .set({ lastRunAt: null, nextRunAt: null })
+      .where(eq(schema.schedules.workspaceId, id));
 
     return NextResponse.json({
       ok: true,

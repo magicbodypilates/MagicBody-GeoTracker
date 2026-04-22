@@ -241,9 +241,6 @@ export function AutomationServerTab({
     void reloadSchedules();
     void reloadRecentRuns();
     void reloadPrompts();
-    // 자동 실행 결과는 1분마다 갱신.
-    // dependency 는 workspaceId 만 — reload 함수들은 내부 state 변화에 반응해 재생성되지만
-    // interval 은 한 번만 설정하고 최신 함수를 클로저로 잡지 않도록 setInterval 안에서 직접 호출.
     const t = setInterval(() => {
       void reloadRecentRuns();
       void reloadSchedules();
@@ -251,6 +248,14 @@ export function AutomationServerTab({
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // 프롬프트·경쟁사가 외부에서 변경되면 서버 목록 갱신 (추적 프롬프트 카운트 동기화)
+  useEffect(() => {
+    if (workspaceId && initState === "ready") {
+      void reloadPrompts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customPrompts.length, competitors.length, workspaceId]);
 
   async function addSchedule() {
     if (!workspaceId || busy || !newName.trim() || newProviders.length === 0) return;
@@ -442,7 +447,11 @@ export function AutomationServerTab({
                       {s.providers.length > 2 ? " …" : ""}
                     </td>
                     <td className="py-2 text-th-text-muted">{formatKst(s.lastRunAt)}</td>
-                    <td className="py-2 text-th-text-muted">{formatKst(s.nextRunAt)}</td>
+                    <td className="py-2 text-th-text-muted">
+                      {s.nextRunAt && new Date(s.nextRunAt) <= new Date()
+                        ? <span className="text-th-text-accent">실행 대기 중…</span>
+                        : formatKst(s.nextRunAt)}
+                    </td>
                     <td className="py-2">
                       <button
                         onClick={withRowLock(s.id, () => toggleActive(s))}

@@ -73,7 +73,7 @@ export function PromptHubTab({
                   type="button"
                   disabled={busy}
                   onClick={onClearAll}
-                  className="rounded-md border border-th-border bg-th-card-alt px-2.5 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text disabled:opacity-60"
+                  className="rounded-lg border border-th-border bg-th-card-alt px-3 py-1.5 text-sm text-th-text-muted hover:bg-th-card-hover hover:text-th-text disabled:opacity-60"
                   title="저장된 프롬프트를 모두 삭제 (응답 이력은 유지)"
                 >
                   전체 삭제
@@ -83,7 +83,7 @@ export function PromptHubTab({
           )}
         </div>
         <p className="mb-3 text-sm text-th-text-secondary">
-          시간 경과에 따라 추적할 프롬프트를 추가하세요. <span className="font-semibold">{"{brand}"}</span>를 쓰면 브랜드명이 자동 삽입됩니다.
+          추적할 프롬프트를 추가하세요. <span className="font-semibold">{"{brand}"}</span>를 쓰면 브랜드명이 자동 삽입됩니다.
           {activeProviderCount > 1 && (
             <span className="ml-1 text-th-text-accent">· 선택한 {activeProviderCount}개 AI 모델을 병렬로 실행합니다.</span>
           )}

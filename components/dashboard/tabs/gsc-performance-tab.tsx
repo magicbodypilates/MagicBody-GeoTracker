@@ -188,10 +188,10 @@ export function GscPerformanceTab({
   const [loadingSites, setLoadingSites] = useState(false);
   const [selectedSite, setSelectedSite] = useState<string>("");
   const [dimension, setDimension] = useState<Dimension>("query");
-  // 최근 30일 창으로 고정 — GSC 는 최신 데이터 2~3일 지연이 있어 종료일을 3일 전으로 설정
-  // (시작일 33일 전 ~ 종료일 3일 전 = 30일 구간)
-  const startDate = isoDaysAgo(33);
-  const endDate = isoDaysAgo(3);
+  // 최근 30일 창으로 고정 — GSC 데이터는 1~2일 지연이 있어 종료일을 1일 전으로 설정
+  // (시작일 31일 전 ~ 종료일 1일 전 = 30일 구간)
+  const startDate = isoDaysAgo(31);
+  const endDate = isoDaysAgo(1);
   const [snapshot, setSnapshot] = useState<GscSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>("");

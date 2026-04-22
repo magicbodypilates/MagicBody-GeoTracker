@@ -60,6 +60,18 @@ async function tick() {
     }
 
     const data = await res.json();
+    // 새 fire-and-forget 프로토콜 — 서버는 즉시 { ok, mode, skipped, elapsedSeconds } 반환
+    // 실제 runTick 완료/실패 로그는 서버 컨테이너(mbd-geo-tracker)에 기록됨.
+    if (data.mode === "background") {
+      if (data.skipped) {
+        log(
+          `tick #${tickCount} (${elapsed}ms) — 서버에서 이전 tick 이 ${data.elapsedSeconds}s 째 실행 중, 이번 tick 스킵됨`,
+        );
+      }
+      // skipped=false 는 정상 수용 — 소음 줄이려 별도 로그 안 남김
+      return;
+    }
+    // 옛 동기 프로토콜 호환 — 배포 직후 롤백 대비
     if (data.result) {
       const r = data.result;
       if (r.checkedSchedules > 0 || r.executedRuns > 0 || r.errors.length > 0) {

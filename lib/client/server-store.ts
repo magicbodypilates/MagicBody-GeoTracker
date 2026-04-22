@@ -357,9 +357,14 @@ export async function removeCompetitorByName(wsId: string, name: string): Promis
   const { competitors } = await j<{ competitors: ServerCompetitor[] }>(
     `${BP}/api/workspaces/${wsId}/competitors`,
   );
-  const target = competitors.find((c) => c.name === name);
-  if (!target) return;
-  await j(`${BP}/api/competitors/${target.id}`, { method: "DELETE" });
+  // 과거 중복 버그로 같은 이름이 여러 row 에 남을 수 있어 모든 매치를 함께 삭제.
+  const targets = competitors.filter((c) => c.name === name);
+  if (targets.length === 0) return;
+  await Promise.all(
+    targets.map((t) =>
+      j(`${BP}/api/competitors/${t.id}`, { method: "DELETE" }).catch(() => {}),
+    ),
+  );
 }
 
 export async function updateCompetitor(

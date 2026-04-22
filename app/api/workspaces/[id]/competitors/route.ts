@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +42,32 @@ export async function POST(
   try {
     const body = await req.json();
     const parsed = CreateCompetitorSchema.parse(body);
+
+    // 동일 이름 기존 레코드 확인 — 중복 삽입 방지 (DB 유니크 제약 없는 상태 보완)
+    const existing = await db
+      .select()
+      .from(schema.competitors)
+      .where(
+        and(
+          eq(schema.competitors.workspaceId, id),
+          eq(schema.competitors.name, parsed.name),
+        ),
+      )
+      .limit(1);
+
+    if (existing.length > 0) {
+      // 이미 있으면 aliases/websites 병합(merge) 후 그대로 반환 — 중복 row 증식 차단
+      const [updated] = await db
+        .update(schema.competitors)
+        .set({
+          aliases: Array.from(new Set([...(existing[0].aliases ?? []), ...parsed.aliases])),
+          websites: Array.from(new Set([...(existing[0].websites ?? []), ...parsed.websites])),
+        })
+        .where(eq(schema.competitors.id, existing[0].id))
+        .returning();
+      return NextResponse.json({ competitor: updated }, { status: 200 });
+    }
+
     const [created] = await db
       .insert(schema.competitors)
       .values({

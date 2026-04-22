@@ -403,12 +403,20 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
             {benchmark && benchmark.competitors.length > 0 && (
               <div className="rounded-lg border border-th-border bg-th-card p-4">
                 <h3 className="mb-2 text-base font-semibold text-th-text">경쟁사 언급 비교</h3>
-                <div className="h-60">
+                {/* 각 막대마다 32px 고정 높이 할당 — 라벨이 겹치지 않게 전체 높이를 행수에 비례시킴 */}
+                <div style={{ height: Math.max(benchmarkChart.length * 32 + 40, 240) }}>
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={benchmarkChart} layout="vertical" margin={{ left: 0, right: 40 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
                       <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} unit="%" />
-                      <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 10 }} />
+                      {/* interval={0} 으로 Recharts 가 자동 생략하지 못하게 강제 — 모든 경쟁사 이름 표시 */}
+                      <YAxis
+                        type="category"
+                        dataKey="name"
+                        width={150}
+                        tick={{ fontSize: 10 }}
+                        interval={0}
+                      />
                       <Tooltip formatter={(v) => [`${v}%`, "언급률"]} />
                       <Bar dataKey="mentionRate" fill="var(--th-accent)">
                         <LabelList

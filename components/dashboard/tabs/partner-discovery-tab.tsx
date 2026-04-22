@@ -1,4 +1,9 @@
 import { useMemo, useState, useCallback } from "react";
+import {
+  buildTargetKeys,
+  isUrlMatchingCitedKeys,
+  SOCIAL_PLATFORM_DOMAINS,
+} from "@/components/dashboard/citation-utils";
 
 type PartnerDiscoveryTabProps = {
   partnerLeaderboard: Array<{ url: string; count: number; prompts: string[] }>;
@@ -30,6 +35,19 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
   const [expandedDomains, setExpandedDomains] = useState<Record<string, boolean>>({});
   const [sortBy, setSortBy] = useState<SortKey>("citations");
 
+  // 브랜드 공식 URL → 매칭 키 (youtube 등 소셜은 핸들까지 포함).
+  // buildTargetKeys 는 citation-utils 의 공식 판정과 동일 로직이므로
+  // 각 URL 마다 isUrlMatchingCitedKeys 로 개별 매칭이 가능해진다.
+  const brandTargetKeys = useMemo(() => buildTargetKeys(brandWebsites), [brandWebsites]);
+  // 내 사이트가 포함된 소셜 플랫폼 도메인 목록 — 이 도메인은 URL 레벨 매칭이 필수
+  const socialDomainsWithHandle = useMemo(() => {
+    const s = new Set<string>();
+    brandTargetKeys.forEach((k) => {
+      if (k.includes("/")) s.add(k.split("/", 1)[0]);
+    });
+    return s;
+  }, [brandTargetKeys]);
+
   // Domain groupings
   const domainGroups = useMemo(() => {
     const m = new Map<string, { urls: string[]; totalCount: number; prompts: Set<string> }>();
@@ -42,15 +60,32 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
       m.set(domain, existing);
     });
     return [...m.entries()]
-      .map(([domain, data]) => ({
-        domain,
-        urls: data.urls,
-        totalCount: data.totalCount,
-        prompts: [...data.prompts],
-        isOwn: brandWebsites.length > 0 ? brandWebsites.some((w) => domain === extractDomain(w)) : false,
-      }))
+      .map(([domain, data]) => {
+        // 도메인 내에서 실제 내 사이트로 매칭되는 URL 개수/건수
+        const ownUrls = data.urls.filter((u) => isUrlMatchingCitedKeys(u, brandTargetKeys));
+        const ownCitationCount = ownUrls.reduce((acc, u) => {
+          const entry = partnerLeaderboard.find((e) => e.url === u);
+          return acc + (entry?.count ?? 0);
+        }, 0);
+        // 소셜 플랫폼인데 내 핸들 포함 → 도메인 자체는 YOU 아님, 상세 URL 중 일부만 YOU
+        const isSocialPlatform =
+          SOCIAL_PLATFORM_DOMAINS.has(domain) && socialDomainsWithHandle.has(domain);
+        // 일반 도메인 (youtube 등 소셜 제외) 은 도메인 자체 매칭이 곧 YOU
+        const domainSelfMatch = !isSocialPlatform && ownUrls.length > 0;
+        return {
+          domain,
+          urls: data.urls,
+          totalCount: data.totalCount,
+          prompts: [...data.prompts],
+          ownCitationCount,
+          ownUrlCount: ownUrls.length,
+          // 도메인 YOU 판정: 소셜은 "일부 URL 만 내 것", 일반은 전체가 내 것
+          isOwn: domainSelfMatch,
+          isPartiallyOwn: isSocialPlatform && ownUrls.length > 0,
+        };
+      })
       .sort((a, b) => b.totalCount - a.totalCount);
-  }, [partnerLeaderboard, brandWebsites]);
+  }, [partnerLeaderboard, brandTargetKeys, socialDomainsWithHandle]);
 
   // Filter + sort
   const filtered = useMemo(() => {
@@ -79,6 +114,18 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
     () => new Set(partnerLeaderboard.flatMap((p) => p.prompts)).size,
     [partnerLeaderboard],
   );
+  // 내 사이트 인용 집계 — 도메인 레벨 정확 매칭 (youtube 는 내 핸들 URL 만)
+  const ownStats = useMemo(() => {
+    let ownCitations = 0;
+    let ownUrlCount = 0;
+    partnerLeaderboard.forEach((p) => {
+      if (isUrlMatchingCitedKeys(p.url, brandTargetKeys)) {
+        ownCitations += p.count;
+        ownUrlCount += 1;
+      }
+    });
+    return { ownCitations, ownUrlCount };
+  }, [partnerLeaderboard, brandTargetKeys]);
 
   const exportCsv = useCallback(() => {
     let csv = "Domain,URL,Citations,Prompts\n";
@@ -120,6 +167,13 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
           <Stat label="인용" value={totalCitations} />
           <Stat label="URL" value={partnerLeaderboard.length} />
           <Stat label="프롬프트" value={uniquePrompts} />
+          {brandTargetKeys.length > 0 && (
+            <Stat
+              label={`내 사이트 인용 (${ownStats.ownUrlCount}개 URL)`}
+              value={ownStats.ownCitations}
+              highlight
+            />
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -207,8 +261,19 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
                         <span className="text-xs text-th-text-muted">{isOpen ? "▾" : "▸"}</span>
                         <span className="text-sm font-medium text-th-text truncate">{item.domain}</span>
                         {item.isOwn && (
-                          <span className="shrink-0 rounded bg-th-success-soft px-1.5 py-0.5 text-[10px] font-semibold text-th-success uppercase tracking-wide">
+                          <span
+                            className="shrink-0 rounded bg-th-success-soft px-1.5 py-0.5 text-[10px] font-semibold text-th-success uppercase tracking-wide"
+                            title="이 도메인 전체가 내 공식 사이트"
+                          >
                             You
+                          </span>
+                        )}
+                        {item.isPartiallyOwn && (
+                          <span
+                            className="shrink-0 rounded bg-th-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-th-text-accent uppercase tracking-wide"
+                            title={`이 공용 플랫폼 안에서 내 채널/URL ${item.ownUrlCount}개가 인용됨`}
+                          >
+                            You · {item.ownUrlCount}
                           </span>
                         )}
                       </div>
@@ -222,17 +287,28 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
                       <div className="border-t border-th-border/40 bg-th-card-alt/50">
                         {[...new Set(item.urls)].map((url) => {
                           const entry = partnerLeaderboard.find((e) => e.url === url);
+                          const isOwnUrl = isUrlMatchingCitedKeys(url, brandTargetKeys);
                           return (
                             <div key={url} className="grid grid-cols-[1fr_64px_64px_64px] gap-2 items-center px-4 py-2 pl-10 border-b border-th-border/30 last:border-b-0">
-                              <a
-                                href={url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-sm text-th-text-accent hover:underline truncate min-w-0"
-                                title={url}
-                              >
-                                {extractPath(url)}
-                              </a>
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <a
+                                  href={url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm text-th-text-accent hover:underline truncate min-w-0"
+                                  title={url}
+                                >
+                                  {extractPath(url)}
+                                </a>
+                                {isOwnUrl && (
+                                  <span
+                                    className="shrink-0 rounded bg-th-success-soft px-1.5 py-0.5 text-[9px] font-semibold text-th-success uppercase tracking-wide"
+                                    title="이 URL 은 내 공식 사이트/채널로 인용됨"
+                                  >
+                                    You
+                                  </span>
+                                )}
+                              </div>
                               <span className="text-right text-xs text-th-text-secondary tabular-nums">{entry?.count ?? 1}</span>
                               <span />
                               <span className="text-right text-xs text-th-text-muted tabular-nums">{entry?.prompts.length ?? 0}</span>
@@ -262,28 +338,39 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
                   </div>
                 );
               })
-            : (filtered as typeof partnerLeaderboard).map((item, idx) => (
-                <div
-                  key={item.url}
-                  className={`grid grid-cols-[1fr_64px_64px_64px] gap-2 items-center px-4 py-2.5 ${idx % 2 === 0 ? "bg-th-card" : "bg-th-card-alt"}`}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="shrink-0 text-xs text-th-text-muted">{extractDomain(item.url)}</span>
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-sm text-th-text-accent hover:underline truncate min-w-0"
-                      title={item.url}
-                    >
-                      {extractPath(item.url)}
-                    </a>
+            : (filtered as typeof partnerLeaderboard).map((item, idx) => {
+                const isOwnUrl = isUrlMatchingCitedKeys(item.url, brandTargetKeys);
+                return (
+                  <div
+                    key={item.url}
+                    className={`grid grid-cols-[1fr_64px_64px_64px] gap-2 items-center px-4 py-2.5 ${idx % 2 === 0 ? "bg-th-card" : "bg-th-card-alt"}`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 text-xs text-th-text-muted">{extractDomain(item.url)}</span>
+                      <a
+                        href={item.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm text-th-text-accent hover:underline truncate min-w-0"
+                        title={item.url}
+                      >
+                        {extractPath(item.url)}
+                      </a>
+                      {isOwnUrl && (
+                        <span
+                          className="shrink-0 rounded bg-th-success-soft px-1.5 py-0.5 text-[9px] font-semibold text-th-success uppercase tracking-wide"
+                          title="이 URL 은 내 공식 사이트/채널로 인용됨"
+                        >
+                          You
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-right text-sm font-semibold text-th-text tabular-nums">{item.count}</span>
+                    <span />
+                    <span className="text-right text-sm text-th-text-secondary tabular-nums">{item.prompts.length}</span>
                   </div>
-                  <span className="text-right text-sm font-semibold text-th-text tabular-nums">{item.count}</span>
-                  <span />
-                  <span className="text-right text-sm text-th-text-secondary tabular-nums">{item.prompts.length}</span>
-                </div>
-              ))}
+                );
+              })}
 
           {(filtered as unknown[]).length === 0 && (
             <div className="py-8 text-center text-sm text-th-text-muted">
@@ -303,11 +390,27 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
 }
 
 /* ── Inline stat ── */
-function Stat({ label, value }: { label: string; value: number | string }) {
+function Stat({
+  label,
+  value,
+  highlight = false,
+}: {
+  label: string;
+  value: number | string;
+  highlight?: boolean;
+}) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="text-xl font-bold text-th-text tabular-nums">{value}</span>
-      <span className="text-xs text-th-text-muted">{label}</span>
+      <span
+        className={`text-xl font-bold tabular-nums ${
+          highlight ? "text-th-success" : "text-th-text"
+        }`}
+      >
+        {value}
+      </span>
+      <span className={`text-xs ${highlight ? "text-th-success" : "text-th-text-muted"}`}>
+        {label}
+      </span>
     </div>
   );
 }

@@ -412,9 +412,18 @@ export function AutomationServerTab({
       <div className="rounded-lg border border-th-border bg-th-card p-4">
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-base font-semibold text-th-text">자동 조사 스케줄</h3>
-          {message && (
-            <span className="ml-3 text-xs text-th-text-muted">{message}</span>
-          )}
+          <div className="flex items-center gap-2">
+            {message && (
+              <span className="text-xs text-th-text-muted">{message}</span>
+            )}
+            <button
+              onClick={() => { void reloadSchedules(); void reloadRecentRuns(); void reloadPrompts(); }}
+              className="rounded-md border border-th-border bg-th-card-alt px-2.5 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text"
+              title="스케줄·실행 결과 즉시 새로고침"
+            >
+              ↻ 새로고침
+            </button>
+          </div>
         </div>
 
         {schedules.length === 0 ? (

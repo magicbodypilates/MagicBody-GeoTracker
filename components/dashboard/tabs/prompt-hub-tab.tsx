@@ -10,6 +10,7 @@ type PromptHubTabProps = {
   onUpdatePromptTags: (text: string, tags: string[]) => void;
   onRunPrompt: (prompt: string) => void;
   onBatchRunAll: () => void;
+  onClearAll?: () => void;
 };
 
 export function PromptHubTab({
@@ -21,6 +22,7 @@ export function PromptHubTab({
   onUpdatePromptTags,
   onRunPrompt,
   onBatchRunAll,
+  onClearAll,
 }: PromptHubTabProps) {
   const [newPrompt, setNewPrompt] = useState("");
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
@@ -57,14 +59,27 @@ export function PromptHubTab({
             추적 프롬프트 라이브러리
           </div>
           {customPrompts.length > 0 && (
-            <button
-              disabled={busy}
-              onClick={onBatchRunAll}
-              className="bd-btn-primary rounded-lg px-3 py-1.5 text-sm disabled:opacity-60"
-              title={`전체 프롬프트 ${customPrompts.length}개 × ${activeProviderCount}개 모델 실행`}
-            >
-              ▶ 전체 실행 ({customPrompts.length} × {activeProviderCount})
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={busy}
+                onClick={onBatchRunAll}
+                className="bd-btn-primary rounded-lg px-3 py-1.5 text-sm disabled:opacity-60"
+                title={`전체 프롬프트 ${customPrompts.length}개 × ${activeProviderCount}개 모델 실행`}
+              >
+                ▶ 전체 실행 ({customPrompts.length} × {activeProviderCount})
+              </button>
+              {onClearAll && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onClearAll}
+                  className="rounded-md border border-th-border bg-th-card-alt px-2.5 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text disabled:opacity-60"
+                  title="저장된 프롬프트를 모두 삭제 (응답 이력은 유지)"
+                >
+                  전체 삭제
+                </button>
+              )}
+            </div>
           )}
         </div>
         <p className="mb-3 text-sm text-th-text-secondary">

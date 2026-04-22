@@ -1286,6 +1286,24 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }
 
+  async function clearAllPrompts() {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
+    if (state.customPrompts.length === 0) { setMessage("삭제할 프롬프트가 없습니다."); return; }
+    if (!window.confirm(`저장된 프롬프트 ${state.customPrompts.length}개를 전부 삭제합니다.\n수집된 응답 이력은 유지됩니다. 계속하시겠습니까?`)) return;
+
+    const texts = state.customPrompts.map((p) => p.text);
+    setState((prev) => ({ ...prev, customPrompts: [] }));
+    if (serverWsId) {
+      // 서버 prompts 레코드도 이름 기반으로 순차 삭제 (개수가 적어 병렬 필요 없음)
+      for (const t of texts) {
+        await removePromptByText(serverWsId, t).catch((e) =>
+          console.error("[dashboard] 서버 프롬프트 삭제 실패:", e),
+        );
+      }
+    }
+    setMessage(`프롬프트 ${texts.length}개 전체 삭제 완료`);
+  }
+
   async function updatePromptTags(text: string, tags: string[]) {
     setState((prev) => ({
       ...prev,
@@ -1721,6 +1739,38 @@ Now analyze all ${competitorList.length} competitors:`,
     setMessage("모든 데이터가 초기화되었습니다.");
   }
 
+  /** 수동 실행 응답만 삭제 (자동 스케줄 이력/배틀카드/감사/알림은 유지) */
+  async function handleResetManualResponses() {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
+    if (!window.confirm("수동으로 실행한 AI 응답 이력만 삭제합니다.\n자동 스케줄 실행 이력 · 배틀카드 · 감사 결과는 유지됩니다. 계속하시겠습니까?")) return;
+
+    resetTokenRef.current += 1;
+    activeControllersRef.current.forEach((c) => c.abort());
+    activeControllersRef.current.clear();
+
+    let serverDeleted = 0;
+    if (serverWsId) {
+      try {
+        const resp = await fetch(BP + `/api/workspaces/${serverWsId}/reset-responses?scope=manual`, {
+          method: "POST",
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          serverDeleted = data.deleted?.runs ?? 0;
+        }
+      } catch (e) {
+        console.error("[dashboard] 수동 응답 삭제 실패:", e);
+      }
+    }
+
+    setBusy(false);
+    setState((prev) => ({
+      ...prev,
+      runs: prev.runs.filter((r) => r.auto === true),
+    }));
+    setMessage(`수동 응답 이력 초기화 완료 (서버 ${serverDeleted}건 삭제)`);
+  }
+
   /** 응답/분석 이력만 초기화 (설정·프롬프트·경쟁사는 유지) */
   async function handleResetResponses() {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
@@ -1812,6 +1862,7 @@ Now analyze all ${competitorList.length} competitors:`,
           onUpdatePromptTags={updatePromptTags}
           onRunPrompt={callScrape}
           onBatchRunAll={batchRunAllPrompts}
+          onClearAll={clearAllPrompts}
         />
       );
     }
@@ -1881,6 +1932,7 @@ Now analyze all ${competitorList.length} competitors:`,
           competitorTerms={getCompetitorTerms()}
           runDeltas={runDeltas}
           onDeleteRun={deleteRun}
+          onResetManualResponses={handleResetManualResponses}
         />
       );
     }

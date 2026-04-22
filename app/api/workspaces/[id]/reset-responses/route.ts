@@ -1,28 +1,61 @@
 /**
- * /api/workspaces/[id]/reset-responses
+ * /api/workspaces/[id]/reset-responses?scope=all|manual|auto
  *
- * POST — 워크스페이스의 응답/분석 이력만 완전 삭제.
- *   - runs             (AI 응답 이력)
- *   - audit_history    (배틀카드/감사 결과)
- *   - drift_alerts     (변동 알림)
- *   - daily_stats      (일별 롤업 — 원본 runs 삭제 시 재계산 기준이 사라지므로 함께 초기화)
+ * POST — 워크스페이스의 응답/분석 이력 삭제.
+ *   scope=all   (기본) : runs 전체 + audit_history + drift_alerts + daily_stats
+ *   scope=manual       : is_auto=false 인 runs 만 삭제 (나머지 테이블은 건드리지 않음)
+ *   scope=auto         : is_auto=true  인 runs 만 삭제 + daily_stats (자동 롤업 기준) 재계산 대상이라 함께 초기화
  *
  * 브랜드 설정, 프롬프트, 스케줄, 경쟁사 정의는 건드리지 않는다.
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(
-  _req: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const scope = (req.nextUrl.searchParams.get("scope") ?? "all").toLowerCase();
 
   try {
+    if (scope === "manual") {
+      const runsDeleted = await db
+        .delete(schema.runs)
+        .where(and(eq(schema.runs.workspaceId, id), eq(schema.runs.isAuto, false)))
+        .returning({ id: schema.runs.id });
+      return NextResponse.json({
+        ok: true,
+        scope,
+        deleted: { runs: runsDeleted.length, audits: 0, drifts: 0, dailyStats: 0 },
+      });
+    }
+
+    if (scope === "auto") {
+      const [runsDeleted, statsDeleted] = await Promise.all([
+        db
+          .delete(schema.runs)
+          .where(and(eq(schema.runs.workspaceId, id), eq(schema.runs.isAuto, true)))
+          .returning({ id: schema.runs.id }),
+        db.delete(schema.dailyStats).where(eq(schema.dailyStats.workspaceId, id)),
+      ]);
+      return NextResponse.json({
+        ok: true,
+        scope,
+        deleted: {
+          runs: runsDeleted.length,
+          audits: 0,
+          drifts: 0,
+          dailyStats: Array.isArray(statsDeleted) ? statsDeleted.length : 0,
+        },
+      });
+    }
+
+    // scope=all (기본)
     const [runsDeleted, auditsDeleted, driftsDeleted, statsDeleted] = await Promise.all([
       db.delete(schema.runs).where(eq(schema.runs.workspaceId, id)).returning({ id: schema.runs.id }),
       db.delete(schema.auditHistory).where(eq(schema.auditHistory.workspaceId, id)).returning({ id: schema.auditHistory.id }),
@@ -32,6 +65,7 @@ export async function POST(
 
     return NextResponse.json({
       ok: true,
+      scope: "all",
       deleted: {
         runs: runsDeleted.length,
         audits: auditsDeleted.length,

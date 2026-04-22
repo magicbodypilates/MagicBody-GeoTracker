@@ -11,6 +11,7 @@ type ReputationSourcesTabProps = {
   competitorTerms: string[];
   runDeltas?: RunDelta[];
   onDeleteRun?: (index: number) => void;
+  onResetManualResponses?: () => void;
 };
 
 function normalizeAnswerForDisplay(answer: string): string {
@@ -510,6 +511,7 @@ export function ReputationSourcesTab({
   competitorTerms,
   runDeltas = [],
   onDeleteRun,
+  onResetManualResponses,
 }: ReputationSourcesTabProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
@@ -616,6 +618,20 @@ export function ReputationSourcesTab({
 
   return (
     <div className="space-y-4">
+      {/* 수동 실행 응답만 초기화 — 자동 스케줄 이력은 유지 (중요도 낮은 보조 버튼) */}
+      {onResetManualResponses && runs.some((r) => r.auto !== true) && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={onResetManualResponses}
+            className="rounded-md border border-th-border bg-th-card-alt px-3 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text"
+            title="수동으로 실행한 응답 이력만 삭제 (자동 실행 이력은 유지)"
+          >
+            수동 응답만 초기화
+          </button>
+        </div>
+      )}
+
       {/* ── Insight cards ── */}
       {insights && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">

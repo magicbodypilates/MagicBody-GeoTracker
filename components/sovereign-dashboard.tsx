@@ -1770,11 +1770,32 @@ Now analyze all ${competitorList.length} competitors:`,
       }
     }
 
+    // 서버에서 최신 runs 를 재조회해 UI 와 서버 상태를 강제 동기화
+    // (로컬 filter 만 쓰면 auto 필드가 undefined 인 stale 항목이 남거나,
+    //  서버 삭제 결과가 UI 에 반영되지 않는 경우가 있음)
+    if (serverWsId) {
+      try {
+        const fresh = await loadFromServer(serverWsId);
+        setState((prev) => ({
+          ...prev,
+          runs: fresh.runs ?? [],
+        }));
+      } catch (e) {
+        console.error("[dashboard] 응답 삭제 후 재동기화 실패:", e);
+        // fallback: 로컬 필터로 최소한 수동 행은 제거
+        setState((prev) => ({
+          ...prev,
+          runs: prev.runs.filter((r) => r.auto === true),
+        }));
+      }
+    } else {
+      setState((prev) => ({
+        ...prev,
+        runs: prev.runs.filter((r) => r.auto === true),
+      }));
+    }
+
     setBusy(false);
-    setState((prev) => ({
-      ...prev,
-      runs: prev.runs.filter((r) => r.auto === true),
-    }));
     setMessage(`수동 응답 ${serverDeleted}건 삭제 완료 (자동화 이력은 유지)`);
   }
 

@@ -20,6 +20,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  LabelList,
   Legend,
   Line,
   LineChart,
@@ -240,12 +241,12 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
     const ourLabel = brandName?.trim() || "우리 브랜드";
     const rows = [
       {
-        name: `${ourLabel} (${Math.round(benchmark.brand.mentionRate * 100)}%)`,
+        name: ourLabel,
         mentionRate: Math.round(benchmark.brand.mentionRate * 1000) / 10,
         isBrand: true,
       },
       ...benchmark.competitors.map((c) => ({
-        name: `${c.name} (${Math.round(c.mentionRate * 100)}%)`,
+        name: c.name,
         mentionRate: Math.round(c.mentionRate * 1000) / 10,
         isBrand: false,
       })),
@@ -404,12 +405,19 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
                 <h3 className="mb-2 text-base font-semibold text-th-text">경쟁사 언급 비교</h3>
                 <div className="h-60">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={benchmarkChart} layout="vertical" margin={{ left: 0 }}>
+                    <BarChart data={benchmarkChart} layout="vertical" margin={{ left: 0, right: 40 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
                       <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} unit="%" />
-                      <YAxis type="category" dataKey="name" width={180} tick={{ fontSize: 10 }} />
-                      <Tooltip />
-                      <Bar dataKey="mentionRate" fill="var(--th-accent)" />
+                      <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 10 }} />
+                      <Tooltip formatter={(v) => [`${v}%`, "언급률"]} />
+                      <Bar dataKey="mentionRate" fill="var(--th-accent)">
+                        <LabelList
+                          dataKey="mentionRate"
+                          position="right"
+                          formatter={(v: unknown) => `${v}%`}
+                          style={{ fontSize: 10, fill: "var(--th-text-muted)" }}
+                        />
+                      </Bar>
                     </BarChart>
                   </ResponsiveContainer>
                 </div>

@@ -1742,7 +1742,7 @@ Now analyze all ${competitorList.length} competitors:`,
   /** 수동 실행 응답만 삭제 (자동 스케줄 이력/배틀카드/감사/알림은 유지) */
   async function handleResetManualResponses() {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
-    if (!window.confirm("수동으로 실행한 AI 응답 이력만 삭제합니다.\n자동 스케줄 실행 이력 · 배틀카드 · 감사 결과는 유지됩니다. 계속하시겠습니까?")) return;
+    if (!window.confirm("AI 응답 탭의 실행 결과를 모두 초기화합니다.\n(자동·수동 실행 이력 전체 삭제. 프롬프트·설정은 유지됩니다.) 계속하시겠습니까?")) return;
 
     resetTokenRef.current += 1;
     activeControllersRef.current.forEach((c) => c.abort());
@@ -1751,7 +1751,7 @@ Now analyze all ${competitorList.length} competitors:`,
     let serverDeleted = 0;
     if (serverWsId) {
       try {
-        const resp = await fetch(BP + `/api/workspaces/${serverWsId}/reset-responses?scope=manual`, {
+        const resp = await fetch(BP + `/api/workspaces/${serverWsId}/reset-responses?scope=all`, {
           method: "POST",
         });
         if (resp.ok) {
@@ -1759,16 +1759,16 @@ Now analyze all ${competitorList.length} competitors:`,
           serverDeleted = data.deleted?.runs ?? 0;
         }
       } catch (e) {
-        console.error("[dashboard] 수동 응답 삭제 실패:", e);
+        console.error("[dashboard] 응답 삭제 실패:", e);
       }
     }
 
     setBusy(false);
     setState((prev) => ({
       ...prev,
-      runs: prev.runs.filter((r) => r.auto === true),
+      runs: [],
     }));
-    setMessage(`수동 응답 이력 초기화 완료 (서버 ${serverDeleted}건 삭제)`);
+    setMessage(`실행 결과 초기화 완료 (서버 ${serverDeleted}건 삭제)`);
   }
 
   /** 응답/분석 이력만 초기화 (설정·프롬프트·경쟁사는 유지) */

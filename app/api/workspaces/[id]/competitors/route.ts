@@ -43,7 +43,9 @@ export async function POST(
     const body = await req.json();
     const parsed = CreateCompetitorSchema.parse(body);
 
-    // 동일 이름 기존 레코드 확인 — 중복 삽입 방지 (DB 유니크 제약 없는 상태 보완)
+    // 동일 이름 모든 기존 레코드 확인 — 중복 삽입 방지 + 과거 중복 row 정리
+    // (DB 유니크 제약이 없어 과거에 같은 이름의 row 가 2개 이상 쌓인 워크스페이스가
+    //  있으면 가장 "정보량 많은" row 하나로 병합하고 나머지는 삭제)
     const existing = await db
       .select()
       .from(schema.competitors)
@@ -52,19 +54,53 @@ export async function POST(
           eq(schema.competitors.workspaceId, id),
           eq(schema.competitors.name, parsed.name),
         ),
-      )
-      .limit(1);
+      );
 
     if (existing.length > 0) {
-      // 이미 있으면 aliases/websites 병합(merge) 후 그대로 반환 — 중복 row 증식 차단
+      // 가장 많은 alias 를 가진 row 를 canonical 로 선택 (동률이면 먼저 생성된 row)
+      const canonical = [...existing].sort((a, b) => {
+        const aScore =
+          (a.aliases?.length ?? 0) + (a.websites?.length ?? 0);
+        const bScore =
+          (b.aliases?.length ?? 0) + (b.websites?.length ?? 0);
+        if (bScore !== aScore) return bScore - aScore;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      })[0];
+
+      const mergedAliases = Array.from(
+        new Set([
+          ...existing.flatMap((e) => e.aliases ?? []),
+          ...parsed.aliases,
+        ].filter(Boolean)),
+      );
+      const mergedWebsites = Array.from(
+        new Set([
+          ...existing.flatMap((e) => e.websites ?? []),
+          ...parsed.websites,
+        ].filter(Boolean)),
+      );
+
       const [updated] = await db
         .update(schema.competitors)
-        .set({
-          aliases: Array.from(new Set([...(existing[0].aliases ?? []), ...parsed.aliases])),
-          websites: Array.from(new Set([...(existing[0].websites ?? []), ...parsed.websites])),
-        })
-        .where(eq(schema.competitors.id, existing[0].id))
+        .set({ aliases: mergedAliases, websites: mergedWebsites })
+        .where(eq(schema.competitors.id, canonical.id))
         .returning();
+
+      // canonical 외 중복 row 는 runs 에는 name 문자열만 저장되므로 안전하게 삭제 가능
+      const duplicateIds = existing
+        .filter((e) => e.id !== canonical.id)
+        .map((e) => e.id);
+      if (duplicateIds.length > 0) {
+        for (const dupId of duplicateIds) {
+          await db
+            .delete(schema.competitors)
+            .where(eq(schema.competitors.id, dupId));
+        }
+        console.log(
+          `[competitors] 워크스페이스 ${id} 에서 중복 경쟁사 row ${duplicateIds.length}개 정리됨 (name="${parsed.name}")`,
+        );
+      }
+
       return NextResponse.json({ competitor: updated }, { status: 200 });
     }
 

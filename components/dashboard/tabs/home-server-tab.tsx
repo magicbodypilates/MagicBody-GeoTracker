@@ -142,7 +142,7 @@ type HomeServerTabProps = {
 export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
   const [wsId, setWsId] = useState<string | null>(null);
   const [days, setDays] = useState(30);
-  const [autoOnly, setAutoOnly] = useState(true);
+  const autoOnly = true; // 홈은 항상 자동화 데이터만 표시
   const [timeseriesTab, setTimeseriesTab] = useState<"visibility" | "mention">("visibility");
 
   const [summary, setSummary] = useState<SummaryResult | null>(null);
@@ -303,14 +303,6 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
             </button>
           ))}
         </div>
-        <label className="flex items-center gap-1 text-xs text-th-text-muted">
-          <input
-            type="checkbox"
-            checked={autoOnly}
-            onChange={(e) => setAutoOnly(e.target.checked)}
-          />
-          자동 실행만
-        </label>
         <button
           onClick={() => void fetchAll()}
           disabled={busy}
@@ -377,7 +369,7 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
           <div className="rounded-lg border border-th-border bg-th-card p-4">
             <div className="mb-3 flex items-center gap-3">
               <h3 className="text-base font-semibold text-th-text">
-                {timeseriesTab === "visibility" ? "일별 평균 가시성 (프로바이더별)" : "모델별 브랜드 언급 변화"}
+                {timeseriesTab === "visibility" ? "일별 평균 가시성 (모델별)" : "일별 브랜드 언급(모델별)"}
               </h3>
               <div className="ml-auto flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
                 <button
@@ -594,7 +586,7 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
             {/* 프로바이더 신뢰도 */}
             {providersStats && providersStats.providers.length > 0 && (
               <div className="rounded-lg border border-th-border bg-th-card p-4">
-                <h3 className="mb-2 text-base font-semibold text-th-text">프로바이더 신뢰도</h3>
+                <h3 className="mb-2 text-base font-semibold text-th-text">모델 신뢰도</h3>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
@@ -649,7 +641,7 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
 
 /** 프롬프트 × 프로바이더 히트맵 */
 function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
-  const [heatTab, setHeatTab] = useState<"visibility" | "mention">("mention");
+  const [heatTab, setHeatTab] = useState<"visibility" | "mention">("visibility");
   const matrix = heatTab === "visibility" ? data.matrix : (data.mentionMatrix ?? data.matrix);
   const isMention = heatTab === "mention";
 
@@ -657,7 +649,7 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
     <div className="rounded-lg border border-th-border bg-th-card p-4">
       <div className="mb-3 flex items-center gap-3">
         <h3 className="text-base font-semibold text-th-text">
-          프롬프트 × 프로바이더 히트맵
+          프롬프트 × 모델 히트맵
         </h3>
         <div className="ml-auto flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
           <button
@@ -727,12 +719,45 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
           </tbody>
         </table>
       </div>
-      <p className="mt-2 text-xs text-th-text-muted">
+      <div className="mt-2.5 flex flex-wrap items-center gap-3">
+        {isMention ? (
+          <>
+            <span className="text-[11px] text-th-text-muted">컬러 기준 (브랜드 언급률):</span>
+            <ColorLegendItem color="rgba(107,114,128,0.2)" label="0~10% 미언급" dark={false} />
+            <ColorLegendItem color="rgba(59,130,246,0.35)" label="10~30% 낮음" dark={false} />
+            <ColorLegendItem color="rgba(59,130,246,0.6)" label="30~60% 보통" dark={true} />
+            <ColorLegendItem color="rgba(16,185,129,0.6)" label="60~80% 높음" dark={true} />
+            <ColorLegendItem color="rgba(16,185,129,0.85)" label="80~100% 매우 높음" dark={true} />
+          </>
+        ) : (
+          <>
+            <span className="text-[11px] text-th-text-muted">컬러 기준 (가시성 점수):</span>
+            <ColorLegendItem color="rgba(107,114,128,0.2)" label="0~20 낮음" dark={false} />
+            <ColorLegendItem color="rgba(234,179,8,0.35)" label="20~40" dark={false} />
+            <ColorLegendItem color="rgba(234,179,8,0.6)" label="40~60" dark={true} />
+            <ColorLegendItem color="rgba(34,197,94,0.6)" label="60~80 높음" dark={true} />
+            <ColorLegendItem color="rgba(34,197,94,0.85)" label="80~100 매우 높음" dark={true} />
+          </>
+        )}
+      </div>
+      <p className="mt-1.5 text-xs text-th-text-muted">
         {isMention
           ? `기간 ${days}일 · 셀 = 해당 프롬프트에서 브랜드가 AI 본문에 언급된 비율 (%)`
           : `기간 ${days}일 · 셀 = 해당 프롬프트의 해당 모델 평균 가시성 점수 (0-100)`}
       </p>
     </div>
+  );
+}
+
+function ColorLegendItem({ color, label, dark }: { color: string; label: string; dark: boolean }) {
+  return (
+    <span className="flex items-center gap-1 text-[11px] text-th-text-muted">
+      <span
+        className="inline-block h-3 w-5 rounded"
+        style={{ backgroundColor: color, border: "1px solid rgba(0,0,0,0.08)" }}
+      />
+      {label}
+    </span>
   );
 }
 

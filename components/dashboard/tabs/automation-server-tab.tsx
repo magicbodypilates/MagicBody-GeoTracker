@@ -647,7 +647,7 @@ export function AutomationServerTab({
       </div>
 
       <p className="text-xs text-th-text-muted">
-        스케줄을 추가하면 서버에서 자동으로 AI 조사를 반복 실행합니다. 컴퓨터를 끄거나 브라우저를 닫아도 중단 없이 동작하며, 수집된 결과는 모든 관리자 계정에서 동일하게 확인할 수 있습니다.
+        설정한 주기로 활성 프롬프트 추적이 자동 실행됩니다.
       </p>
     </div>
   );

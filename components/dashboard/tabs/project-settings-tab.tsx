@@ -20,7 +20,6 @@ export function ProjectSettingsTab({
         <div className="mb-3 text-base font-semibold text-th-text">브랜드 &amp; 웹사이트</div>
         <p className="mb-4 text-sm leading-relaxed text-th-text-muted">
           브랜드 정보를 설정하면 모든 프롬프트, AEO 감사, 분석이 해당 웹사이트 기준으로 실행됩니다.
-          입력한 데이터는 서버 DB 에 저장되어 여러 관리자가 공유합니다.
         </p>
       </div>
 

@@ -728,9 +728,12 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       .sort((a, b) => a.day.localeCompare(b.day));
   }, [state.runs]);
 
+  /** 자동 실행만 필터링 — KPI strip / 주요변동에 수동 데이터 섞이지 않게 */
+  const autoRuns = useMemo(() => state.runs.filter((r) => r.auto === true), [state.runs]);
+
   const totalSources = useMemo(
-    () => state.runs.reduce((acc, run) => acc + run.sources.length, 0),
-    [state.runs],
+    () => autoRuns.reduce((acc, run) => acc + run.sources.length, 0),
+    [autoRuns],
   );
 
   /** Count unique domains cited in runs where the brand was NOT mentioned — these are outreach targets */
@@ -749,12 +752,12 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     return domains.size;
   }, [state.runs]);
 
-  const latestRun = state.runs[0];
+  const latestRun = autoRuns[0];
 
   /** Compute score deltas: for each prompt+provider, compare latest run to the previous one */
   const runDeltas: RunDelta[] = useMemo(() => {
     const grouped = new Map<string, ScrapeRun[]>();
-    state.runs.forEach((run) => {
+    autoRuns.forEach((run) => {
       const key = `${run.prompt}|||${run.provider}`;
       const list = grouped.get(key) ?? [];
       list.push(run);
@@ -785,15 +788,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     });
 
     return deltas.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  }, [state.runs]);
+  }, [autoRuns]);
 
   /** Top movers — biggest absolute delta changes */
-  const movers = useMemo(() => runDeltas.slice(0, 5), [runDeltas]);
+  const movers = useMemo(() => runDeltas.slice(0, 4), [runDeltas]);
 
   /** KPI delta: compare current period avg visibility vs prior period */
   const kpiVisibilityDelta = useMemo(() => {
-    if (state.runs.length < 2) return null;
-    const sorted = [...state.runs].sort(
+    if (autoRuns.length < 2) return null;
+    const sorted = [...autoRuns].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
     const mid = Math.floor(sorted.length / 2);
@@ -803,7 +806,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const recentAvg = recentHalf.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / recentHalf.length;
     const olderAvg = olderHalf.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / olderHalf.length;
     return Math.round(recentAvg - olderAvg);
-  }, [state.runs]);
+  }, [autoRuns]);
 
   /** Unread drift alerts count */
   const unreadAlertCount = useMemo(
@@ -1503,14 +1506,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
       const exampleJson = JSON.stringify([
         {
-          competitor: "example.com",
+          competitor: "경쟁사 예시",
           sentiment: "positive",
-          summary: "Strong brand presence with frequent citations.",
+          summary: "AI 검색에서 높은 가시성을 보이며 자주 인용되는 브랜드입니다.",
           sections: [
-            { heading: "Strengths", points: ["High domain authority", "Frequent AI citations"] },
-            { heading: "Weaknesses", points: ["Limited product range"] },
-            { heading: "Pricing", points: ["Premium tier: $99/mo", "Free plan available"] },
-            { heading: "AI Visibility", points: ["Mentioned in 8/10 tested prompts"] },
+            { heading: "강점", points: ["높은 도메인 신뢰도", "AI 응답에서 빈번하게 인용됨"] },
+            { heading: "약점", points: ["제품 라인업이 제한적임"] },
+            { heading: "가격 정보", points: ["프리미엄 플랜: 월 99달러", "무료 플랜 있음"] },
+            { heading: "AI 가시성", points: ["테스트 프롬프트 10개 중 8개에서 언급됨"] },
           ],
         },
       ]);
@@ -1519,23 +1522,23 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: `You are an AI search visibility analyst. Analyze how AI models (ChatGPT, Perplexity, Gemini, Copilot, Google AI, Grok) likely perceive each of these competitors: ${competitorList.join(", ")}.
+          prompt: `당신은 AI 검색 가시성 분석 전문가입니다. 다음 경쟁사들이 AI 모델(ChatGPT, Perplexity, Gemini, Copilot, Google AI, Grok)에서 어떻게 인식되는지 분석하세요: ${competitorList.join(", ")}.
 
-For EACH competitor, provide a JSON object with:
-- "competitor": the name exactly as given
-- "sentiment": one of "positive", "neutral", or "negative" based on likely AI recommendation tone
-- "summary": 2-3 sentences overview
-- "sections": an array of objects with "heading" (string) and "points" (string[]) covering:
-  * "Strengths" — what the competitor does well in AI visibility
-  * "Weaknesses" — gaps or disadvantages
-  * "Pricing Insights" — known pricing tiers or cost perception
-  * "AI Visibility" — how often/prominently they appear in AI responses
-  * "Key Differentiators" — what sets them apart
+각 경쟁사에 대해 다음 필드를 포함한 JSON 객체를 작성하세요:
+- "competitor": 입력된 이름 그대로 사용
+- "sentiment": AI 추천 어조 기준으로 "positive", "neutral", "negative" 중 하나
+- "summary": 2~3문장 개요 (반드시 한국어로 작성)
+- "sections": "heading"(string)과 "points"(string[])로 구성된 배열. 아래 항목을 포함하고 반드시 한국어로 작성:
+  * "강점" — AI 가시성에서 잘하는 점
+  * "약점" — 부족하거나 불리한 점
+  * "가격 정보" — 알려진 가격대 또는 비용 인식
+  * "AI 가시성" — AI 응답에서 얼마나 자주/두드러지게 등장하는지
+  * "핵심 차별점" — 경쟁사를 특별하게 만드는 요소
 
-Return ONLY a valid JSON array. No markdown fences. No extra text. Example format:
+JSON 배열만 반환하세요. 마크다운 코드블록, 추가 텍스트 없이 순수 JSON만. 예시 형식:
 ${exampleJson}
 
-Now analyze all ${competitorList.length} competitors:`,
+이제 총 ${competitorList.length}개 경쟁사를 분석하세요:`,
           maxTokens: Math.max(2000, Math.min(4096, 500 * competitorList.length)),
           temperature: 0.3,
           skipCache: true,
@@ -2393,12 +2396,12 @@ Now analyze all ${competitorList.length} competitors:`,
           {/* KPI strip - 메인/프롬프트허브/AI응답/가시성 페이지에만 노출 */}
           {SHOW_KPI_TABS.includes(activeTab) && (
             <section className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-3 xl:grid-cols-5">
-              <KpiCard label="전체 실행" value={state.runs.length} />
+              <KpiCard label="전체 실행" value={autoRuns.length} />
               <KpiCard
                 label="평균 가시성"
                 value={
-                  state.runs.length > 0
-                    ? `${Math.round(state.runs.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / state.runs.length)}%`
+                  autoRuns.length > 0
+                    ? `${Math.round(autoRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / autoRuns.length)}%`
                     : "—"
                 }
                 delta={kpiVisibilityDelta}
@@ -2407,7 +2410,7 @@ Now analyze all ${competitorList.length} competitors:`,
               />
               <KpiCard
                 label="브랜드 언급"
-                value={state.runs.filter((r) => (r.brandMentions?.length ?? 0) > 0).length}
+                value={autoRuns.filter((r) => (r.brandMentions?.length ?? 0) > 0).length}
               />
               <KpiCard label="수집된 출처" value={totalSources} />
               <KpiCard
@@ -2435,8 +2438,8 @@ Now analyze all ${competitorList.length} competitors:`,
             </section>
           )}
 
-          {/* ── Movers strip — KPI와 동일한 페이지에서만 ── */}
-          {SHOW_KPI_TABS.includes(activeTab) && movers.length > 0 && (
+          {/* ── Movers strip — 홈 탭에만 노출 ── */}
+          {activeTab === "Home" && movers.length > 0 && (
             <section className="mb-4 rounded-xl border border-th-border bg-th-card p-4">
               <div className="mb-3 flex items-center gap-2">
                 <span className="text-base">📊</span>

@@ -84,7 +84,13 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
           isPartiallyOwn: isSocialPlatform && ownUrls.length > 0,
         };
       })
-      .sort((a, b) => b.totalCount - a.totalCount);
+      .sort((a, b) => {
+        // 내 사이트(You/You·N) 도메인은 항상 상단 고정
+        const aOwn = a.isOwn || a.isPartiallyOwn ? 1 : 0;
+        const bOwn = b.isOwn || b.isPartiallyOwn ? 1 : 0;
+        if (aOwn !== bOwn) return bOwn - aOwn;
+        return b.totalCount - a.totalCount;
+      });
   }, [partnerLeaderboard, brandTargetKeys, socialDomainsWithHandle]);
 
   // Filter + sort
@@ -93,9 +99,14 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
 
     if (view === "domain") {
       let list = domainGroups.filter((d) => !q || d.domain.toLowerCase().includes(q));
-      if (sortBy === "domain") list = list.sort((a, b) => a.domain.localeCompare(b.domain));
-      else if (sortBy === "pages") list = list.sort((a, b) => b.urls.length - a.urls.length);
-      else if (sortBy === "prompts") list = list.sort((a, b) => b.prompts.length - a.prompts.length);
+      const pinOwn = (a: typeof list[0], b: typeof list[0]) => {
+        const aOwn = a.isOwn || a.isPartiallyOwn ? 1 : 0;
+        const bOwn = b.isOwn || b.isPartiallyOwn ? 1 : 0;
+        return bOwn - aOwn;
+      };
+      if (sortBy === "domain") list = list.sort((a, b) => pinOwn(a, b) || a.domain.localeCompare(b.domain));
+      else if (sortBy === "pages") list = list.sort((a, b) => pinOwn(a, b) || b.urls.length - a.urls.length);
+      else if (sortBy === "prompts") list = list.sort((a, b) => pinOwn(a, b) || b.prompts.length - a.prompts.length);
       return list;
     }
 

@@ -215,10 +215,29 @@ async function executeSchedule(
           });
           if (llm) sentiment = llm;
         }
+        // 본문 내 자사 URL 등장 여부 판정 — 호스트 문자열이 answerText 에 직접 포함되는지
+        // (markdown 링크 [텍스트](url) 및 plain URL 모두 커버)
+        const brandHosts = brandWebsites
+          .map((url) => {
+            try {
+              return new URL(url.startsWith("http") ? url : `https://${url}`)
+                .hostname.replace(/^www\./, "")
+                .toLowerCase();
+            } catch {
+              return "";
+            }
+          })
+          .filter((h) => h.length > 0);
+        const answerLower = answerText.toLowerCase();
+        const hasBodyUrl = brandHosts.some((h) => answerLower.includes(h));
+        // 참고자료에만 등장 (본문엔 없음)
+        const hasCitationOnly = !hasBodyUrl && citedBrandDomains.length > 0;
+
         const visibilityScore = calcVisibility(
           answerText,
           brandTerms,
-          citedBrandDomains.length > 0,
+          hasBodyUrl,
+          hasCitationOnly,
           sentiment,
         );
 
@@ -462,28 +481,49 @@ function findMentions(text: string, terms: string[]): string[] {
 function calcVisibility(
   text: string,
   brandTerms: string[],
-  hasCitation: boolean,
+  hasBodyUrl: boolean,
+  hasCitationOnly: boolean,
   sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
 ): number {
   if (!text) return 0;
   const lower = text.toLowerCase();
-  let mentions = 0;
-  let firstPos = -1;
+
+  // 모든 브랜드 용어(본명 + 별칭)의 전체 출현 위치 수집
+  const positions: number[] = [];
   for (const t of brandTerms) {
     const term = t.toLowerCase();
     if (!term) continue;
-    const idx = lower.indexOf(term);
-    if (idx >= 0) {
-      mentions += 1;
-      if (firstPos === -1 || idx < firstPos) firstPos = idx;
+    let from = 0;
+    while (from < lower.length) {
+      const idx = lower.indexOf(term, from);
+      if (idx < 0) break;
+      positions.push(idx);
+      from = idx + term.length;
     }
   }
-  if (mentions === 0) return 0;
+  if (positions.length === 0) return 0;
+  positions.sort((a, b) => a - b);
+
+  // 근접한 위치(50자 이내)는 1회로 merge — "매직바디(국제재활필라테스협회)" 같은 별칭 풀어쓰기 중복 카운트 방지
+  const MERGE_WINDOW = 50;
+  const merged: number[] = [positions[0]];
+  for (let i = 1; i < positions.length; i++) {
+    if (positions[i] - merged[merged.length - 1] > MERGE_WINDOW) {
+      merged.push(positions[i]);
+    }
+  }
+  const mentions = merged.length;
+  const firstPos = merged[0];
+
   let score = 30; // 기본: 언급 있음
-  if (firstPos >= 0 && firstPos < 200) score += 20;
-  if (mentions >= 3) score += 15;
+  if (firstPos < 200) score += 20; // 노출 위치
+  if (mentions >= 3) score += 15; // 반복 언급
   else if (mentions >= 2) score += 8;
-  if (hasCitation) score += 20;
+
+  // URL 점수: 본문 URL 우선(+20), 참고자료에만 있으면 약한 신호(+2)
+  if (hasBodyUrl) score += 20;
+  else if (hasCitationOnly) score += 2;
+
   if (sentiment === "positive") score += 15;
   else if (sentiment === "neutral") score += 5;
   return Math.min(score, 100);

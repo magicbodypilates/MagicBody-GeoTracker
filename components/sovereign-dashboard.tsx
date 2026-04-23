@@ -2487,10 +2487,11 @@ ${exampleJson}
                 가시성 점수(0–100)는 AI 응답에서 브랜드가 얼마나 두드러지게 등장하는지 측정합니다. 각 요소가 점수에 기여합니다:
               </p>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                <ScoreFactorCard emoji="🔍" label="브랜드 언급" points="+30" desc="응답에 브랜드명 또는 별칭이 등장" />
+                <ScoreFactorCard emoji="🔍" label="브랜드 언급" points="+30" desc="응답 본문에 브랜드명 또는 별칭이 등장" />
                 <ScoreFactorCard emoji="🏆" label="노출 위치" points="+20" desc="첫 200자 이내에 브랜드가 등장" />
-                <ScoreFactorCard emoji="🔁" label="반복 언급" points="+8~+15" desc="2회 이상(8점) 또는 3회 이상(15점) 언급" />
-                <ScoreFactorCard emoji="🔗" label="웹사이트 인용" points="+20" desc="인용 출처에 자사 웹사이트 URL 포함" />
+                <ScoreFactorCard emoji="🔁" label="반복 언급" points="+8~+15" desc="본문에 2회 이상(8점) 또는 3회 이상(15점) 언급 — 별칭 풀어쓰기는 1회로 통합" />
+                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+20" desc="응답 본문에 자사 웹사이트 URL/도메인 직접 노출" />
+                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="본문엔 없고 참고자료 목록에만 URL 포함 (약한 신호)" />
                 <ScoreFactorCard emoji="👍" label="긍정 감성" points="+15" desc="응답이 브랜드를 긍정적으로 언급" />
                 <ScoreFactorCard emoji="😐" label="중립 감성" points="+5" desc="응답이 브랜드를 중립적 문맥에서 언급" />
               </div>

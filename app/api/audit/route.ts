@@ -37,6 +37,16 @@ async function tryFetch(url: string): Promise<{ ok: boolean; text: string; statu
   }
 }
 
+/**
+ * SPA(Vue/React) 사이트는 존재하지 않는 경로에도 try_files 설정으로
+ * index.html 을 HTTP 200 으로 반환한다. llms.txt, sitemap.xml 등
+ * 순수 텍스트 파일 존재 여부를 확인할 때 이 fallback 을 걸러낸다.
+ */
+function isRealTextFile(text: string): boolean {
+  const trimmed = text.trimStart().toLowerCase();
+  return !trimmed.startsWith("<!doctype") && !trimmed.startsWith("<html");
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { url } = bodySchema.parse(await req.json());
@@ -67,25 +77,27 @@ export async function POST(req: NextRequest) {
     // ═══════════════════════════════════════════════════
 
     // 1. llms.txt
+    const llmsReal = llmsRes.ok && isRealTextFile(llmsRes.text);
     checks.push({
       id: "llms_txt",
       label: "llms.txt",
       category: "discovery",
-      pass: llmsRes.ok,
-      value: llmsRes.ok ? "있음" : "없음",
-      detail: llmsRes.ok
+      pass: llmsReal,
+      value: llmsReal ? "있음" : "없음",
+      detail: llmsReal
         ? `${target.origin}/llms.txt 에 존재 (${llmsRes.text.length} bytes)`
         : "llms.txt 파일이 없습니다. 이 파일은 AI 모델에게 사이트의 목적과 우선 콘텐츠를 알려줍니다.",
     });
 
     // 2. llms-full.txt
+    const llmsFullReal = llmsFullRes.ok && isRealTextFile(llmsFullRes.text);
     checks.push({
       id: "llms_full_txt",
       label: "llms-full.txt",
       category: "discovery",
-      pass: llmsFullRes.ok,
-      value: llmsFullRes.ok ? "있음" : "없음",
-      detail: llmsFullRes.ok
+      pass: llmsFullReal,
+      value: llmsFullReal ? "있음" : "없음",
+      detail: llmsFullReal
         ? `${target.origin}/llms-full.txt 에 존재 (${llmsFullRes.text.length} bytes)`
         : "llms-full.txt 가 없습니다. AI 모델에 상세 컨텍스트를 제공하는 확장 파일입니다.",
     });
@@ -119,7 +131,7 @@ export async function POST(req: NextRequest) {
     });
 
     // 4. Sitemap
-    const hasSitemap = sitemapRes.ok && sitemapRes.text.includes("<url");
+    const hasSitemap = sitemapRes.ok && isRealTextFile(sitemapRes.text) && sitemapRes.text.includes("<url");
     const sitemapUrlCount = (sitemapRes.text.match(/<url>/gi) ?? []).length;
     checks.push({
       id: "sitemap",
@@ -449,11 +461,11 @@ export async function POST(req: NextRequest) {
       url,
       score,
       checks,
-      llmsTxtPresent: llmsRes.ok,
+      llmsTxtPresent: llmsReal,
       schemaMentions,
       blufDensity: blufScore,
       pass: {
-        llmsTxt: llmsRes.ok,
+        llmsTxt: llmsReal,
         schema: schemaMentions > 0,
         bluf: blufScore >= 0.5,
       },

@@ -133,7 +133,8 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
     let cited = 0;
     let related = 0;
     for (const r of filteredRuns) {
-      if ((r.brandMentions?.length ?? 0) > 0) mainMentioned++;
+      // 빈 문자열/공백 제외 — false positive 방지
+      if ((r.brandMentions ?? []).some((m) => m && m.trim() !== "")) mainMentioned++;
       const citedKeys = r.citedBrandDomains ?? [];
       if (citedKeys.length > 0) cited++;
       // 연관 출처: 공식 URL 매칭은 아니지만 citation 제목/설명에 브랜드명이 포함

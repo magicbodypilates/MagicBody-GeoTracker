@@ -576,7 +576,8 @@ export function ReputationSourcesTab({
       providerCounts[r.provider] = (providerCounts[r.provider] ?? 0) + 1;
       if (!providerScores[r.provider]) providerScores[r.provider] = [];
       providerScores[r.provider]!.push(r.visibilityScore ?? 0);
-      if ((r.brandMentions?.length ?? 0) > 0) brandMentioned++;
+      // 빈 문자열/공백 term 은 제외 — 과거 저장 데이터의 false positive 방지
+      if ((r.brandMentions ?? []).some((m) => m && m.trim() !== "")) brandMentioned++;
       totalSources += r.sources.length;
     });
 
@@ -587,7 +588,7 @@ export function ReputationSourcesTab({
     })).sort((a, b) => b.avg - a.avg);
 
     return { avgScore, sentiments, providerAvgs, brandMentioned, totalSources };
-  }, [runs]);
+  }, [filteredRuns]);
 
   // Auto-expand first group
   const isGroupOpen = (prompt: string, idx: number) => {

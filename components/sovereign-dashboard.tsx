@@ -852,8 +852,13 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** Find which terms appear in text (case-insensitive) */
   function findMentions(text: string, terms: string[]): string[] {
+    if (!text) return [];
     const lower = text.toLowerCase();
-    return terms.filter((t) => lower.includes(t.toLowerCase()));
+    // 빈 문자열/공백 term 은 제외 — "".includes("") 가 항상 true 라 false positive 발생
+    return terms
+      .map((t) => t?.trim() ?? "")
+      .filter((t) => t.length > 0)
+      .filter((t) => lower.includes(t.toLowerCase()));
   }
 
   /**
@@ -2410,7 +2415,7 @@ ${exampleJson}
               />
               <KpiCard
                 label="브랜드 언급"
-                value={autoRuns.filter((r) => (r.brandMentions?.length ?? 0) > 0).length}
+                value={autoRuns.filter((r) => (r.brandMentions ?? []).some((m) => m && m.trim() !== "")).length}
               />
               <KpiCard label="수집된 출처" value={totalSources} />
               <KpiCard

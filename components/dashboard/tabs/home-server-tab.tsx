@@ -653,16 +653,6 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
         </h3>
         <div className="ml-auto flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
           <button
-            onClick={() => setHeatTab("mention")}
-            className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-              heatTab === "mention"
-                ? "bg-th-accent text-th-text-inverse"
-                : "text-th-text-secondary hover:bg-th-card-hover"
-            }`}
-          >
-            브랜드 언급
-          </button>
-          <button
             onClick={() => setHeatTab("visibility")}
             className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
               heatTab === "visibility"
@@ -671,6 +661,16 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
             }`}
           >
             가시성
+          </button>
+          <button
+            onClick={() => setHeatTab("mention")}
+            className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+              heatTab === "mention"
+                ? "bg-th-accent text-th-text-inverse"
+                : "text-th-text-secondary hover:bg-th-card-hover"
+            }`}
+          >
+            브랜드 언급
           </button>
         </div>
       </div>

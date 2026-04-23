@@ -706,7 +706,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     return [...map.entries()]
       .map(([url, data]) => ({ url, count: data.count, prompts: [...data.prompts] }))
       .sort((a, b) => b.count - a.count)
-      .slice(0, 50);
+      .slice(0, 200);
   }, [state.runs]);
 
   const visibilityTrend = useMemo(() => {
@@ -2414,7 +2414,13 @@ Now analyze all ${competitorList.length} competitors:`,
                 label="최근 실행"
                 value={
                   latestRun
-                    ? latestRun.createdAt.replace("T", " ").slice(0, 16)
+                    ? new Date(
+                        latestRun.createdAt.endsWith("Z")
+                          ? latestRun.createdAt
+                          : latestRun.createdAt + "Z",
+                      )
+                        .toLocaleString("sv-SE", { timeZone: "Asia/Seoul" })
+                        .slice(0, 16)
                     : "—"
                 }
                 small

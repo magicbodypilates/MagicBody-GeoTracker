@@ -137,7 +137,7 @@ export function PromptHubTab({
               onAddCustomPrompt(newPrompt);
               setNewPrompt("");
             }}
-            className="bd-btn-primary rounded-lg px-4 py-2 text-sm"
+            className="bd-btn-primary shrink-0 whitespace-nowrap rounded-lg px-4 py-2 text-sm"
           >
             추가
           </button>
@@ -154,25 +154,26 @@ export function PromptHubTab({
               key={`${item.text}-${index}`}
               className="rounded-lg border border-th-border bg-th-card p-3"
             >
-              <div className="mb-2 line-clamp-3 text-th-text">{interpolateBrand(item.text)}</div>
+              {/* PC: 프롬프트 텍스트 + 태그 같은 라인. 모바일: 세로로 */}
+              <div className="mb-2 flex flex-col gap-2 md:flex-row md:items-start md:gap-3">
+                <div className="line-clamp-3 flex-1 text-th-text">{interpolateBrand(item.text)}</div>
 
-              {/* Tags row */}
-              <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                {item.tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="inline-flex items-center gap-1 rounded-full bg-th-accent/10 px-2 py-0.5 text-xs font-medium text-th-accent"
-                  >
-                    {tag}
-                    <button
-                      onClick={() => handleRemoveTag(item.text, item.tags, tag)}
-                      className="ml-0.5 text-th-accent/60 hover:text-th-accent"
+                {/* Tags row */}
+                <div className="flex flex-wrap items-center gap-1.5 md:shrink-0 md:justify-end">
+                  {item.tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="inline-flex items-center gap-1 rounded-full bg-th-accent/10 px-2 py-0.5 text-xs font-medium text-th-accent"
                     >
-                      ×
-                    </button>
-                  </span>
-                ))}
-                <div className="inline-flex items-center gap-1">
+                      {tag}
+                      <button
+                        onClick={() => handleRemoveTag(item.text, item.tags, tag)}
+                        className="ml-0.5 text-th-accent/60 hover:text-th-accent"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
                   <input
                     value={tagDrafts[item.text] ?? ""}
                     onChange={(e) =>

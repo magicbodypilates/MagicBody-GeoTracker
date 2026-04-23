@@ -87,11 +87,30 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
     downloadCsv(`aeo-runs-${new Date().toISOString().slice(0, 10)}.csv`, header + rows);
   }, [runs, brandTerms]);
 
+  // 전체 평균 추이 — filteredRuns(자동/수동 탭) 기준으로 재계산.
+  // 외부에서 전달된 data prop 은 섞인 값이므로 사용하지 않음.
+  const computedTrendData = useMemo(() => {
+    const byDay = new Map<string, { total: number; sum: number }>();
+    filteredRuns.forEach((run) => {
+      const day = run.createdAt.slice(0, 10);
+      const row = byDay.get(day) ?? { total: 0, sum: 0 };
+      row.total += 1;
+      row.sum += run.visibilityScore ?? 0;
+      byDay.set(day, row);
+    });
+    return [...byDay.entries()]
+      .map(([day, { total, sum }]) => ({
+        day,
+        visibility: total > 0 ? Math.round(sum / total) : 0,
+      }))
+      .sort((a, b) => a.day.localeCompare(b.day));
+  }, [filteredRuns]);
+
   const exportTrendCsv = useCallback(() => {
     const header = "날짜,평균 가시성 (%)\n";
-    const rows = data.map((d) => `${d.day},${d.visibility}`).join("\n");
+    const rows = computedTrendData.map((d) => `${d.day},${d.visibility}`).join("\n");
     downloadCsv(`aeo-trend-${new Date().toISOString().slice(0, 10)}.csv`, header + rows);
-  }, [data]);
+  }, [computedTrendData]);
 
   // Sentiment distribution — filteredRuns 기준
   const sentimentCounts = filteredRuns.reduce(
@@ -318,14 +337,14 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
             모든 프로바이더(ChatGPT · Gemini · Google AI · Perplexity) 를 합산한 일별 평균 visibility score. 위 차트의 4개 선을 하루 단위로 평균낸 값입니다.
           </p>
         </div>
-        {data.length === 0 ? (
+        {computedTrendData.length === 0 ? (
           <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center text-sm text-th-text-secondary">
             아직 추세 데이터가 없습니다. 프롬프트를 실행하면 가시성 추세가 표시됩니다.
           </div>
         ) : (
           <div className="h-72 w-full">
             <ResponsiveContainer>
-              <LineChart data={data}>
+              <LineChart data={computedTrendData}>
                 <CartesianGrid stroke="var(--th-chart-grid)" strokeDasharray="3 3" />
                 <XAxis dataKey="day" tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
                 <YAxis domain={[0, 100]} tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
@@ -362,7 +381,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
         </button>
         <button
           onClick={exportTrendCsv}
-          disabled={data.length === 0}
+          disabled={computedTrendData.length === 0}
           className="bd-chip rounded-lg px-4 py-2 text-sm disabled:opacity-40"
         >
           추세 데이터 내보내기 (CSV)

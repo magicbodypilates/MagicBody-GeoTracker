@@ -70,32 +70,81 @@ export async function GET(
       .from(schema.competitors)
       .where(eq(schema.competitors.workspaceId, id));
 
-    // 3) runs 의 경쟁사 언급/인용 배열만 로드 (답변 · 소스 · 기타 JSONB 제외 — 메모리 절약)
+    // 3) runs 의 경쟁사 언급/인용 + 답변 본문 · 인용 URL 로드
+    //    경쟁사를 나중에 추가해도 과거 데이터에 즉시 반영하기 위해,
+    //    저장된 배열뿐 아니라 answer 본문 · citations 배열에서도 실시간 매칭.
     const runsForComp =
       competitors.length === 0
         ? []
         : await db
             .select({
+              answer: schema.runs.answer,
               competitorMentions: schema.runs.competitorMentions,
               citedCompetitorDomains: schema.runs.citedCompetitorDomains,
+              citations: schema.runs.citations,
             })
             .from(schema.runs)
             .where(and(...conditions));
 
-    // 4) 자바스크립트에서 교집합 계산 — 경쟁사 수가 많아도 단일 루프
+    // 4) 자바스크립트에서 교집합 계산 — 저장된 필드 + 본문 실시간 매칭 OR 결합
     const compStats = competitors.map((c) => {
-      const targets = new Set(
-        [c.name, ...(c.aliases ?? [])].filter(Boolean).map((s) => s.toLowerCase()),
+      const termsLower = [c.name, ...(c.aliases ?? [])]
+        .filter(Boolean)
+        .map((s) => s.toLowerCase());
+      const targets = new Set(termsLower);
+      // 사이트 호스트 정규화 (www. 제거)
+      const siteHosts = new Set(
+        (c.websites ?? [])
+          .map((u) => {
+            try {
+              return new URL(u.startsWith("http") ? u : `https://${u}`)
+                .hostname.replace(/^www\./, "")
+                .toLowerCase();
+            } catch {
+              return u.toLowerCase().replace(/^www\./, "");
+            }
+          })
+          .filter(Boolean),
       );
-      const sites = new Set((c.websites ?? []).map((s) => s.toLowerCase()));
 
       let mentions = 0;
       let cited = 0;
       for (const r of runsForComp) {
+        // 언급: 저장된 competitorMentions OR 본문에서 직접 매칭
         const mArr = r.competitorMentions ?? [];
-        if (mArr.some((m) => targets.has(m.toLowerCase()))) mentions += 1;
+        const hasStored = mArr.some((m) => targets.has(m.toLowerCase()));
+        const answerLower = (r.answer ?? "").toLowerCase();
+        const hasInBody =
+          !hasStored && termsLower.some((t) => t && answerLower.includes(t));
+        if (hasStored || hasInBody) mentions += 1;
+
+        // 인용: 저장된 citedCompetitorDomains OR citations JSONB 에서 직접 매칭
         const dArr = r.citedCompetitorDomains ?? [];
-        if (dArr.some((d) => sites.has(d.toLowerCase()))) cited += 1;
+        const hasStoredCited = dArr.some((d) => siteHosts.has(d.toLowerCase()));
+        let hasCitedInJsonb = false;
+        if (!hasStoredCited && siteHosts.size > 0) {
+          const cits = Array.isArray(r.citations) ? r.citations : [];
+          for (const c of cits as Array<{ url?: string; domain?: string }>) {
+            const raw = (c?.domain || c?.url || "").toString();
+            if (!raw) continue;
+            try {
+              const host = new URL(raw.startsWith("http") ? raw : `https://${raw}`)
+                .hostname.replace(/^www\./, "")
+                .toLowerCase();
+              if (siteHosts.has(host)) {
+                hasCitedInJsonb = true;
+                break;
+              }
+            } catch {
+              const host = raw.toLowerCase().replace(/^www\./, "");
+              if (siteHosts.has(host)) {
+                hasCitedInJsonb = true;
+                break;
+              }
+            }
+          }
+        }
+        if (hasStoredCited || hasCitedInJsonb) cited += 1;
       }
       return {
         name: c.name,

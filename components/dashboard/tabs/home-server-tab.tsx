@@ -424,11 +424,11 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
                 </LineChart>
               </ResponsiveContainer>
             </div>
-            {timeseriesTab === "mention" && (
-              <p className="mt-1.5 text-xs text-th-text-muted">
-                AI 응답 중 브랜드가 본문에 직접 언급된 비율 (%)
-              </p>
-            )}
+            <p className="mt-1.5 text-xs text-th-text-muted">
+              {timeseriesTab === "mention"
+                ? "AI 응답 중 브랜드가 본문에 직접 언급된 비율 (%)"
+                : "모델별 일일 평균 가시성 점수 (0-100). 실행이 없는 날은 0으로 표시됩니다."}
+            </p>
           </div>
 
           {/* 랭킹 + 경쟁사 벤치마크 — 2열 그리드 */}

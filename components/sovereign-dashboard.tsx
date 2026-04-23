@@ -269,9 +269,9 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
   },
   Automation: {
     title: "자동화",
-    tooltip: "크론/워크플로로 반복 실행을 설정합니다.",
+    tooltip: "설정한 주기로 활성 프롬프트 추적이 자동 실행됩니다.",
     details:
-      "Vercel Cron 및 GitHub Actions용 배포 가능한 스케줄 템플릿을 저장합니다. 설정한 주기로 추적이 자동 실행됩니다.",
+      "설정한 주기로 활성 프롬프트 추적이 자동 실행됩니다.",
   },
   "Competitor Battlecards": {
     title: "경쟁사 배틀카드",
@@ -2489,7 +2489,7 @@ ${exampleJson}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 <ScoreFactorCard emoji="🔍" label="브랜드 언급" points="+30" desc="응답 본문에 브랜드명 또는 별칭이 등장" />
                 <ScoreFactorCard emoji="🏆" label="노출 위치" points="+20" desc="첫 200자 이내에 브랜드가 등장" />
-                <ScoreFactorCard emoji="🔁" label="반복 언급" points="+8~+15" desc="본문에 2회 이상(8점) 또는 3회 이상(15점) 언급 — 별칭 풀어쓰기는 1회로 통합" />
+                <ScoreFactorCard emoji="🔁" label="반복 언급" points="+8~+15" desc="본문에 2회 이상(8점) 또는 3회 이상(15점) 언급" />
                 <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+20" desc="응답 본문에 자사 웹사이트 URL/도메인 직접 노출" />
                 <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="본문엔 없고 참고자료 목록에만 URL 포함 (약한 신호)" />
                 <ScoreFactorCard emoji="👍" label="긍정 감성" points="+15" desc="응답이 브랜드를 긍정적으로 언급" />

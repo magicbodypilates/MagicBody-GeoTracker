@@ -505,6 +505,74 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }, [activeWsId, demoMode]);
 
   /**
+   * 탭 전환 시 state.runs 즉시 재동기화.
+   *
+   * 자동화 탭의 "즉시 실행" 직후 사용자가 AI 응답 · 가시성 탭으로 넘어갈 때
+   * 60초 주기 폴링을 기다리지 않고 바로 최신 데이터가 보이도록.
+   * 데이터 탭(Responses · Visibility · Citation · Home) 전환 시에만 재조회.
+   */
+  const dataHeavyTabs = useMemo(
+    () => new Set<TabKey>(["Home", "Responses", "Visibility Analytics", "Citation Opportunities"]),
+    [],
+  );
+  useEffect(() => {
+    if (demoMode || !serverWsId || !loaded) return;
+    if (!dataHeavyTabs.has(activeTab)) return;
+    const wsId = serverWsId;
+    let cancelled = false;
+    (async () => {
+      try {
+        const fresh = await loadFromServer(wsId);
+        if (cancelled) return;
+        setState((prev) => ({
+          ...prev,
+          runs: fresh.runs ?? prev.runs,
+          auditReport: fresh.auditReport ?? prev.auditReport,
+        }));
+      } catch (e) {
+        console.warn("[dashboard] 탭 전환 재동기화 실패:", e instanceof Error ? e.message : e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, serverWsId, loaded, demoMode, dataHeavyTabs]);
+
+  /**
+   * state.runs 주기적 재동기화 (60초).
+   *
+   * 왜 필요한가:
+   *   - 자동화 탭의 "즉시 실행" · cron tick · 워커 컨테이너가 서버 DB 에 새 runs 를 누적함
+   *   - 전역 state.runs 는 마운트 시 1회만 로드돼 오래된 값에 머무름
+   *   - 결과: AI 응답 탭 · 가시성 탭 · 홈 탭 KPI 가 자동화 탭과 숫자가 맞지 않음
+   *
+   * 폴링 주기 60초 — 자동화 탭 내부 recentRuns 폴링과 동일한 박자.
+   */
+  useEffect(() => {
+    if (demoMode || !serverWsId || !loaded) return;
+    const wsId = serverWsId;
+    let cancelled = false;
+    const refetch = async () => {
+      try {
+        const fresh = await loadFromServer(wsId);
+        if (cancelled) return;
+        setState((prev) => ({
+          ...prev,
+          runs: fresh.runs ?? prev.runs,
+          auditReport: fresh.auditReport ?? prev.auditReport,
+        }));
+      } catch (e) {
+        console.warn("[dashboard] 주기 재동기화 실패:", e instanceof Error ? e.message : e);
+      }
+    };
+    const t = setInterval(refetch, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [serverWsId, loaded, demoMode]);
+
+  /**
    * 브랜드 설정 debounced 서버 동기화 (600ms)
    * 초기 로드 직후 발생하는 불필요한 PATCH 방지 — brandInitializedRef 로 skip.
    */

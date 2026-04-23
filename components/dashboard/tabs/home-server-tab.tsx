@@ -99,6 +99,7 @@ type HeatmapResult = {
   providers: string[];
   matrix: (number | null)[][];
   sampleCounts: number[][];
+  mentionMatrix?: (number | null)[][];
 };
 
 type CitationsResult = {
@@ -142,6 +143,7 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
   const [wsId, setWsId] = useState<string | null>(null);
   const [days, setDays] = useState(30);
   const [autoOnly, setAutoOnly] = useState(true);
+  const [timeseriesTab, setTimeseriesTab] = useState<"visibility" | "mention">("visibility");
 
   const [summary, setSummary] = useState<SummaryResult | null>(null);
   const [timeseries, setTimeseries] = useState<TimeseriesResult | null>(null);
@@ -225,6 +227,24 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
     for (const [provider, list] of Object.entries(timeseries.providers)) {
       const m: Record<string, number> = {};
       for (const r of list) m[r.date] = r.avgVisibility;
+      lookup[provider] = m;
+    }
+    return timeseries.days.map((day) => {
+      const row: Record<string, string | number> = { day: day.slice(5) };
+      for (const p of VISIBLE_PROVIDERS) {
+        row[p] = lookup[p]?.[day] ?? 0;
+      }
+      return row;
+    });
+  }, [timeseries]);
+
+  // 모델별 브랜드 언급률 시계열 (mentionRate 0-100%)
+  const mentionChartData = useMemo(() => {
+    if (!timeseries) return [];
+    const lookup: Record<string, Record<string, number>> = {};
+    for (const [provider, list] of Object.entries(timeseries.providers)) {
+      const m: Record<string, number> = {};
+      for (const r of list) m[r.date] = Math.round(r.mentionRate * 1000) / 10;
       lookup[provider] = m;
     }
     return timeseries.days.map((day) => {
@@ -355,16 +375,47 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
 
           {/* 시계열 차트 */}
           <div className="rounded-lg border border-th-border bg-th-card p-4">
-            <h3 className="mb-2 text-base font-semibold text-th-text">
-              일별 평균 가시성 (프로바이더별)
-            </h3>
+            <div className="mb-3 flex items-center gap-3">
+              <h3 className="text-base font-semibold text-th-text">
+                {timeseriesTab === "visibility" ? "일별 평균 가시성 (프로바이더별)" : "모델별 브랜드 언급 변화"}
+              </h3>
+              <div className="ml-auto flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
+                <button
+                  onClick={() => setTimeseriesTab("visibility")}
+                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    timeseriesTab === "visibility"
+                      ? "bg-th-accent text-th-text-inverse"
+                      : "text-th-text-secondary hover:bg-th-card-hover"
+                  }`}
+                >
+                  가시성
+                </button>
+                <button
+                  onClick={() => setTimeseriesTab("mention")}
+                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    timeseriesTab === "mention"
+                      ? "bg-th-accent text-th-text-inverse"
+                      : "text-th-text-secondary hover:bg-th-card-hover"
+                  }`}
+                >
+                  브랜드 언급
+                </button>
+              </div>
+            </div>
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
+                <LineChart
+                  data={timeseriesTab === "visibility" ? chartData : mentionChartData}
+                  margin={{ top: 5, right: 10, bottom: 5, left: 0 }}
+                >
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
                   <XAxis dataKey="day" tick={{ fontSize: 10 }} />
-                  <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} />
-                  <Tooltip />
+                  <YAxis
+                    domain={[0, timeseriesTab === "visibility" ? 100 : 100]}
+                    tick={{ fontSize: 10 }}
+                    unit={timeseriesTab === "mention" ? "%" : ""}
+                  />
+                  <Tooltip formatter={(v: unknown) => timeseriesTab === "mention" ? [`${String(v)}%`, "언급률"] : [`${String(v)}`, "가시성"]} />
                   <Legend />
                   {VISIBLE_PROVIDERS.map((p) => (
                     <Line
@@ -381,60 +432,68 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
                 </LineChart>
               </ResponsiveContainer>
             </div>
+            {timeseriesTab === "mention" && (
+              <p className="mt-1.5 text-xs text-th-text-muted">
+                AI 응답 중 브랜드가 본문에 직접 언급된 비율 (%)
+              </p>
+            )}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            {/* 랭킹 */}
-            {ranking && ranking.total > 0 && (
-              <div className="rounded-lg border border-th-border bg-th-card p-4">
-                <h3 className="mb-2 text-base font-semibold text-th-text">
-                  프롬프트별 가시성 랭킹
-                </h3>
-                <RankingList title="상위 (우수)" items={ranking.top} highlight="high" />
-                <div className="my-3 border-t border-th-border"></div>
-                <RankingList title="하위 (개선 필요)" items={ranking.bottom} highlight="low" />
-                <p className="mt-2 text-xs text-th-text-muted">
-                  표본 {ranking.total}개 프롬프트 기준 · 최소 3회 실행된 프롬프트만 포함
-                </p>
-              </div>
-            )}
-
-            {/* 경쟁사 벤치마크 */}
-            {benchmark && benchmark.competitors.length > 0 && (
-              <div className="rounded-lg border border-th-border bg-th-card p-4">
-                <h3 className="mb-2 text-base font-semibold text-th-text">경쟁사 언급 비교</h3>
-                {/* 각 막대마다 32px 고정 높이 할당 — 라벨이 겹치지 않게 전체 높이를 행수에 비례시킴 */}
-                <div style={{ height: Math.max(benchmarkChart.length * 32 + 40, 240) }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={benchmarkChart} layout="vertical" margin={{ left: 0, right: 40 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
-                      <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} unit="%" />
-                      {/* interval={0} 으로 Recharts 가 자동 생략하지 못하게 강제 — 모든 경쟁사 이름 표시 */}
-                      <YAxis
-                        type="category"
-                        dataKey="name"
-                        width={150}
-                        tick={{ fontSize: 10 }}
-                        interval={0}
-                      />
-                      <Tooltip formatter={(v) => [`${v}%`, "언급률"]} />
-                      <Bar dataKey="mentionRate" fill="var(--th-accent)">
-                        <LabelList
-                          dataKey="mentionRate"
-                          position="right"
-                          formatter={(v: unknown) => `${v}%`}
-                          style={{ fontSize: 10, fill: "var(--th-text-muted)" }}
-                        />
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+          {/* 랭킹 + 경쟁사 벤치마크 — 2열 그리드 */}
+          {((ranking && ranking.total > 0) || (benchmark && benchmark.competitors.length > 0)) && (
+            <div className="grid gap-4 lg:grid-cols-2">
+              {/* 랭킹 */}
+              {ranking && ranking.total > 0 && (
+                <div className="rounded-lg border border-th-border bg-th-card p-4">
+                  <h3 className="mb-2 text-base font-semibold text-th-text">
+                    프롬프트별 가시성 랭킹
+                  </h3>
+                  <RankingList title="상위 (우수)" items={ranking.top} highlight="high" />
+                  <div className="my-3 border-t border-th-border"></div>
+                  <RankingList title="하위 (개선 필요)" items={ranking.bottom} highlight="low" />
+                  <p className="mt-2 text-xs text-th-text-muted">
+                    표본 {ranking.total}개 프롬프트 기준 · 최소 3회 실행된 프롬프트만 포함
+                  </p>
                 </div>
-                <p className="mt-2 text-xs text-th-text-muted">
-                  기간 {days}일 · 전체 AI 응답 중 해당 브랜드/경쟁사가 언급된 비율
-                </p>
-              </div>
-            )}
-          </div>
+              )}
+
+              {/* 경쟁사 벤치마크 */}
+              {benchmark && benchmark.competitors.length > 0 && (
+                <div className="rounded-lg border border-th-border bg-th-card p-4">
+                  <h3 className="mb-2 text-base font-semibold text-th-text">경쟁사 언급 비교</h3>
+                  {/* 각 막대마다 32px 고정 높이 할당 — 라벨이 겹치지 않게 전체 높이를 행수에 비례시킴 */}
+                  <div style={{ height: Math.max(benchmarkChart.length * 32 + 40, 240) }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={benchmarkChart} layout="vertical" margin={{ left: 0, right: 40 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
+                        <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10 }} unit="%" />
+                        {/* interval={0} 으로 Recharts 가 자동 생략하지 못하게 강제 — 모든 경쟁사 이름 표시 */}
+                        <YAxis
+                          type="category"
+                          dataKey="name"
+                          width={150}
+                          tick={{ fontSize: 10 }}
+                          interval={0}
+                        />
+                        <Tooltip formatter={(v) => [`${v}%`, "언급률"]} />
+                        <Bar dataKey="mentionRate" fill="var(--th-accent)">
+                          <LabelList
+                            dataKey="mentionRate"
+                            position="right"
+                            formatter={(v: unknown) => `${v}%`}
+                            style={{ fontSize: 10, fill: "var(--th-text-muted)" }}
+                          />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="mt-2 text-xs text-th-text-muted">
+                    기간 {days}일 · 전체 AI 응답 중 해당 브랜드/경쟁사가 언급된 비율
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 드리프트 알림 */}
           {drift && drift.alerts.length > 0 && (
@@ -487,9 +546,11 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
             </div>
           )}
 
-          {/* 프롬프트 × 프로바이더 히트맵 */}
+          {/* 프롬프트 × 프로바이더 히트맵 — 항상 전체폭 */}
           {heatmap && heatmap.prompts.length > 0 && (
-            <HeatmapPanel data={heatmap} days={days} />
+            <div className="w-full">
+              <HeatmapPanel data={heatmap} days={days} />
+            </div>
           )}
 
           <div className="grid gap-4 lg:grid-cols-2">
@@ -588,11 +649,39 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
 
 /** 프롬프트 × 프로바이더 히트맵 */
 function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
+  const [heatTab, setHeatTab] = useState<"visibility" | "mention">("mention");
+  const matrix = heatTab === "visibility" ? data.matrix : (data.mentionMatrix ?? data.matrix);
+  const isMention = heatTab === "mention";
+
   return (
     <div className="rounded-lg border border-th-border bg-th-card p-4">
-      <h3 className="mb-2 text-base font-semibold text-th-text">
-        프롬프트 × 프로바이더 가시성 히트맵
-      </h3>
+      <div className="mb-3 flex items-center gap-3">
+        <h3 className="text-base font-semibold text-th-text">
+          프롬프트 × 프로바이더 히트맵
+        </h3>
+        <div className="ml-auto flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
+          <button
+            onClick={() => setHeatTab("mention")}
+            className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+              heatTab === "mention"
+                ? "bg-th-accent text-th-text-inverse"
+                : "text-th-text-secondary hover:bg-th-card-hover"
+            }`}
+          >
+            브랜드 언급
+          </button>
+          <button
+            onClick={() => setHeatTab("visibility")}
+            className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+              heatTab === "visibility"
+                ? "bg-th-accent text-th-text-inverse"
+                : "text-th-text-secondary hover:bg-th-card-hover"
+            }`}
+          >
+            가시성
+          </button>
+        </div>
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
@@ -608,14 +697,11 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
           <tbody>
             {data.prompts.map((prompt, i) => (
               <tr key={prompt} className="border-b border-th-border-subtle">
-                <td
-                  className="max-w-xs truncate py-1.5 pr-2 text-th-text"
-                  title={prompt}
-                >
+                <td className="max-w-xs truncate py-1.5 pr-2 text-th-text" title={prompt}>
                   {prompt}
                 </td>
                 {data.providers.map((_, j) => {
-                  const val = data.matrix[i][j];
+                  const val = matrix[i]?.[j] ?? null;
                   const count = data.sampleCounts[i][j];
                   return (
                     <td key={j} className="px-1 py-1 text-center">
@@ -623,12 +709,12 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
                         <div
                           className="inline-block rounded px-2 py-1 font-mono text-xs"
                           style={{
-                            backgroundColor: heatmapColor(val),
+                            backgroundColor: isMention ? mentionColor(val) : heatmapColor(val),
                             color: val >= 40 ? "#fff" : "#333",
                           }}
-                          title={`${val}점 · ${count}회 실행`}
+                          title={isMention ? `언급률 ${val}% · ${count}회 실행` : `${val}점 · ${count}회 실행`}
                         >
-                          {val.toFixed(0)}
+                          {isMention ? `${val.toFixed(0)}%` : val.toFixed(0)}
                         </div>
                       ) : (
                         <span className="text-th-text-muted">—</span>
@@ -642,7 +728,9 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
         </table>
       </div>
       <p className="mt-2 text-xs text-th-text-muted">
-        기간 {days}일 · 셀 = 해당 프롬프트의 해당 모델 평균 가시성 점수 (0-100)
+        {isMention
+          ? `기간 ${days}일 · 셀 = 해당 프롬프트에서 브랜드가 AI 본문에 언급된 비율 (%)`
+          : `기간 ${days}일 · 셀 = 해당 프롬프트의 해당 모델 평균 가시성 점수 (0-100)`}
       </p>
     </div>
   );
@@ -650,12 +738,20 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
 
 /** 가시성 점수 → 색상 (0-100 green scale) */
 function heatmapColor(v: number): string {
-  // 0 = 회색, 50 = 노랑, 100 = 녹색
-  if (v < 20) return "rgba(107, 114, 128, 0.2)"; // gray
-  if (v < 40) return "rgba(234, 179, 8, 0.35)"; // yellow
+  if (v < 20) return "rgba(107, 114, 128, 0.2)";
+  if (v < 40) return "rgba(234, 179, 8, 0.35)";
   if (v < 60) return "rgba(234, 179, 8, 0.6)";
   if (v < 80) return "rgba(34, 197, 94, 0.6)";
   return "rgba(34, 197, 94, 0.85)";
+}
+
+/** 브랜드 언급률 % → 색상 (0-100% blue-green scale) */
+function mentionColor(v: number): string {
+  if (v < 10) return "rgba(107, 114, 128, 0.2)";
+  if (v < 30) return "rgba(59, 130, 246, 0.35)";
+  if (v < 60) return "rgba(59, 130, 246, 0.6)";
+  if (v < 80) return "rgba(16, 185, 129, 0.6)";
+  return "rgba(16, 185, 129, 0.85)";
 }
 
 function KpiCard({

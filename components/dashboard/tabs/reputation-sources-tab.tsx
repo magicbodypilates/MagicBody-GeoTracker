@@ -516,16 +516,16 @@ export function ReputationSourcesTab({
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
   const [filterSentiment, setFilterSentiment] = useState<string>("all");
-  const [filterOrigin, setFilterOrigin] = useState<"all" | "manual" | "auto">("all");
+  const [filterOrigin, setFilterOrigin] = useState<"auto" | "manual">("auto");
   const [sortField, setSortField] = useState<"date" | "score">("date");
 
   // Apply filters
   const filteredRuns = useMemo(() => {
     let list = [...runs];
+    if (filterOrigin === "auto") list = list.filter((r) => r.auto === true);
+    else list = list.filter((r) => r.auto !== true);
     if (filterProvider !== "all") list = list.filter((r) => r.provider === filterProvider);
     if (filterSentiment !== "all") list = list.filter((r) => r.sentiment === filterSentiment);
-    if (filterOrigin === "auto") list = list.filter((r) => r.auto === true);
-    else if (filterOrigin === "manual") list = list.filter((r) => r.auto !== true);
     return list;
   }, [runs, filterProvider, filterSentiment, filterOrigin]);
 
@@ -561,17 +561,17 @@ export function ReputationSourcesTab({
     });
   }, [filteredRuns, sortField]);
 
-  // Insight stats
+  // Insight stats — filteredRuns 기준 (자동/수동 탭 반영)
   const insights = useMemo(() => {
-    if (runs.length === 0) return null;
-    const avgScore = Math.round(runs.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / runs.length);
+    if (filteredRuns.length === 0) return null;
+    const avgScore = Math.round(filteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / filteredRuns.length);
     const sentiments = { positive: 0, neutral: 0, negative: 0, "not-mentioned": 0 };
     const providerCounts: Partial<Record<Provider, number>> = {};
     const providerScores: Partial<Record<Provider, number[]>> = {};
     let brandMentioned = 0;
     let totalSources = 0;
 
-    runs.forEach((r) => {
+    filteredRuns.forEach((r) => {
       sentiments[r.sentiment as keyof typeof sentiments] = (sentiments[r.sentiment as keyof typeof sentiments] ?? 0) + 1;
       providerCounts[r.provider] = (providerCounts[r.provider] ?? 0) + 1;
       if (!providerScores[r.provider]) providerScores[r.provider] = [];
@@ -619,21 +619,51 @@ export function ReputationSourcesTab({
   return (
     <div className="space-y-4">
 
+      {/* ── 자동/수동 탭 ── */}
+      <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1">
+        <button
+          onClick={() => setFilterOrigin("auto")}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            filterOrigin === "auto"
+              ? "bg-th-accent text-th-text-inverse shadow-sm"
+              : "text-th-text-secondary hover:bg-th-card-hover"
+          }`}
+        >
+          자동 응답
+        </button>
+        <button
+          onClick={() => setFilterOrigin("manual")}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            filterOrigin === "manual"
+              ? "bg-th-accent text-th-text-inverse shadow-sm"
+              : "text-th-text-secondary hover:bg-th-card-hover"
+          }`}
+        >
+          수동 응답
+        </button>
+      </div>
+
       {/* ── Insight cards ── */}
       {insights && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
           <InsightMini label="평균 점수" value={`${insights.avgScore}/100`} accent />
-          <InsightMini label="브랜드 언급" value={`${insights.brandMentioned}/${runs.length}`} />
+          <InsightMini label="브랜드 언급" value={`${insights.brandMentioned}/${filteredRuns.length}`} />
           <InsightMini
             label="긍정"
             value={insights.sentiments.positive}
-            sub={`${Math.round((insights.sentiments.positive / runs.length) * 100)}%`}
+            sub={`${Math.round((insights.sentiments.positive / (filteredRuns.length || 1)) * 100)}%`}
             color="text-th-success"
+          />
+          <InsightMini
+            label="중립"
+            value={insights.sentiments.neutral}
+            sub={`${Math.round((insights.sentiments.neutral / (filteredRuns.length || 1)) * 100)}%`}
+            color="text-th-text-accent"
           />
           <InsightMini
             label="부정"
             value={insights.sentiments.negative}
-            sub={`${Math.round((insights.sentiments.negative / runs.length) * 100)}%`}
+            sub={`${Math.round((insights.sentiments.negative / (filteredRuns.length || 1)) * 100)}%`}
             color="text-th-danger"
           />
           <InsightMini label="인용 출처" value={insights.totalSources} />
@@ -692,18 +722,6 @@ export function ReputationSourcesTab({
           <option value="not-mentioned">미언급</option>
         </select>
 
-        {/* Origin filter (자동/수동) */}
-        <select
-          value={filterOrigin}
-          onChange={(e) => setFilterOrigin(e.target.value as "all" | "manual" | "auto")}
-          className="bd-input rounded-lg px-2.5 py-1.5 text-xs"
-          title="자동 실행: 스케줄러에 의한 실행 / 수동 실행: 사용자가 직접 실행"
-        >
-          <option value="all">자동+수동</option>
-          <option value="manual">수동 실행만</option>
-          <option value="auto">자동 실행만</option>
-        </select>
-
         {/* Sort */}
         <select
           value={sortField}
@@ -718,7 +736,7 @@ export function ReputationSourcesTab({
           <span className="font-semibold text-th-text">{filteredRuns.length}</span> responses across{" "}
           <span className="font-semibold text-th-text">{promptGroups.length}</span> prompt{promptGroups.length > 1 ? "s" : ""}
         </span>
-        {onResetManualResponses && runs.some((r) => r.auto !== true) && (
+        {onResetManualResponses && filterOrigin === "manual" && runs.some((r) => r.auto !== true) && (
           <button
             type="button"
             onClick={onResetManualResponses}

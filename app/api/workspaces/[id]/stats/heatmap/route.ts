@@ -58,6 +58,7 @@ export async function GET(
         provider: schema.runs.provider,
         avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
         sampleCount: sql<number>`count(*)::int`,
+        mentionCount: sql<number>`count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0)::int`,
       })
       .from(schema.runs)
       .where(and(...conditions))
@@ -73,11 +74,12 @@ export async function GET(
     const prompts = [...promptSet].sort();
     const providers = [...providerSet].sort();
 
-    const lookup = new Map<string, { avgVisibility: number; sampleCount: number }>();
+    const lookup = new Map<string, { avgVisibility: number; sampleCount: number; mentionCount: number }>();
     for (const r of rows) {
       lookup.set(`${r.promptText}||${r.provider}`, {
         avgVisibility: Math.round(r.avgVisibility * 10) / 10,
         sampleCount: r.sampleCount,
+        mentionCount: r.mentionCount,
       });
     }
 
@@ -90,6 +92,13 @@ export async function GET(
     const sampleCounts: number[][] = prompts.map((p) =>
       providers.map((pr) => lookup.get(`${p}||${pr}`)?.sampleCount ?? 0),
     );
+    const mentionMatrix: (number | null)[][] = prompts.map((p) =>
+      providers.map((pr) => {
+        const cell = lookup.get(`${p}||${pr}`);
+        if (!cell || cell.sampleCount === 0) return null;
+        return Math.round((cell.mentionCount / cell.sampleCount) * 1000) / 10;
+      }),
+    );
 
     return NextResponse.json({
       days,
@@ -97,6 +106,7 @@ export async function GET(
       providers,
       matrix,
       sampleCounts,
+      mentionMatrix,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown";

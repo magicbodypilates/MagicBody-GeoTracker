@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   CartesianGrid,
   Legend,
@@ -49,11 +49,19 @@ function downloadCsv(filename: string, content: string) {
 }
 
 export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAnalyticsTabProps) {
+  const [dataTab, setDataTab] = useState<"auto" | "manual">("auto");
+
+  // 자동/수동 필터링
+  const filteredRuns = useMemo(
+    () => (dataTab === "auto" ? runs.filter((r) => r.auto === true) : runs.filter((r) => r.auto !== true)),
+    [runs, dataTab],
+  );
+
   const exportRunsCsv = useCallback(() => {
     const header =
       "일시,AI모델,프롬프트,가시성점수,감성,브랜드본문인용,경쟁사본문인용,브랜드공식출처,경쟁사공식출처,브랜드연관출처(건수),출처수\n";
     const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
-    const rows = runs
+    const rows = filteredRuns
       .map((r) => {
         const citedBrandKeys = r.citedBrandDomains ?? [];
         const relatedBrandCount = (r.citations ?? []).filter(
@@ -85,8 +93,8 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
     downloadCsv(`aeo-trend-${new Date().toISOString().slice(0, 10)}.csv`, header + rows);
   }, [data]);
 
-  // Sentiment distribution
-  const sentimentCounts = runs.reduce(
+  // Sentiment distribution — filteredRuns 기준
+  const sentimentCounts = filteredRuns.reduce(
     (acc, r) => {
       const s = r.sentiment ?? "neutral";
       acc[s] = (acc[s] || 0) + 1;
@@ -96,8 +104,8 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
   );
 
   const avgVisibility =
-    runs.length > 0
-      ? Math.round(runs.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / runs.length)
+    filteredRuns.length > 0
+      ? Math.round(filteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / filteredRuns.length)
       : 0;
 
   // 3종 브랜드 신호 카운트 (① AI 본문 인용 / ② 공식 출처 / ③ 연관 출처)
@@ -105,7 +113,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
     let mainMentioned = 0;
     let cited = 0;
     let related = 0;
-    for (const r of runs) {
+    for (const r of filteredRuns) {
       if ((r.brandMentions?.length ?? 0) > 0) mainMentioned++;
       const citedKeys = r.citedBrandDomains ?? [];
       if (citedKeys.length > 0) cited++;
@@ -118,9 +126,9 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       if (hasRelated) related++;
     }
     return { mainMentioned, cited, related };
-  }, [runs, brandTerms]);
+  }, [filteredRuns, brandTerms]);
 
-  // 모델별 14일 일별 평균 가시성 — 홈 대시보드에서 이동
+  // 모델별 14일 일별 평균 가시성 — filteredRuns 기준
   const providerVisibilitySeries = useMemo(() => {
     const recentDays = 14;
     const days: string[] = [];
@@ -131,7 +139,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       days.push(d.toISOString().slice(0, 10));
     }
     return days.map((day) => {
-      const dayRuns = runs.filter((r) => r.createdAt.slice(0, 10) === day);
+      const dayRuns = filteredRuns.filter((r) => r.createdAt.slice(0, 10) === day);
       const row: Record<string, string | number> = { day: day.slice(5) };
       for (const p of VISIBLE_PROVIDERS) {
         const pRuns = dayRuns.filter((r) => r.provider === p);
@@ -144,13 +152,43 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       }
       return row;
     });
-  }, [runs]);
+  }, [filteredRuns]);
 
-  const total = runs.length || 1;
+  const total = filteredRuns.length || 1;
   const pct = (n: number) => Math.round((n / total) * 100);
 
   return (
     <div className="space-y-4">
+      {/* 자동/수동 탭 */}
+      <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1">
+        <button
+          onClick={() => setDataTab("auto")}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            dataTab === "auto"
+              ? "bg-th-accent text-th-text-inverse shadow-sm"
+              : "text-th-text-secondary hover:bg-th-card-hover"
+          }`}
+        >
+          자동 데이터
+        </button>
+        <button
+          onClick={() => setDataTab("manual")}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            dataTab === "manual"
+              ? "bg-th-accent text-th-text-inverse shadow-sm"
+              : "text-th-text-secondary hover:bg-th-card-hover"
+          }`}
+        >
+          수동 데이터
+        </button>
+      </div>
+
+      {filteredRuns.length === 0 && (
+        <div className="rounded-lg border border-th-border bg-th-card-alt p-6 text-center text-sm text-th-text-muted">
+          {dataTab === "auto" ? "자동 실행 데이터가 없습니다." : "수동 실행 데이터가 없습니다."}
+        </div>
+      )}
+
       {/* 브랜드 신호 분포 (3종 분리) */}
       <div>
         <div className="mb-2 flex items-baseline gap-2">
@@ -168,11 +206,11 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
             <div className="mt-0.5 text-xl font-bold text-th-success">
               {brandSignalCounts.mainMentioned}
               <span className="ml-1 text-xs font-normal opacity-70">
-                / {runs.length} ({pct(brandSignalCounts.mainMentioned)}%)
+                / {filteredRuns.length} ({pct(brandSignalCounts.mainMentioned)}%)
               </span>
             </div>
           </div>
-          <div className="rounded-lg border border-th-brand-bg/40 bg-th-brand-bg/10 px-3 py-2.5">
+          <div className="rounded-lg border border-th-brand-bg/60 bg-th-brand-bg/30 px-3 py-2.5">
             <div className="flex items-center gap-1 text-xs uppercase tracking-wider text-th-brand-text">
               <span aria-hidden="true">📍</span>
               공식 출처
@@ -180,7 +218,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
             <div className="mt-0.5 text-xl font-bold text-th-brand-text">
               {brandSignalCounts.cited}
               <span className="ml-1 text-xs font-normal text-th-brand-text/70">
-                / {runs.length} ({pct(brandSignalCounts.cited)}%)
+                / {filteredRuns.length} ({pct(brandSignalCounts.cited)}%)
               </span>
             </div>
           </div>
@@ -192,7 +230,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
             <div className="mt-0.5 text-xl font-bold text-th-text-secondary">
               {brandSignalCounts.related}
               <span className="ml-1 text-xs font-normal text-th-text-muted">
-                / {runs.length} ({pct(brandSignalCounts.related)}%)
+                / {filteredRuns.length} ({pct(brandSignalCounts.related)}%)
               </span>
             </div>
           </div>
@@ -215,7 +253,14 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
           return (
             <div key={s} className="rounded-lg border border-th-border bg-th-card px-3 py-2.5">
               <div className="text-xs uppercase tracking-wider text-th-text-muted">{SENTIMENT_LABELS[s] ?? s}</div>
-              <div className={`mt-0.5 text-xl font-bold ${colors[s]}`}>{sentimentCounts[s] || 0}</div>
+              <div className={`mt-0.5 text-xl font-bold ${colors[s]}`}>
+                {sentimentCounts[s] || 0}
+                <span className="ml-1 text-xs font-normal text-th-text-muted">
+                  {filteredRuns.length > 0
+                    ? `(${Math.round(((sentimentCounts[s] || 0) / filteredRuns.length) * 100)}%)`
+                    : ""}
+                </span>
+              </div>
             </div>
           );
         })}
@@ -229,7 +274,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
             프로바이더별 일일 평균 visibility score. 실행이 없는 날은 0으로 표시됩니다.
           </p>
         </div>
-        {runs.length === 0 ? (
+        {filteredRuns.length === 0 ? (
           <div className="rounded-md border border-th-border bg-th-card-alt p-6 text-center text-xs text-th-text-muted">
             아직 실행 데이터가 없습니다.
           </div>
@@ -310,7 +355,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       <div className="flex gap-2">
         <button
           onClick={exportRunsCsv}
-          disabled={runs.length === 0}
+          disabled={filteredRuns.length === 0}
           className="bd-chip rounded-lg px-4 py-2 text-sm disabled:opacity-40"
         >
           실행 이력 내보내기 (CSV)

@@ -214,7 +214,7 @@ export function AutomationServerTab({
   const reloadRecentRuns = useCallback(async () => {
     if (!workspaceId) return;
     const res = await fetch(
-      `${BP}/api/workspaces/${workspaceId}/runs?auto=true&limit=30`,
+      `${BP}/api/workspaces/${workspaceId}/runs?auto=true&limit=300`,
       { credentials: "include" },
     );
     if (!res.ok) return;
@@ -488,13 +488,16 @@ export function AutomationServerTab({
                       <button
                         onClick={withRowLock(s.id, () => toggleActive(s))}
                         disabled={rowActionIds.has(s.id)}
-                        className={`rounded-full px-2 py-0.5 text-xs disabled:opacity-50 ${
-                          s.active
-                            ? "bg-th-success-soft text-th-success"
-                            : "bg-th-text-muted/10 text-th-text-muted"
+                        title={s.active ? "클릭하여 일시정지" : "클릭하여 활성화"}
+                        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                          s.active ? "bg-th-success" : "bg-th-border"
                         }`}
                       >
-                        {s.active ? "활성" : "일시정지"}
+                        <span
+                          className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+                            s.active ? "translate-x-4" : "translate-x-0.5"
+                          }`}
+                        />
                       </button>
                     </td>
                     <td className="py-2 text-right">
@@ -599,44 +602,52 @@ export function AutomationServerTab({
 
       {/* 최근 자동 실행 */}
       <div className="rounded-lg border border-th-border bg-th-card p-4">
-        <h3 className="mb-3 text-base font-semibold text-th-text">최근 자동 실행 (최대 30건)</h3>
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-base font-semibold text-th-text">
+            최근 자동 실행
+            {recentRuns.length > 0 && (
+              <span className="ml-2 text-sm font-normal text-th-text-muted">({recentRuns.length}건)</span>
+            )}
+          </h3>
+        </div>
         {recentRuns.length === 0 ? (
           <p className="text-sm text-th-text-muted">
             아직 자동 실행된 기록이 없습니다. 스케줄을 추가하고 기다리거나 &quot;⏱ 즉시&quot; 로 바로 실행하세요.
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-th-border text-left text-th-text-muted">
-                  <th className="py-2">시각</th>
-                  <th className="py-2">프로바이더</th>
-                  <th className="py-2">프롬프트</th>
-                  <th className="py-2">점수</th>
-                  <th className="py-2">감성</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentRuns.map((r) => (
-                  <tr key={r.id} className="border-b border-th-border-subtle">
-                    <td className="py-1.5 text-th-text-muted">{formatKst(r.createdAt)}</td>
-                    <td className="py-1.5 text-th-text-secondary">
-                      {PROVIDER_LABELS[r.provider as Provider] ?? r.provider}
-                    </td>
-                    <td className="py-1.5 max-w-xs truncate text-th-text">{r.promptText}</td>
-                    <td className="py-1.5 font-mono">{r.visibilityScore}</td>
-                    <td className="py-1.5 text-th-text-secondary">{r.sentiment}</td>
+            <div className="overflow-y-auto" style={{ maxHeight: "720px" }}>
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-th-card">
+                  <tr className="border-b border-th-border text-left text-th-text-muted">
+                    <th className="py-2">시각</th>
+                    <th className="py-2">프로바이더</th>
+                    <th className="py-2">프롬프트</th>
+                    <th className="py-2">점수</th>
+                    <th className="py-2">감성</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {recentRuns.map((r) => (
+                    <tr key={r.id} className="border-b border-th-border-subtle">
+                      <td className="py-1.5 text-th-text-muted">{formatKst(r.createdAt)}</td>
+                      <td className="py-1.5 text-th-text-secondary">
+                        {PROVIDER_LABELS[r.provider as Provider] ?? r.provider}
+                      </td>
+                      <td className="py-1.5 max-w-xs truncate text-th-text">{r.promptText}</td>
+                      <td className="py-1.5 font-mono">{r.visibilityScore}</td>
+                      <td className="py-1.5 text-th-text-secondary">{r.sentiment}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </div>
 
       <p className="text-xs text-th-text-muted">
-        서버 Worker 가 1분마다 스케줄을 확인해 자동 실행합니다. 브라우저를 닫아도 계속 동작하며,
-        여러 관리자가 로그인해도 동일한 결과를 공유합니다.
+        스케줄을 추가하면 서버에서 자동으로 AI 조사를 반복 실행합니다. 컴퓨터를 끄거나 브라우저를 닫아도 중단 없이 동작하며, 수집된 결과는 모든 관리자 계정에서 동일하게 확인할 수 있습니다.
       </p>
     </div>
   );

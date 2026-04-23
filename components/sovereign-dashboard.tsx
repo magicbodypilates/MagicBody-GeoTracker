@@ -2443,26 +2443,26 @@ Now analyze all ${competitorList.length} competitors:`,
                 <h3 className="text-sm font-semibold text-th-text">주요 변동</h3>
                 <span className="text-xs text-th-text-muted">실행 간 가시성 변화가 큰 항목</span>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 {movers.map((m, i) => {
                   const up = m.delta > 0;
                   return (
                     <div
                       key={`${m.prompt.slice(0, 20)}-${m.provider}-${i}`}
-                      className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
+                      className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 ${
                         up
                           ? "border-th-success/30 bg-th-success-soft"
                           : "border-th-danger/30 bg-th-danger-soft"
                       }`}
                     >
-                      <span className={`text-lg font-bold ${up ? "text-th-success" : "text-th-danger"}`}>
+                      <span className={`shrink-0 text-sm font-bold ${up ? "text-th-success" : "text-th-danger"}`}>
                         {up ? "↑" : "↓"}{Math.abs(m.delta)}
                       </span>
                       <div className="min-w-0">
-                        <div className="truncate text-xs font-medium text-th-text" style={{ maxWidth: "180px" }}>
-                          {m.prompt.length > 50 ? m.prompt.slice(0, 47) + "…" : m.prompt}
+                        <div className="truncate text-xs font-medium text-th-text">
+                          {m.prompt.length > 45 ? m.prompt.slice(0, 42) + "…" : m.prompt}
                         </div>
-                        <div className="text-xs text-th-text-muted">
+                        <div className="text-[10px] text-th-text-muted">
                           {PROVIDER_LABELS[m.provider]} · {m.previousScore}→{m.currentScore}
                         </div>
                       </div>

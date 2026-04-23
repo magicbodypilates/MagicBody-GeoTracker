@@ -265,38 +265,46 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
         )}
       </section>
 
-      {/* 전체 평균 추이 (단일 라인) */}
-      {data.length === 0 ? (
-        <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center text-sm text-th-text-secondary">
-          아직 추세 데이터가 없습니다. 프롬프트를 실행하면 가시성 추세가 표시됩니다.
+      {/* 전체 평균 추이 (모든 프로바이더 합산) */}
+      <section className="rounded-lg border border-th-border bg-th-card p-4">
+        <div className="mb-3">
+          <h3 className="text-sm font-semibold text-th-text">전체 평균 가시성 추이</h3>
+          <p className="mt-0.5 text-[11px] text-th-text-muted">
+            모든 프로바이더(ChatGPT · Gemini · Google AI · Perplexity) 를 합산한 일별 평균 visibility score. 위 차트의 4개 선을 하루 단위로 평균낸 값입니다.
+          </p>
         </div>
-      ) : (
-        <div className="h-80 w-full rounded-lg border border-th-border bg-th-card-alt p-2">
-          <ResponsiveContainer>
-            <LineChart data={data}>
-              <CartesianGrid stroke="var(--th-chart-grid)" strokeDasharray="3 3" />
-              <XAxis dataKey="day" tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
-              <YAxis domain={[0, 100]} tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "var(--th-card)",
-                  border: "1px solid var(--th-border)",
-                  borderRadius: "8px",
-                  color: "var(--th-text)",
-                }}
-              />
-              <Line
-                type="monotone"
-                dataKey="visibility"
-                name="평균 가시성 %"
-                stroke="var(--th-accent)"
-                strokeWidth={2.5}
-                dot={{ r: 3, fill: "var(--th-accent)" }}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
+        {data.length === 0 ? (
+          <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center text-sm text-th-text-secondary">
+            아직 추세 데이터가 없습니다. 프롬프트를 실행하면 가시성 추세가 표시됩니다.
+          </div>
+        ) : (
+          <div className="h-72 w-full">
+            <ResponsiveContainer>
+              <LineChart data={data}>
+                <CartesianGrid stroke="var(--th-chart-grid)" strokeDasharray="3 3" />
+                <XAxis dataKey="day" tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
+                <YAxis domain={[0, 100]} tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: "var(--th-card)",
+                    border: "1px solid var(--th-border)",
+                    borderRadius: "8px",
+                    color: "var(--th-text)",
+                  }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="visibility"
+                  name="평균 가시성 %"
+                  stroke="var(--th-accent)"
+                  strokeWidth={2.5}
+                  dot={{ r: 3, fill: "var(--th-accent)" }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </section>
 
       {/* Export buttons */}
       <div className="flex gap-2">

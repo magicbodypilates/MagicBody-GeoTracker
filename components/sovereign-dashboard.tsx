@@ -1802,7 +1802,12 @@ Now analyze all ${competitorList.length} competitors:`,
   /** 응답/분석 이력만 초기화 (설정·프롬프트·경쟁사는 유지) */
   async function handleResetResponses() {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
-    if (!window.confirm("AI 응답 이력, 배틀카드, 감사 결과, 변동 알림이 삭제됩니다.\n프로젝트 설정과 프롬프트는 유지됩니다. 계속하시겠습니까?")) return;
+    if (!window.confirm(
+      "AI 응답 이력, 배틀카드, 감사 결과, 변동 알림이 삭제됩니다.\n" +
+      "프로젝트 설정과 프롬프트는 유지됩니다.\n\n" +
+      "※ 자동 실행 스케줄은 건드리지 않으므로 다음 예약 시각에 새 응답이 다시 생성됩니다.\n" +
+      "자동 실행도 중단하려면 [프로젝트 설정] 의 자동화 토글을 끄세요. 계속하시겠습니까?",
+    )) return;
 
     // 1) 진행 중인 모든 scrape 요청 취소 + 초기화 토큰 증가 (stale 응답 가드)
     //    abort 이후에 이미 response.json()까지 완료된 요청이 뒤늦게 도착해

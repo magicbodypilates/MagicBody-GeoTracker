@@ -55,19 +55,20 @@ export async function POST(
       });
     }
 
-    // scope=all (기본) — runs, 분석 이력, 스케줄 타이밍도 초기화
+    // scope=all (기본) — runs, 분석 이력 삭제.
+    //
+    // 스케줄 타이밍(last_run_at / next_run_at) 은 건드리지 않는다.
+    //   - 이전 구현은 두 값 모두 NULL 로 세팅했는데, runTick 의 조회 조건이
+    //     `next_run_at IS NULL OR next_run_at <= now` 이라 NULL 을 "지금 당장 실행"으로 해석 →
+    //     초기화 직후 다음 틱(1분)에 스케줄이 모든 프롬프트를 다시 실행 → 좀비 runs 생성.
+    //   - 따라서 기존 next_run_at 을 그대로 두고, 자동 실행이 예정된 슬롯에 정상 발화하도록 한다.
+    //   - 자동 실행을 멈추고 싶으면 스케줄을 active=false 로 직접 끄는 것이 올바른 방법.
     const [runsDeleted, auditsDeleted, driftsDeleted, statsDeleted] = await Promise.all([
       db.delete(schema.runs).where(eq(schema.runs.workspaceId, id)).returning({ id: schema.runs.id }),
       db.delete(schema.auditHistory).where(eq(schema.auditHistory.workspaceId, id)).returning({ id: schema.auditHistory.id }),
       db.delete(schema.driftAlerts).where(eq(schema.driftAlerts.workspaceId, id)).returning({ id: schema.driftAlerts.id }),
       db.delete(schema.dailyStats).where(eq(schema.dailyStats.workspaceId, id)),
     ]);
-
-    // 스케줄 마지막 실행 시각 초기화 (응답 이력을 지웠으니 실행 기록도 리셋)
-    await db
-      .update(schema.schedules)
-      .set({ lastRunAt: null, nextRunAt: null })
-      .where(eq(schema.schedules.workspaceId, id));
 
     return NextResponse.json({
       ok: true,

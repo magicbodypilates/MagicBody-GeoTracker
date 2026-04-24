@@ -2292,14 +2292,14 @@ ${exampleJson}
           </a>
         </div>
 
-        {/* User info + logout */}
-        {(auth.kind === "admin" || auth.role > 0) && (
+        {/* User info + logout — 로그인된 모든 사용자 (role >= 0) 표시 */}
+        {auth.role >= 0 && (
           <div className="flex items-center justify-between gap-2 border-t border-th-border px-4 py-2 text-xs text-th-text-muted">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="shrink-0">{auth.kind === "admin" ? "🛡️" : "👤"}</span>
+              <span className="shrink-0">{auth.role === 0 ? "🛡️" : "👤"}</span>
               <span className="truncate">
-                {auth.kind === "admin"
-                  ? "최고관리자"
+                {auth.role === 0
+                  ? auth.name || auth.email || "최고관리자"
                   : auth.name || auth.email || "일반관리자"}
               </span>
             </div>

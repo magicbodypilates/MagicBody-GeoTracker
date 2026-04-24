@@ -2123,7 +2123,7 @@ ${exampleJson}
       )}
       {/* ── Sidebar ──────────────────────────────────── */}
       <aside className={`fixed inset-y-0 left-0 z-50 flex w-[250px] shrink-0 flex-col border-r border-th-border bg-th-sidebar transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
-        {/* Brand / Workspace switcher */}
+        {/* Brand / Workspace switcher — 일반관리자(auth.role > 0)는 스위처 숨김, 단순 표시만 */}
         <div className="border-b border-th-border px-4 py-3">
           {demoMode ? (
             <div className="flex items-center gap-2 px-1 py-0.5">
@@ -2137,6 +2137,26 @@ ${exampleJson}
                   {state.brand.brandName || "GEO 트래커"}
                 </div>
                 <div className="text-xs text-th-text-muted">데모 워크스페이스</div>
+              </div>
+            </div>
+          ) : auth.role > 0 ? (
+            // 일반관리자: 워크스페이스 스위처 숨김 — 브랜드 표시만
+            <div className="flex items-center gap-2 px-1 py-0.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-th-accent">
+                <span className="text-xs font-bold text-th-text-inverse">
+                  {(state.brand.brandName || "AE").slice(0, 2).toUpperCase()}
+                </span>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold text-th-text">
+                  {state.brand.brandName || "GEO 트래커"}
+                </div>
+                {state.brand.websites.length > 0 && (
+                  <div className="truncate text-xs text-th-text-muted">
+                    {state.brand.websites[0].replace(/^https?:\/\//, "")}
+                    {state.brand.websites.length > 1 ? ` +${state.brand.websites.length - 1}` : ""}
+                  </div>
+                )}
               </div>
             </div>
           ) : (

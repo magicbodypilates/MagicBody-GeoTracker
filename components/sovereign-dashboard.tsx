@@ -352,9 +352,14 @@ const SHOW_KPI_TABS: TabKey[] = ["Home", "Prompt Hub", "Responses", "Visibility 
 
 export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } = {}) {
   const auth = useAuth();
-  const role = auth.role;
-  /** role 에 따라 필터된 탭 목록 — 최고관리자(0)는 전체, 일반관리자(>0)는 6개 제외 */
-  const visibleTabs = useMemo(() => tabsForRole(role), [role]);
+  /**
+   * 경로 기반 탭 필터 — auth.kind 기준:
+   *   - "admin" (/geo-tracker/admin 자체 로그인): 전체 18개 탭
+   *   - "user"  (/geo-tracker CMS 경유): 6개 제외, 12개 탭
+   * 실제 CMS role 이 0(최고관리자)이어도 /geo-tracker 경로에서는 일반관리자 UI.
+   */
+  const effectiveRole = auth.kind === "admin" ? 0 : 1;
+  const visibleTabs = useMemo(() => tabsForRole(effectiveRole), [effectiveRole]);
   /** 활성 탭이 숨겨진 탭이면 첫 탭으로 강제 리셋 (URL 조작 방어) */
   const [activeTab, setActiveTabRaw] = useState<TabKey>("Home");
   const setActiveTab = useCallback(
@@ -2123,7 +2128,7 @@ ${exampleJson}
       )}
       {/* ── Sidebar ──────────────────────────────────── */}
       <aside className={`fixed inset-y-0 left-0 z-50 flex w-[250px] shrink-0 flex-col border-r border-th-border bg-th-sidebar transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
-        {/* Brand / Workspace switcher — 일반관리자(auth.role > 0)는 스위처 숨김, 단순 표시만 */}
+        {/* Brand / Workspace switcher — CMS 경유(kind="user")는 스위처 숨김, 자체 로그인(kind="admin")만 표시 */}
         <div className="border-b border-th-border px-4 py-3">
           {demoMode ? (
             <div className="flex items-center gap-2 px-1 py-0.5">
@@ -2139,8 +2144,8 @@ ${exampleJson}
                 <div className="text-xs text-th-text-muted">데모 워크스페이스</div>
               </div>
             </div>
-          ) : auth.role > 0 ? (
-            // 일반관리자: 워크스페이스 스위처 숨김 — 브랜드 표시만
+          ) : auth.kind === "user" ? (
+            // CMS 경유 (일반관리자 경로): 워크스페이스 스위처 숨김 — 브랜드 표시만
             <div className="flex items-center gap-2 px-1 py-0.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-th-accent">
                 <span className="text-xs font-bold text-th-text-inverse">
@@ -2296,9 +2301,9 @@ ${exampleJson}
         {auth.role >= 0 && (
           <div className="flex items-center justify-between gap-2 border-t border-th-border px-4 py-2 text-xs text-th-text-muted">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="shrink-0">{auth.role === 0 ? "🛡️" : "👤"}</span>
+              <span className="shrink-0">{auth.kind === "admin" ? "🛡️" : "👤"}</span>
               <span className="truncate">
-                {auth.role === 0
+                {auth.kind === "admin"
                   ? auth.name || auth.email || "최고관리자"
                   : auth.name || auth.email || "일반관리자"}
               </span>

@@ -1,16 +1,20 @@
 /**
  * POST /geo-tracker/api/auth/cms-session
  *
- * CMS 경유 진입용 세션 발급 엔드포인트. 최고관리자·일반관리자 모두 허용.
+ * CMS 경유 진입용 세션 발급 엔드포인트.
+ *
+ * 경로 분리 원칙:
+ *   - /geo-tracker (이 경로)        = 항상 "일반관리자 UI" (12개 탭, 워크스페이스 스위처 숨김)
+ *   - /geo-tracker/admin (별도 경로) = 최고관리자 전용 테스트 UI (전체 18개 탭)
+ *
+ * CMS 계정이 최고관리자(CMS role === 0)라도 이 경로에서는 일반관리자 UI 를 보여줌.
+ * 최고관리자 전용 기능이 필요하면 /geo-tracker/admin 으로 별도 로그인 필요.
+ *
  * 흐름:
  *   1. 클라이언트가 CMS Firebase 로그인 상태에서 ID 토큰을 첨부해 호출
  *   2. 서버에서 Firebase Admin SDK로 토큰 검증 → uid 추출
  *   3. CMS API `GetAdminInfo/{uid}` 로 role 조회
- *   4. role 유효하면 (0 이상) 서명된 세션 쿠키 발급
- *      - role === 0: 최고관리자 (전체 18개 탭 + 워크스페이스 스위처)
- *      - role >  0: 일반관리자 (12개 탭, 스위처 숨김)
- *
- * /geo-tracker/admin 경로는 CMS 로그인 없이 독립 테스트용으로 유지.
+ *   4. 세션 쿠키에는 항상 role=1 (일반관리자) 로 강제 저장 — 경로 분리 원칙 준수
  *
  * 개발 편의: `DEV_AUTH_BYPASS=true` 면 토큰 검증·role 조회를 생략하고 임의 role=1 로 처리.
  */
@@ -82,16 +86,19 @@ export async function POST(req: Request) {
     name = name ?? info.name;
   }
 
-  // 3) role 유효성 검증 — 최고관리자(0) 및 일반관리자(>0) 모두 허용
+  // 3) role 유효성 검증 — CMS 에 등록된 계정(0 이상)이면 허용
   if (typeof role !== "number" || role < 0) {
     return NextResponse.json({ error: "invalid_role" }, { status: 403 });
   }
 
-  // 4) 세션 쿠키 발급
-  const token = await signUserSession({ uid, role, email, name });
+  // 4) 세션 쿠키 발급 — CMS 경유는 경로 분리 원칙에 따라 항상 role=1 (일반관리자 UI) 로 저장.
+  //    CMS role === 0 (최고관리자) 계정이라도 /geo-tracker 에서는 일반관리자 화면을 보여줌.
+  //    최고관리자 전용 기능은 /geo-tracker/admin 으로 별도 로그인해야 사용 가능.
+  const effectiveRole = 1;
+  const token = await signUserSession({ uid, role: effectiveRole, email, name });
   const cookie = buildSessionCookie(USER_SESSION_COOKIE, token, USER_COOKIE_PATH);
 
-  const res = NextResponse.json({ ok: true, role, name });
+  const res = NextResponse.json({ ok: true, role: effectiveRole, cmsRole: role, name });
   res.headers.append("Set-Cookie", cookie);
   return res;
 }

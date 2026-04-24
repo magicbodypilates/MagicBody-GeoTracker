@@ -641,37 +641,94 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   function switchWorkspace(wsId: string) {
     if (demoMode) { setMessage("데모 모드 — 워크스페이스는 읽기 전용입니다"); return; }
-    // Phase 5A 이후 단일 서버 워크스페이스만 사용 — 로컬 탭 전환만 갱신
+    // 서버 워크스페이스 ID 를 localStorage 양쪽 키에 모두 저장.
+    // ensureWorkspace() 가 WORKSPACE_ID_KEY 를 우선 참조하므로, 이걸 갱신하지 않으면
+    // activeWsId 만 바뀌고 실제 로드되는 서버 데이터는 같은 WS 에서 와서 "전환 안 됨" 처럼 보임.
     setActiveWsId(wsId);
     localStorage.setItem(ACTIVE_WS_KEY, wsId);
+    setCachedWorkspaceId(wsId);
     setShowWsPicker(false);
     setMessage(`${workspaces.find((w) => w.id === wsId)?.brandName ?? "워크스페이스"} 전환됨`);
   }
 
-  function createWorkspace(name: string) {
+  async function createWorkspace(name: string) {
     if (demoMode) { setMessage("데모 모드 — 워크스페이스는 읽기 전용입니다"); return; }
-    const ws: Workspace = { id: generateId(), brandName: name, createdAt: new Date().toISOString() };
-    const updated = [...workspaces, ws];
-    setWorkspaces(updated);
-    localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
-    setState({ ...defaultState, brand: { ...defaultState.brand, brandName: name } });
-    setActiveWsId(ws.id);
-    localStorage.setItem(ACTIVE_WS_KEY, ws.id);
-    setShowWsPicker(false);
-    setMessage(`워크스페이스 생성됨: ${name}`);
+
+    try {
+      // 1) 서버 DB 에 새 워크스페이스 생성 (최고관리자 전용 API).
+      //    기본 is_production=false 로 생성되어 일반관리자 경로에서는 보이지 않음 — 테스트 전용 격리 보장.
+      const response = await fetch(`${BP}/api/workspaces`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          brandConfig: {
+            brandName: name,
+            brandAliases: "",
+            websites: [],
+            industry: "",
+            keywords: "",
+            description: "",
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        setMessage(`워크스페이스 생성 실패: ${err.error ?? response.status}`);
+        return;
+      }
+
+      const { workspace: created } = await response.json();
+      const newWs: Workspace = {
+        id: created.id,
+        brandName: name,
+        createdAt: created.createdAt ?? new Date().toISOString(),
+      };
+
+      // 2) 로컬 workspaces 목록 + 양쪽 key 갱신
+      const updated = [...workspaces, newWs];
+      setWorkspaces(updated);
+      localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
+      setCachedWorkspaceId(created.id);
+      setActiveWsId(created.id);
+      localStorage.setItem(ACTIVE_WS_KEY, created.id);
+
+      // 3) 빈 state 로 리셋 — 새 WS 라 기존 runs/prompts 건드리지 않음
+      //    ensureWorkspace 재호출은 activeWsId 변경으로 useEffect 가 자동 트리거
+      setState({ ...defaultState, brand: { ...defaultState.brand, brandName: name } });
+      setShowWsPicker(false);
+      setMessage(`워크스페이스 생성됨: ${name} (테스트 전용)`);
+    } catch (err) {
+      setMessage(`워크스페이스 생성 오류: ${err instanceof Error ? err.message : "unknown"}`);
+    }
   }
 
-  function deleteWorkspace(wsId: string) {
+  async function deleteWorkspace(wsId: string) {
     if (demoMode) { setMessage("데모 모드 — 워크스페이스는 읽기 전용입니다"); return; }
     if (workspaces.length <= 1) return;
-    if (!window.confirm("이 워크스페이스와 모든 데이터를 삭제하시겠습니까?")) return;
+    if (!window.confirm("이 워크스페이스와 모든 데이터(프롬프트, 실행 이력, 자동화 스케줄)를 영구 삭제합니다. 계속하시겠습니까?")) return;
+
+    try {
+      // 서버 DB 에서도 실제 삭제 (cascade 로 runs / prompts / schedules 전부 제거). 최고관리자 전용 API.
+      const response = await fetch(`${BP}/api/workspaces/${wsId}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) {
+        const err = await response.json().catch(() => ({}));
+        setMessage(`워크스페이스 삭제 실패: ${err.error ?? response.status}`);
+        return;
+      }
+    } catch (err) {
+      setMessage(`워크스페이스 삭제 오류: ${err instanceof Error ? err.message : "unknown"}`);
+      return;
+    }
+
     const updated = workspaces.filter((w) => w.id !== wsId);
     setWorkspaces(updated);
     localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
-    // 서버 워크스페이스는 별개 — handleResetData 에서 관리
     if (activeWsId === wsId) {
       switchWorkspace(updated[0].id);
     }
+    setMessage("워크스페이스 삭제됨");
   }
 
   const partnerLeaderboard = useMemo(() => {

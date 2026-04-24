@@ -14,6 +14,8 @@ import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/au
 
 export const dynamic = "force-dynamic";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const BrandConfigSchema = z.object({
   brandName: z.string().optional(),
   brandAliases: z.string().optional(),
@@ -100,6 +102,11 @@ export async function DELETE(
   const session = await getSession();
   const adminGuard = requireAdmin(session);
   if (adminGuard) return adminGuard;
+  // UUID 형식이 아닌 ID (과거 로컬 전용 WS 버그로 남은 값) 는 DB 에 존재할 수 없음 → 404 로 응답.
+  // Postgres 쿼리에 비 UUID 문자열을 넘기면 쿼리 에러가 나서 500 이 되는데, 이걸 명시적으로 404 로 변환.
+  if (!UUID_RE.test(id)) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   try {
     const [deleted] = await db
       .delete(schema.workspaces)

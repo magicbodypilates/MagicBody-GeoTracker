@@ -709,17 +709,24 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     if (workspaces.length <= 1) return;
     if (!window.confirm("이 워크스페이스와 모든 데이터(프롬프트, 실행 이력, 자동화 스케줄)를 영구 삭제합니다. 계속하시겠습니까?")) return;
 
-    try {
-      // 서버 DB 에서도 실제 삭제 (cascade 로 runs / prompts / schedules 전부 제거). 최고관리자 전용 API.
-      const response = await fetch(`${BP}/api/workspaces/${wsId}`, { method: "DELETE" });
-      if (!response.ok && response.status !== 404) {
-        const err = await response.json().catch(() => ({}));
-        setMessage(`워크스페이스 삭제 실패: ${err.error ?? response.status}`);
+    // UUID 형식이 아니면 과거 로컬 전용 WS 버그로 남은 유령 항목 → 서버 호출 없이 로컬에서만 제거
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const isServerWs = UUID_RE.test(wsId);
+
+    if (isServerWs) {
+      try {
+        // 서버 DB 에서도 실제 삭제 (cascade 로 runs / prompts / schedules 전부 제거). 최고관리자 전용 API.
+        const response = await fetch(`${BP}/api/workspaces/${wsId}`, { method: "DELETE" });
+        // 404 는 이미 서버엔 없는 경우 — 로컬에서만 정리하면 됨 (정상 흐름으로 취급)
+        if (!response.ok && response.status !== 404) {
+          const err = await response.json().catch(() => ({}));
+          setMessage(`워크스페이스 삭제 실패: ${err.error ?? response.status}`);
+          return;
+        }
+      } catch (err) {
+        setMessage(`워크스페이스 삭제 오류: ${err instanceof Error ? err.message : "unknown"}`);
         return;
       }
-    } catch (err) {
-      setMessage(`워크스페이스 삭제 오류: ${err instanceof Error ? err.message : "unknown"}`);
-      return;
     }
 
     const updated = workspaces.filter((w) => w.id !== wsId);
@@ -728,7 +735,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     if (activeWsId === wsId) {
       switchWorkspace(updated[0].id);
     }
-    setMessage("워크스페이스 삭제됨");
+    setMessage(isServerWs ? "워크스페이스 삭제됨" : "로컬 항목 정리 완료");
   }
 
   const partnerLeaderboard = useMemo(() => {

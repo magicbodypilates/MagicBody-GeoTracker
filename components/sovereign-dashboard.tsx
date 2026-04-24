@@ -1952,6 +1952,9 @@ ${exampleJson}
     }
 
     if (activeTab === "Project Settings") {
+      // 초기화 버튼은 최고관리자(kind === "admin") 에게만 노출.
+      // 일반관리자는 onReset · onResetResponses prop 을 받지 않으면 버튼 자체가 렌더되지 않음.
+      const isSuperAdmin = auth.kind === "admin";
       return (
         <ProjectSettingsTab
           brand={state.brand}
@@ -1959,8 +1962,8 @@ ${exampleJson}
             setState((prev) => ({ ...prev, brand: { ...prev.brand, ...patch } }));
             // 서버 동기 — 디바운스는 useEffect 로 별도 처리
           }}
-          onReset={handleResetData}
-          onResetResponses={handleResetResponses}
+          onReset={isSuperAdmin ? handleResetData : undefined}
+          onResetResponses={isSuperAdmin ? handleResetResponses : undefined}
         />
       );
     }

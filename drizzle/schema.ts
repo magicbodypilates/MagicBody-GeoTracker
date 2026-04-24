@@ -37,6 +37,12 @@ export const workspaces = pgTable("workspaces", {
   name: text("name").notNull(),
   /** 브랜드 설정 — brandName, aliases, websites, industry, keywords, description */
   brandConfig: jsonb("brand_config").$type<BrandConfig>().notNull().default({} as BrandConfig),
+  /**
+   * 운영 워크스페이스 여부 (경로 분리 핵심).
+   *   true  = 일반관리자 경유 노출. 최고관리자 초기화 권한 필요, 일반관리자는 데이터 관리만.
+   *   false = 최고관리자 테스트 전용. 일반관리자 API 에서는 접근 차단.
+   */
+  isProduction: boolean("is_production").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

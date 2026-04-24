@@ -8,6 +8,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, desc, eq } from "drizzle-orm";
+import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await getSession();
+  const guard = await assertWorkspaceAccess(id, session);
+  if (guard) return guard;
   const sp = req.nextUrl.searchParams;
   const dismissedFilter = sp.get("dismissed");
   const limit = Math.min(Number(sp.get("limit") ?? 50), 200);

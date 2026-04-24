@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq } from "drizzle-orm";
+import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,17 @@ export async function POST(
 ) {
   const { id } = await params;
   const scope = (req.nextUrl.searchParams.get("scope") ?? "all").toLowerCase();
+
+  const session = await getSession();
+  const wsGuard = await assertWorkspaceAccess(id, session);
+  if (wsGuard) return wsGuard;
+
+  // scope=all / scope=auto 는 운영 자동화 데이터를 건드리므로 최고관리자 전용.
+  // scope=manual 은 수동 테스트 응답만 삭제 — 일반관리자도 허용.
+  if (scope === "all" || scope === "auto") {
+    const adminGuard = requireAdmin(session);
+    if (adminGuard) return adminGuard;
+  }
 
   try {
     if (scope === "manual") {

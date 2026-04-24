@@ -15,6 +15,13 @@
       "when": 1776786019192,
       "tag": "0001_adorable_prima",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1777016073009,
+      "tag": "0002_overjoyed_tyrannus",
+      "breakpoints": true
     }
   ]
 }

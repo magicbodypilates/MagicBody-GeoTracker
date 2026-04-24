@@ -19,6 +19,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
+import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await getSession();
+  const guard = await assertWorkspaceAccess(id, session);
+  if (guard) return guard;
   const sp = req.nextUrl.searchParams;
   const days = parseInt32(sp.get("days"), 30);
   const autoOnly = sp.get("auto") !== "false";

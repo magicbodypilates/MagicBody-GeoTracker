@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { asc, eq } from "drizzle-orm";
+import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await getSession();
+  const guard = await assertWorkspaceAccess(id, session);
+  if (guard) return guard;
   try {
     const rows = await db
       .select()
@@ -42,6 +46,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await getSession();
+  const guard = await assertWorkspaceAccess(id, session);
+  if (guard) return guard;
   try {
     const body = await req.json();
     const parsed = CreatePromptSchema.parse(body);

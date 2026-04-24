@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { eq } from "drizzle-orm";
+import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await getSession();
+  const guard = await assertWorkspaceAccess(id, session);
+  if (guard) return guard;
   try {
     const [row] = await db
       .select()
@@ -51,6 +55,9 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = await getSession();
+  const guard = await assertWorkspaceAccess(id, session);
+  if (guard) return guard;
   try {
     const body = await req.json();
     const parsed = UpdateSchema.parse(body);
@@ -89,6 +96,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 워크스페이스 전체 삭제는 최고관리자 전용 — 일반관리자의 "모든 데이터 초기화" 차단
+  const session = await getSession();
+  const adminGuard = requireAdmin(session);
+  if (adminGuard) return adminGuard;
   try {
     const [deleted] = await db
       .delete(schema.workspaces)

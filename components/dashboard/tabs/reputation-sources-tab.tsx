@@ -807,19 +807,41 @@ export function ReputationSourcesTab({
               {/* Model cards */}
               {open && (
                 <div className="space-y-2 border-t border-th-border p-3">
-                  {groupRuns.map((run, i) => (
-                    <ModelResponseCard
-                      key={`${run.provider}-${run.createdAt}-${i}`}
-                      run={run}
-                      brandTerms={brandTerms}
-                      competitorTerms={competitorTerms}
-                      delta={deltaMap.get(`${run.prompt}|||${run.provider}`) ?? null}
-                      onDelete={onDeleteRun ? () => {
-                        const origIdx = runs.indexOf(run);
-                        if (origIdx !== -1) onDeleteRun(origIdx);
-                      } : undefined}
-                    />
-                  ))}
+                  {(() => {
+                    // 같은 prompt+provider 그룹 안에서 createdAt 가장 최근인 응답 1개에만 delta 표시.
+                    // 이전엔 같은 키의 모든 응답(이전 점수 0짜리 포함)에 동일한 화살표가 표시되어
+                    // "이 응답이 ↑37 점이다" 처럼 오해되는 UX 버그가 있었음.
+                    const latestByProvider = new Map<string, string>();
+                    for (const run of groupRuns) {
+                      const key = run.provider;
+                      const ts = run.createdAt;
+                      const cur = latestByProvider.get(key);
+                      if (!cur || new Date(ts).getTime() > new Date(cur).getTime()) {
+                        latestByProvider.set(key, ts);
+                      }
+                    }
+                    return groupRuns.map((run, i) => {
+                      const isLatestOfProvider =
+                        latestByProvider.get(run.provider) === run.createdAt;
+                      return (
+                        <ModelResponseCard
+                          key={`${run.provider}-${run.createdAt}-${i}`}
+                          run={run}
+                          brandTerms={brandTerms}
+                          competitorTerms={competitorTerms}
+                          delta={
+                            isLatestOfProvider
+                              ? deltaMap.get(`${run.prompt}|||${run.provider}`) ?? null
+                              : null
+                          }
+                          onDelete={onDeleteRun ? () => {
+                            const origIdx = runs.indexOf(run);
+                            if (origIdx !== -1) onDeleteRun(origIdx);
+                          } : undefined}
+                        />
+                      );
+                    });
+                  })()}
                 </div>
               )}
             </div>

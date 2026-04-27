@@ -501,7 +501,15 @@ function calcVisibility(
       from = idx + term.length;
     }
   }
-  if (positions.length === 0) return 0;
+  if (positions.length === 0) {
+    // 본문에 brand 언급이 없는 경우에도 URL 노출은 약한 신호로 점수 부여 (사용자 합의):
+    //   - 본문에 자사 도메인 URL 등장   → +20 (실제 클릭 경로)
+    //   - 참고자료 패널에만 URL        → +2  (출처 인정만, 사용자 노출 약함)
+    // mentions=0 이면 노출 위치 / 반복 / 감성 점수는 의미 없음 (sentiment 도 not-mentioned).
+    if (hasBodyUrl) return 20;
+    if (hasCitationOnly) return 2;
+    return 0;
+  }
   positions.sort((a, b) => a - b);
 
   // 근접한 위치(50자 이내)는 1회로 merge — "매직바디(국제재활필라테스협회)" 같은 별칭 풀어쓰기 중복 카운트 방지

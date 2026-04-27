@@ -137,9 +137,14 @@ type HomeServerTabProps = {
   onOpenTab: (tab: string) => void;
   /** 현재 브랜드명 — 벤치마크 차트의 "우리 브랜드" 라벨 대체 */
   brandName?: string;
+  /**
+   * 부모(sovereign-dashboard) 가 데이터 변경 시 (응답 삭제·초기화 등) 증가시키는 nonce.
+   * 이 값이 바뀌면 stats API 들을 재조회 → 통계 즉시 반영.
+   */
+  refreshNonce?: number;
 };
 
-export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
+export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServerTabProps) {
   const [wsId, setWsId] = useState<string | null>(null);
   const [days, setDays] = useState(30);
   const autoOnly = true; // 홈은 항상 자동화 데이터만 표시
@@ -218,7 +223,9 @@ export function HomeServerTab({ onOpenTab, brandName }: HomeServerTabProps) {
     // 5분마다 자동 갱신 (자동화 데이터 누적 반영)
     const t = setInterval(() => void fetchAll(), 5 * 60 * 1000);
     return () => clearInterval(t);
-  }, [wsId, fetchAll]);
+    // refreshNonce 가 바뀌면 즉시 재조회 (응답 삭제·초기화 직후 통계 갱신)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId, fetchAll, refreshNonce]);
 
   // 시계열 차트 데이터 — O(days × providers) 로 변환 (find() 대신 Map 조회)
   const chartData = useMemo(() => {

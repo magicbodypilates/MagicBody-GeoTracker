@@ -455,6 +455,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const [serverWsId, setServerWsId] = useState<string | null>(null);
 
   /**
+   * 응답 삭제·초기화 등 데이터 변경 시 증가시키는 nonce.
+   * HomeServerTab 의 useEffect 의존성에 포함되어, 변경 시 stats API 재조회 트리거.
+   * 홈 탭 자체 5분 polling 외에 즉시 반영이 필요한 경우 사용.
+   */
+  const [statsRefreshNonce, setStatsRefreshNonce] = useState(0);
+  const bumpStatsRefresh = useCallback(() => setStatsRefreshNonce((n) => n + 1), []);
+
+  /**
    * Load app state — Phase 5A 이후 서버 DB 에서 로드.
    * IndexedDB 는 폴백 캐시로만 유지 (서버 오류 시 참조).
    * brand / prompts / competitors / runs / auditHistory → 서버 기준
@@ -1491,6 +1499,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       ...prev,
       runs: prev.runs.filter((_, i) => i !== index),
     }));
+    bumpStatsRefresh();
     setMessage("응답 삭제됨");
   }
 
@@ -1905,6 +1914,7 @@ ${exampleJson}
 
     setBusy(false);
     setState(defaultState);
+    bumpStatsRefresh();
     setMessage("모든 데이터가 초기화되었습니다.");
   }
 
@@ -1965,6 +1975,7 @@ ${exampleJson}
     }
 
     setBusy(false);
+    bumpStatsRefresh();
     setMessage(`수동 응답 ${serverDeleted}건 삭제 완료 (자동화 이력은 유지)`);
   }
 
@@ -2024,6 +2035,7 @@ ${exampleJson}
       driftAlerts: [],
       lastScheduledRun: null,
     }));
+    bumpStatsRefresh();
     setMessage(
       `응답 이력 초기화 완료 (진행 중 ${pending}건 취소 · 서버 DB runs ${serverDeleted.runs ?? 0}건 · 캐시 ${cacheCleared}건 삭제)`,
     );
@@ -2035,6 +2047,7 @@ ${exampleJson}
         <HomeServerTab
           onOpenTab={(tab) => setActiveTab(tab as TabKey)}
           brandName={state.brand.brandName}
+          refreshNonce={statsRefreshNonce}
         />
       );
     }

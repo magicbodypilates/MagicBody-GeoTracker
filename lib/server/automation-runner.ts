@@ -528,9 +528,12 @@ function calcVisibility(
   if (mentions >= 3) score += 15; // 반복 언급
   else if (mentions >= 2) score += 8;
 
-  // URL 점수: 본문 URL 우선(+20), 참고자료에만 있으면 약한 신호(+2)
-  if (hasBodyUrl) score += 20;
-  else if (hasCitationOnly) score += 2;
+  // URL 점수는 mentions=0 케이스에서만 적용 (위쪽 early return 분기에서 처리).
+  // 본문에 brand 언급이 있으면 이미 +30 ~ +65 로 충분히 평가되므로
+  // URL 노출 점수를 추가 가산하지 않음 (중복 집계 방지) — 사용자 합의.
+  // 사용 안 됨을 명시하기 위해 hasBodyUrl/hasCitationOnly 인자는 유지.
+  void hasBodyUrl;
+  void hasCitationOnly;
 
   if (sentiment === "positive") score += 15;
   else if (sentiment === "neutral") score += 5;

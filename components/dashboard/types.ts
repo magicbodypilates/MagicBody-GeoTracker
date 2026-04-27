@@ -15,6 +15,8 @@ export type Citation = {
 };
 
 export type ScrapeRun = {
+  /** 서버 DB run ID (UUID). 수동/로컬 생성 응답은 undefined 일 수 있음 */
+  id?: string;
   provider: Provider;
   prompt: string;
   /** 실제로 Bright Data에 전송된 최종 프롬프트 (brandCtx 주입 여부 검증용) */

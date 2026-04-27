@@ -1463,11 +1463,35 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }
 
-  function deleteRun(index: number) {
+  async function deleteRun(index: number) {
+    if (demoMode) { setMessage("데모 모드 — 응답을 삭제할 수 없습니다"); return; }
+    const target = state.runs[index];
+    if (!target) return;
+
+    // 서버 DB 에 저장된 응답이면 (id 있음) DELETE API 호출 → 통계도 즉시 반영됨.
+    // 통계 API 들이 runs 테이블을 직접 쿼리하므로 별도 캐시 무효화 불필요.
+    if (target.id && serverWsId) {
+      try {
+        const response = await fetch(
+          `${BP}/api/workspaces/${serverWsId}/runs/${target.id}`,
+          { method: "DELETE" },
+        );
+        if (!response.ok && response.status !== 404) {
+          const err = await response.json().catch(() => ({}));
+          setMessage(`응답 삭제 실패: ${err.error ?? response.status}`);
+          return;
+        }
+      } catch (err) {
+        setMessage(`응답 삭제 오류: ${err instanceof Error ? err.message : "unknown"}`);
+        return;
+      }
+    }
+
     setState((prev) => ({
       ...prev,
       runs: prev.runs.filter((_, i) => i !== index),
     }));
+    setMessage("응답 삭제됨");
   }
 
   function extractNicheQueries(payload: unknown) {
@@ -2112,7 +2136,7 @@ ${exampleJson}
           brandTerms={getBrandTerms()}
           competitorTerms={getCompetitorTerms()}
           runDeltas={runDeltas}
-          onDeleteRun={deleteRun}
+          onDeleteRun={auth.kind === "admin" ? deleteRun : undefined}
           onResetManualResponses={handleResetManualResponses}
         />
       );

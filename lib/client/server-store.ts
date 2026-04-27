@@ -256,6 +256,7 @@ export async function loadFromServer(wsId: string): Promise<Partial<AppState>> {
 
 function scrapeRunFromServer(r: ServerRun): ScrapeRun {
   return {
+    id: r.id,
     provider: r.provider as ScrapeRun["provider"],
     prompt: r.promptText,
     answer: r.answer ?? "",

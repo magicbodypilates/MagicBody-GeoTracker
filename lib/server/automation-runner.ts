@@ -25,7 +25,11 @@ import { CronExpressionParser } from "cron-parser";
 import { db, schema } from "@/lib/server/db";
 import { runAiScraper } from "@/lib/server/brightdata-scraper";
 import { classifySentiment } from "@/lib/server/llm-sentiment";
-import { matchCitationDomains } from "@/components/dashboard/citation-utils";
+import {
+  matchCitationDomains,
+  normalizeTargetKey,
+  SOCIAL_PLATFORM_DOMAINS,
+} from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt } from "@/drizzle/schema";
 
@@ -215,21 +219,23 @@ async function executeSchedule(
           });
           if (llm) sentiment = llm;
         }
-        // 본문 내 자사 URL 등장 여부 판정 — 호스트 문자열이 answerText 에 직접 포함되는지
-        // (markdown 링크 [텍스트](url) 및 plain URL 모두 커버)
-        const brandHosts = brandWebsites
-          .map((url) => {
-            try {
-              return new URL(url.startsWith("http") ? url : `https://${url}`)
-                .hostname.replace(/^www\./, "")
-                .toLowerCase();
-            } catch {
-              return "";
-            }
-          })
-          .filter((h) => h.length > 0);
+        // 본문 내 자사 URL 등장 여부 판정.
+        // 일반 도메인은 호스트 문자열 포함 여부로 매칭. 소셜 플랫폼(youtube.com, instagram.com 등)은
+        // 호스트만으로 매칭하면 다른 채널 URL 도 매칭되는 false positive 발생 → 핸들(seg)까지
+        // 본문에 등장해야 매칭으로 인정.
+        const brandTargets = brandWebsites
+          .map((url) => normalizeTargetKey(url))
+          .filter((k): k is { host: string; seg: string } => k !== null);
         const answerLower = answerText.toLowerCase();
-        const hasBodyUrl = brandHosts.some((h) => answerLower.includes(h));
+        const hasBodyUrl = brandTargets.some((t) => {
+          if (SOCIAL_PLATFORM_DOMAINS.has(t.host)) {
+            // 소셜: 호스트 + 핸들 둘 다 본문에 있어야 매치 (핸들 없으면 매칭 불가)
+            if (!t.seg) return false;
+            return answerLower.includes(t.host) && answerLower.includes(t.seg);
+          }
+          // 일반 도메인: 호스트 문자열 포함만으로 매치
+          return answerLower.includes(t.host);
+        });
         // 참고자료에만 등장 (본문엔 없음)
         const hasCitationOnly = !hasBodyUrl && citedBrandDomains.length > 0;
 

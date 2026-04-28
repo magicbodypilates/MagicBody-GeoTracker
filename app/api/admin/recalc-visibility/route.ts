@@ -51,19 +51,20 @@ function detectSentimentFallback(
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getSession();
-  const guard = requireAdmin(session);
-  if (guard) return guard;
+  try {
+    const session = await getSession();
+    const guard = requireAdmin(session);
+    if (guard) return guard;
 
-  const body = (await req.json().catch(() => ({}))) as {
-    workspaceId?: string;
-    batchSize?: number;
-    dryRun?: boolean;
-  };
-  // batchSize 기본 20 — LLM 50회 순차 호출이 NPM proxy timeout(60s) 을 초과해 응답 잘림 → 작게.
-  // 병렬 처리(5 동시)와 결합하면 20건 ≈ 4 chunk × 5s = 20s 정도로 안전.
-  const batchSize = Math.min(Math.max(body.batchSize ?? 20, 1), 100);
-  const dryRun = body.dryRun === true;
+    const body = (await req.json().catch(() => ({}))) as {
+      workspaceId?: string;
+      batchSize?: number;
+      dryRun?: boolean;
+    };
+    // batchSize 기본 20 — LLM 50회 순차 호출이 NPM proxy timeout(60s) 을 초과해 응답 잘림 → 작게.
+    // 병렬 처리(5 동시)와 결합하면 20건 ≈ 4 chunk × 5s = 20s 정도로 안전.
+    const batchSize = Math.min(Math.max(body.batchSize ?? 20, 1), 100);
+    const dryRun = body.dryRun === true;
 
   // 1) 처리 대상 runs (score_version < CURRENT_SCORE_VERSION) — batch 단위
   const conditions = [lt(schema.runs.scoreVersion, CURRENT_SCORE_VERSION)];
@@ -113,8 +114,9 @@ export async function POST(req: NextRequest) {
   const wsMap = new Map(wsRows.map((w) => [w.id, w]));
 
   // 단일 run 처리 함수 — Promise 반환 (LLM 호출 + UPDATE)
-  type Sample = { id: string; before: number; after: number };
+  type Sample = { id: string; before: number; after: number; error?: string };
   async function processRun(run: (typeof targets)[number]): Promise<Sample | null> {
+    try {
     const ws = wsMap.get(run.workspaceId);
     if (!ws) return null;
 
@@ -190,18 +192,28 @@ export async function POST(req: NextRequest) {
     }
 
     return { id: run.id, before: run.visibilityScore, after: newScore };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      console.error(`[recalc-visibility] run ${run.id} 처리 실패:`, msg);
+      return { id: run.id, before: run.visibilityScore, after: -1, error: msg };
+    }
   }
 
   // chunk 단위 병렬 처리 — LLM 5개 동시 호출. 20건 ≈ 4 chunk × 5s ≈ 20s.
   const CONCURRENCY = 5;
   let updated = 0;
+  let errors = 0;
   const samples: Sample[] = [];
   for (let i = 0; i < targets.length; i += CONCURRENCY) {
     const chunk = targets.slice(i, i + CONCURRENCY);
     const results = await Promise.all(chunk.map(processRun));
     for (const r of results) {
       if (r === null) continue;
-      if (!dryRun) updated += 1;
+      if (r.error) {
+        errors += 1;
+      } else if (!dryRun) {
+        updated += 1;
+      }
       if (samples.length < 5) samples.push(r);
     }
   }
@@ -216,9 +228,19 @@ export async function POST(req: NextRequest) {
     ok: true,
     processed: targets.length,
     updated,
+    errors,
     remaining: Math.max(0, (remaining ?? 0) - updated),
     dryRun,
     samples,
     currentVersion: CURRENT_SCORE_VERSION,
   });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown";
+    const stack = err instanceof Error ? err.stack : undefined;
+    console.error("[/api/admin/recalc-visibility] 실패:", msg, stack);
+    return NextResponse.json(
+      { error: msg, stack: stack?.split("\n").slice(0, 5).join("\n") },
+      { status: 500 },
+    );
+  }
 }

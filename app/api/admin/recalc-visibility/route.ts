@@ -60,7 +60,9 @@ export async function POST(req: NextRequest) {
     batchSize?: number;
     dryRun?: boolean;
   };
-  const batchSize = Math.min(Math.max(body.batchSize ?? 50, 1), 200);
+  // batchSize 기본 20 — LLM 50회 순차 호출이 NPM proxy timeout(60s) 을 초과해 응답 잘림 → 작게.
+  // 병렬 처리(5 동시)와 결합하면 20건 ≈ 4 chunk × 5s = 20s 정도로 안전.
+  const batchSize = Math.min(Math.max(body.batchSize ?? 20, 1), 100);
   const dryRun = body.dryRun === true;
 
   // 1) 처리 대상 runs (score_version < CURRENT_SCORE_VERSION) — batch 단위
@@ -110,12 +112,11 @@ export async function POST(req: NextRequest) {
     );
   const wsMap = new Map(wsRows.map((w) => [w.id, w]));
 
-  let updated = 0;
-  const samples: Array<{ id: string; before: number; after: number }> = [];
-
-  for (const run of targets) {
+  // 단일 run 처리 함수 — Promise 반환 (LLM 호출 + UPDATE)
+  type Sample = { id: string; before: number; after: number };
+  async function processRun(run: (typeof targets)[number]): Promise<Sample | null> {
     const ws = wsMap.get(run.workspaceId);
-    if (!ws) continue;
+    if (!ws) return null;
 
     const brandTerms = buildBrandTerms(ws.brandConfig);
     const brandWebsites = ws.brandConfig?.websites ?? [];
@@ -162,7 +163,6 @@ export async function POST(req: NextRequest) {
         isTopRanked = llm.isTopRanked;
         isStronglyRecommended = llm.isStronglyRecommended;
       } else {
-        // LLM 실패 시 기존 sentiment 유지 + 휴리스틱 폴백
         sentiment = detectSentimentFallback(answerText, brandTerms);
       }
     }
@@ -178,10 +178,6 @@ export async function POST(req: NextRequest) {
       isBrandedQuery,
     );
 
-    if (samples.length < 5) {
-      samples.push({ id: run.id, before: run.visibilityScore, after: newScore });
-    }
-
     if (!dryRun) {
       await db
         .update(schema.runs)
@@ -191,7 +187,22 @@ export async function POST(req: NextRequest) {
           scoreVersion: CURRENT_SCORE_VERSION,
         })
         .where(eq(schema.runs.id, run.id));
-      updated += 1;
+    }
+
+    return { id: run.id, before: run.visibilityScore, after: newScore };
+  }
+
+  // chunk 단위 병렬 처리 — LLM 5개 동시 호출. 20건 ≈ 4 chunk × 5s ≈ 20s.
+  const CONCURRENCY = 5;
+  let updated = 0;
+  const samples: Sample[] = [];
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const chunk = targets.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(chunk.map(processRun));
+    for (const r of results) {
+      if (r === null) continue;
+      if (!dryRun) updated += 1;
+      if (samples.length < 5) samples.push(r);
     }
   }
 

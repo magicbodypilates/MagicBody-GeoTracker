@@ -93,14 +93,14 @@ export function ProjectSettingsTab({
           <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-muted">점수 재산출</div>
           <p className="mb-3 text-sm text-th-text-secondary">
             점수 체계 변경 후 기존 응답들의 visibility_score 를 최신 룰로 다시 계산합니다.
-            score_version 마커로 멱등성 보장 — 이미 처리된 응답은 건너뜀. 한 번 클릭에 50건씩 처리되며,
+            score_version 마커로 멱등성 보장 — 이미 처리된 응답은 건너뜀. 한 번 클릭에 20건씩 처리되며 (LLM 5 동시 호출),
             남은 row 가 0 될 때까지 반복 클릭하세요.
           </p>
           <button
             onClick={() => void onRecalcVisibility()}
             className="rounded-lg border border-th-border bg-th-card-alt px-4 py-2 text-sm font-medium text-th-text hover:bg-th-card-hover"
           >
-            점수 재산출 (50건씩)
+            점수 재산출 (20건씩)
           </button>
         </div>
       )}

@@ -91,6 +91,8 @@ export function AutomationServerTab({
   const [newName, setNewName] = useState("기본 자동 조사");
   const [newCron, setNewCron] = useState(INTERVAL_PRESETS[2].cron); // 12시간 기본
   const [newProviders, setNewProviders] = useState<Provider[]>([...VISIBLE_PROVIDERS]);
+  // 실행 대상 프롬프트 — 체크된 ID 들만 스케줄에 포함. 빈 Set 이면 전체 active 프롬프트 실행 (기존 동작 유지).
+  const [newPromptIds, setNewPromptIds] = useState<Set<string>>(new Set());
 
   /**
    * 워크스페이스 초기화
@@ -293,7 +295,8 @@ export function AutomationServerTab({
           name: newName.trim(),
           cronExpression: newCron,
           providers: newProviders,
-          promptIds: [],
+          // 체크된 프롬프트가 있으면 그 ID 들만 실행. 빈 배열은 "전체 active 프롬프트" 의미 (서버 default).
+          promptIds: Array.from(newPromptIds),
           active: true,
         }),
       });
@@ -587,8 +590,77 @@ export function AutomationServerTab({
           </div>
         </div>
 
+        {/* 실행 대상 프롬프트 선택 — 체크 안 하면 활성 프롬프트 전체 실행 */}
+        <div className="mt-3">
+          <div className="mb-1 flex items-center justify-between">
+            <label className="block text-xs uppercase tracking-wider text-th-text-muted">
+              실행할 프롬프트
+            </label>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-th-text-muted">
+                {newPromptIds.size === 0
+                  ? `전체 ${serverPrompts.filter((p) => p.active).length}개 (선택 0)`
+                  : `선택 ${newPromptIds.size}/${serverPrompts.filter((p) => p.active).length}`}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const allActive = serverPrompts.filter((p) => p.active).map((p) => p.id);
+                  setNewPromptIds(new Set(allActive));
+                }}
+                className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
+              >
+                전체 선택
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewPromptIds(new Set())}
+                className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
+              >
+                전체 해제
+              </button>
+            </div>
+          </div>
+          {serverPrompts.filter((p) => p.active).length === 0 ? (
+            <p className="rounded border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-muted">
+              활성 프롬프트가 없습니다. Prompt Hub 에서 프롬프트를 먼저 추가하세요.
+            </p>
+          ) : (
+            <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-th-border bg-th-card-alt p-2">
+              {serverPrompts
+                .filter((p) => p.active)
+                .map((p) => {
+                  const checked = newPromptIds.has(p.id);
+                  return (
+                    <label
+                      key={p.id}
+                      className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-th-card-hover"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          setNewPromptIds((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(p.id)) next.delete(p.id);
+                            else next.add(p.id);
+                            return next;
+                          });
+                        }}
+                        className="mt-0.5 shrink-0"
+                      />
+                      <span className="line-clamp-2 text-th-text">{p.text}</span>
+                    </label>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+
         <p className="mt-3 text-xs text-th-text-muted">
-          활성 프롬프트 {promptCount}개를 선택한 프로바이더에서 각각 실행합니다. (프롬프트는 서버 DB 기준)
+          {newPromptIds.size === 0
+            ? `활성 프롬프트 ${promptCount}개 전체를 선택한 프로바이더에서 각각 실행합니다.`
+            : `선택한 ${newPromptIds.size}개 프롬프트만 선택한 프로바이더에서 실행합니다.`}
         </p>
 
         <button

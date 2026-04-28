@@ -87,6 +87,29 @@ export function ProjectSettingsTab({
         />
       </div>
 
+      {/* admin 전용 — DB 스키마 누락 컬럼 보정 (마이그레이션 누락 시 백업) */}
+      {onRecalcVisibility && (
+        <div className="rounded-lg border border-th-border bg-th-card p-4">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-muted">DB 스키마 보정</div>
+          <p className="mb-3 text-sm text-th-text-secondary">
+            점수 재산출 시 "Failed query" 에러가 나면 score_version 컬럼이 누락된 것. 한 번 클릭하면 멱등하게 컬럼 추가.
+          </p>
+          <button
+            onClick={async () => {
+              const res = await fetch("/geo-tracker/api/admin/ensure-schema", {
+                method: "POST",
+                credentials: "include",
+              });
+              const text = await res.text();
+              alert(`스키마 보정 결과 (status ${res.status}):\n${text.slice(0, 500)}`);
+            }}
+            className="rounded-lg border border-th-border bg-th-card-alt px-4 py-2 text-sm font-medium text-th-text hover:bg-th-card-hover"
+          >
+            DB 스키마 보정
+          </button>
+        </div>
+      )}
+
       {/* admin 전용 — 점수 체계 변경 후 기존 응답 점수 재산출 (score_version 멱등성 보장) */}
       {onRecalcVisibility && (
         <div className="rounded-lg border border-th-border bg-th-card p-4">

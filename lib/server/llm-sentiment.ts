@@ -71,6 +71,27 @@ Step 3 — Single-brand focus answer:
   - If purely factual description (founding year, curriculum, basic info) → "neutral"
   - If criticism, warnings, drawbacks → "negative"
 
+=== EXAMPLES ===
+
+Example A (comparison list of 5 brands, target=매직바디, all described similarly):
+Answer: "필라테스 강사 자격증 추천 교육기관: 1. 국제재활필라테스협회(매직바디): 2008년부터 운영된 대규모 교육기관, 재활 중심의 커리큘럼과 풍부한 강사 배출 이력. 매직바디 아카데미. 2. 모던필라테스: 호주의 의학 지식을 접목, 수준 높은 강사 양성. 3. 대한필라테스협회(KPA): 기구 필라테스 통합 교육 시스템. 4. STOTT: 전 세계적으로 인지도 높음. 5. NCPT: 가장 공신력 높은 국제 자격증."
+Analysis: 5 brands listed with similar-length factual descriptions. Each has positive descriptors ("대규모", "수준 높은", "공신력 높은") but applied across the board. 매직바디 is not uniquely emphasized - it's just one of many. STOTT and NCPT actually get more praise ("가장 공신력 높은"). No #1 ranking phrase for 매직바디.
+Output: {"sentiment":"neutral","isTopRanked":false,"isStronglyRecommended":false}
+
+Example B (comparison list, target uniquely highlighted):
+Answer: "필라테스 강사 자격증 추천: 1. 매직바디 (가장 추천): 국내 최고의 신뢰도와 가장 풍부한 커리큘럼. 2. KPIA: 일반적인 옵션. 3. STOTT: 해외 자격."
+Analysis: 매직바디 is explicitly placed at #1 with "가장 추천" phrase and stronger praise than peers.
+Output: {"sentiment":"positive","isTopRanked":true,"isStronglyRecommended":true}
+
+Example C (single brand focus, evaluative tone):
+Answer: "매직바디 자격증은 우수한 커리큘럼과 신뢰할 수 있는 자격으로 강력 추천드립니다."
+Analysis: Whole answer focuses on 매직바디 with strong recommendation.
+Output: {"sentiment":"positive","isTopRanked":false,"isStronglyRecommended":true}
+
+Example D (single brand, factual only):
+Answer: "매직바디는 2008년부터 운영된 필라테스 교육기관입니다. 재활 중심 커리큘럼을 제공합니다."
+Output: {"sentiment":"neutral","isTopRanked":false,"isStronglyRecommended":false}
+
 === isTopRanked (boolean) ===
 true ONLY if the answer EXPLICITLY ranks this brand #1 or singles it out as THE top
 recommendation among multiple options. Look for explicit comparative ranking phrases:

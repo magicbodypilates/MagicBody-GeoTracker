@@ -51,3 +51,13 @@ export function informationalCondition(brandTerms: string[]): SQL | null {
   if (!branded) return null;
   return not(branded);
 }
+
+/**
+ * stats API 가 받는 ?branded=true|false 파라미터 → 적절한 SQL 조건 반환.
+ *   - branded=true  → brand 명 검색만 (brandedPromptCondition)
+ *   - branded=false (기본) → 일반 검색만 (informationalCondition)
+ *   - brandTerms 비어있으면 null (필터 없음, 모든 runs 통과)
+ */
+export function viewModeCondition(brandTerms: string[], branded: boolean): SQL | null {
+  return branded ? brandedPromptCondition(brandTerms) : informationalCondition(brandTerms);
+}

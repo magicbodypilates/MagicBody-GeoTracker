@@ -517,18 +517,28 @@ export function ReputationSourcesTab({
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
   const [filterSentiment, setFilterSentiment] = useState<string>("all");
-  const [filterOrigin, setFilterOrigin] = useState<"auto" | "manual">("auto");
+  // 1단 3분할 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답
+  const [responseTab, setResponseTab] = useState<"auto-info" | "auto-branded" | "manual">("auto-info");
   const [sortField, setSortField] = useState<"date" | "score">("date");
 
-  // Apply filters
+  // Apply filters — 응답 목록 자체도 탭별 분리 (사용자가 헷갈리지 않게)
   const filteredRuns = useMemo(() => {
     let list = [...runs];
-    if (filterOrigin === "auto") list = list.filter((r) => r.auto === true);
-    else list = list.filter((r) => r.auto !== true);
+    if (responseTab === "auto-info") {
+      list = list.filter(
+        (r) => r.auto === true && (brandTerms.length === 0 || !isBrandedPrompt(r.prompt, brandTerms)),
+      );
+    } else if (responseTab === "auto-branded") {
+      list = list.filter(
+        (r) => r.auto === true && brandTerms.length > 0 && isBrandedPrompt(r.prompt, brandTerms),
+      );
+    } else {
+      list = list.filter((r) => r.auto !== true);
+    }
     if (filterProvider !== "all") list = list.filter((r) => r.provider === filterProvider);
     if (filterSentiment !== "all") list = list.filter((r) => r.sentiment === filterSentiment);
     return list;
-  }, [runs, filterProvider, filterSentiment, filterOrigin]);
+  }, [runs, filterProvider, filterSentiment, responseTab, brandTerms]);
 
   // Group runs by prompt
   const promptGroups = useMemo(() => {
@@ -562,21 +572,11 @@ export function ReputationSourcesTab({
     });
   }, [filteredRuns, sortField]);
 
-  // Insight stats — filteredRuns 기준 (자동/수동 탭 반영)
-  // brand 명 검색 응답은 점수 범위가 다르므로 통계 카드 집계에서 제외 (응답 목록에는 그대로 표시).
-  const informationalFilteredRuns = useMemo(
-    () =>
-      brandTerms.length === 0
-        ? filteredRuns
-        : filteredRuns.filter((r) => !isBrandedPrompt(r.prompt, brandTerms)),
-    [filteredRuns, brandTerms],
-  );
-
+  // Insight stats — filteredRuns 기준 (탭이 이미 분리하므로 추가 필터링 불필요)
   const insights = useMemo(() => {
-    if (informationalFilteredRuns.length === 0) return null;
+    if (filteredRuns.length === 0) return null;
     const avgScore = Math.round(
-      informationalFilteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) /
-        informationalFilteredRuns.length,
+      filteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / filteredRuns.length,
     );
     const sentiments = { positive: 0, neutral: 0, negative: 0, "not-mentioned": 0 };
     const providerCounts: Partial<Record<Provider, number>> = {};
@@ -584,7 +584,7 @@ export function ReputationSourcesTab({
     let brandMentioned = 0;
     let totalSources = 0;
 
-    informationalFilteredRuns.forEach((r) => {
+    filteredRuns.forEach((r) => {
       sentiments[r.sentiment as keyof typeof sentiments] = (sentiments[r.sentiment as keyof typeof sentiments] ?? 0) + 1;
       providerCounts[r.provider] = (providerCounts[r.provider] ?? 0) + 1;
       if (!providerScores[r.provider]) providerScores[r.provider] = [];
@@ -601,7 +601,7 @@ export function ReputationSourcesTab({
     })).sort((a, b) => b.avg - a.avg);
 
     return { avgScore, sentiments, providerAvgs, brandMentioned, totalSources };
-  }, [informationalFilteredRuns]);
+  }, [filteredRuns]);
 
   // Auto-expand first group
   const isGroupOpen = (prompt: string, idx: number) => {
@@ -633,22 +633,32 @@ export function ReputationSourcesTab({
   return (
     <div className="space-y-4">
 
-      {/* ── 자동/수동 탭 ── */}
+      {/* ── 1단 3분할 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답 ── */}
       <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1">
         <button
-          onClick={() => setFilterOrigin("auto")}
+          onClick={() => setResponseTab("auto-info")}
           className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            filterOrigin === "auto"
+            responseTab === "auto-info"
               ? "bg-th-accent text-th-text-inverse shadow-sm"
               : "text-th-text-secondary hover:bg-th-card-hover"
           }`}
         >
-          자동 응답
+          일반 응답 (자동)
         </button>
         <button
-          onClick={() => setFilterOrigin("manual")}
+          onClick={() => setResponseTab("auto-branded")}
           className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            filterOrigin === "manual"
+            responseTab === "auto-branded"
+              ? "bg-th-accent text-th-text-inverse shadow-sm"
+              : "text-th-text-secondary hover:bg-th-card-hover"
+          }`}
+        >
+          brand 응답 (자동)
+        </button>
+        <button
+          onClick={() => setResponseTab("manual")}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            responseTab === "manual"
               ? "bg-th-accent text-th-text-inverse shadow-sm"
               : "text-th-text-secondary hover:bg-th-card-hover"
           }`}
@@ -660,7 +670,11 @@ export function ReputationSourcesTab({
       {/* ── Insight cards ── */}
       {insights && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-          <InsightMini label="평균 점수" value={`${insights.avgScore}/100`} accent />
+          <InsightMini
+            label="평균 점수"
+            value={`${insights.avgScore}/${responseTab === "auto-branded" ? "25" : "100"}`}
+            accent
+          />
           <InsightMini label="브랜드 언급" value={`${insights.brandMentioned}/${filteredRuns.length}`} />
           <InsightMini
             label="긍정"
@@ -750,7 +764,7 @@ export function ReputationSourcesTab({
           <span className="font-semibold text-th-text">{filteredRuns.length}</span> responses across{" "}
           <span className="font-semibold text-th-text">{promptGroups.length}</span> prompt{promptGroups.length > 1 ? "s" : ""}
         </span>
-        {onResetManualResponses && filterOrigin === "manual" && runs.some((r) => r.auto !== true) && (
+        {onResetManualResponses && responseTab === "manual" && runs.some((r) => r.auto !== true) && (
           <button
             type="button"
             onClick={onResetManualResponses}

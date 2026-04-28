@@ -22,7 +22,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
-import { getBrandTermsForWorkspace, informationalCondition } from "@/lib/server/branded-query-filter";
+import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
 import type { Citation } from "@/components/dashboard/types";
 import {
   normalizeTargetKey,
@@ -80,8 +80,9 @@ export async function GET(
     qualityFilter,
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
+  const __brandedView = sp.get("branded") === "true";
   const __brandTerms = await getBrandTermsForWorkspace(id);
-  const __informational = informationalCondition(__brandTerms);
+  const __informational = viewModeCondition(__brandTerms, __brandedView);
   if (__informational) conditions.push(__informational);
 
   try {

@@ -157,6 +157,10 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
   const [days, setDays] = useState(30);
   const autoOnly = true; // 홈은 항상 자동화 데이터만 표시
   const [timeseriesTab, setTimeseriesTab] = useState<"visibility" | "mention">("visibility");
+  // brand 모드 토글 — 체크박스 아래 모든 분석 카드의 데이터 소스 전환.
+  // false (기본) = 일반 검색만 / true = brand 명 검색만 (만점 25점 기준).
+  // 상단 KPI strip 과 주요 변동은 이 토글과 무관하게 항상 일반 검색.
+  const [brandedView, setBrandedView] = useState(false);
 
   const [summary, setSummary] = useState<SummaryResult | null>(null);
   const [timeseries, setTimeseries] = useState<TimeseriesResult | null>(null);
@@ -182,7 +186,8 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
     setBusy(true);
     setError("");
     const auto = autoOnly ? "true" : "false";
-    const qs = `?days=${days}&auto=${auto}`;
+    const branded = brandedView ? "true" : "false";
+    const qs = `?days=${days}&auto=${auto}&branded=${branded}`;
     try {
       const settled = await Promise.allSettled([
         fetch(`${BP}/api/workspaces/${wsId}/stats/summary${qs}`, { credentials: "include" }),
@@ -210,7 +215,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
     } finally {
       setBusy(false);
     }
-  }, [wsId, days, autoOnly]);
+  }, [wsId, days, autoOnly, brandedView]);
 
   async function dismissDriftAlert(alertId: string) {
     try {
@@ -354,12 +359,33 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
 
       {hasData && summary && (
         <>
-          {/* KPI 카드 */}
+          {/* brand 모드 체크박스 — 아래 분석 카드들의 데이터 소스 전환 */}
+          <div className="rounded-lg border border-th-border bg-th-card-alt p-3">
+            <label className="flex cursor-pointer items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={brandedView}
+                onChange={(e) => setBrandedView(e.target.checked)}
+                className="mt-0.5"
+              />
+              <div className="flex-1">
+                <span className="font-medium text-th-text">brand 명 검색 데이터로 보기</span>
+                <span className="ml-2 text-[11px] text-th-text-muted">
+                  {brandedView ? "(brand 명 검색 / 만점 25점 기준)" : "(기본: 일반 검색 / 만점 95점 기준)"}
+                </span>
+                <p className="mt-0.5 text-[11px] text-th-text-muted">
+                  ⓘ 아래 분석 카드만 brand 응답 기준으로 전환됩니다. 상단 KPI 와 주요 변동은 항상 일반 검색 기준입니다.
+                </p>
+              </div>
+            </label>
+          </div>
+
+          {/* KPI 카드 — brand 모드일 때 평균 가시성 단위가 /25 */}
           <div className="grid gap-3 sm:grid-cols-4">
             <KpiCard
               title="평균 가시성"
               value={summary.current.avgVisibility.toFixed(1)}
-              suffix="/100"
+              suffix={brandedView ? "/25" : "/100"}
               delta={summary.delta.avgVisibility}
               deltaSuffix=""
             />
@@ -480,8 +506,8 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
             </p>
           </div>
 
-          {/* 랭킹 + 경쟁사 벤치마크 — 2열 그리드 */}
-          {((ranking && ranking.total > 0) || (benchmark && benchmark.competitors.length > 0)) && (
+          {/* 랭킹 + 경쟁사 벤치마크 — brand 모드에선 의미 약하므로 숨김. 일반 검색 모드에서만 노출 */}
+          {!brandedView && ((ranking && ranking.total > 0) || (benchmark && benchmark.competitors.length > 0)) && (
             <div className="grid gap-4 lg:grid-cols-2">
               {/* 랭킹 */}
               {ranking && ranking.total > 0 && (

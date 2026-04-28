@@ -51,14 +51,18 @@ function downloadCsv(filename: string, content: string) {
 
 export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAnalyticsTabProps) {
   const [dataTab, setDataTab] = useState<"auto" | "manual">("auto");
+  // brand 모드 체크박스 — false (기본) = 일반 검색만 / true = brand 명 검색만
+  const [brandedView, setBrandedView] = useState(false);
 
-  // 자동/수동 필터링 + brand 명 검색 응답 제외 (점수 범위가 다르므로 통계 합산에서 분리).
-  // 응답 자체는 다른 탭에서 보이고, 가시성 분석 통계는 일반 검색만 집계.
+  // 자동/수동 필터링 + brand 모드 분기.
+  // brandedView=false (기본) 일 때는 brand prompt 제외, true 일 때는 brand prompt 만.
   const filteredRuns = useMemo(() => {
     const base = dataTab === "auto" ? runs.filter((r) => r.auto === true) : runs.filter((r) => r.auto !== true);
     if (brandTerms.length === 0) return base;
-    return base.filter((r) => !isBrandedPrompt(r.prompt, brandTerms));
-  }, [runs, dataTab, brandTerms]);
+    return brandedView
+      ? base.filter((r) => isBrandedPrompt(r.prompt, brandTerms))
+      : base.filter((r) => !isBrandedPrompt(r.prompt, brandTerms));
+  }, [runs, dataTab, brandTerms, brandedView]);
 
   const exportRunsCsv = useCallback(() => {
     const header =
@@ -206,9 +210,33 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
         </button>
       </div>
 
+      {/* brand 모드 체크박스 — 일반/brand 검색 분리 */}
+      <div className="rounded-lg border border-th-border bg-th-card-alt p-3">
+        <label className="flex cursor-pointer items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={brandedView}
+            onChange={(e) => setBrandedView(e.target.checked)}
+            className="mt-0.5"
+          />
+          <div className="flex-1">
+            <span className="font-medium text-th-text">brand 명 검색 데이터로 보기</span>
+            <span className="ml-2 text-[11px] text-th-text-muted">
+              {brandedView ? "(brand 명 검색 / 만점 25점 기준)" : "(기본: 일반 검색 / 만점 95점 기준)"}
+            </span>
+          </div>
+        </label>
+      </div>
+
       {filteredRuns.length === 0 && (
         <div className="rounded-lg border border-th-border bg-th-card-alt p-6 text-center text-sm text-th-text-muted">
-          {dataTab === "auto" ? "자동 실행 데이터가 없습니다." : "수동 실행 데이터가 없습니다."}
+          {dataTab === "auto"
+            ? brandedView
+              ? "brand 명 검색 자동 실행 데이터가 없습니다. Prompt Hub 에 brand 명 prompt 추가 후 자동화 즉시 실행하세요."
+              : "일반 자동 실행 데이터가 없습니다."
+            : brandedView
+              ? "brand 명 검색 수동 실행 데이터가 없습니다."
+              : "일반 수동 실행 데이터가 없습니다."}
         </div>
       )}
 
@@ -263,8 +291,13 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       {/* Summary metrics */}
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
         <div className="rounded-lg border border-th-border bg-th-card px-3 py-2.5">
-          <div className="text-xs uppercase tracking-wider text-th-text-muted">평균 가시성</div>
-          <div className="mt-0.5 text-xl font-bold text-th-text">{avgVisibility}%</div>
+          <div className="text-xs uppercase tracking-wider text-th-text-muted">
+            평균 가시성
+            <span className="ml-1 text-[10px] normal-case text-th-text-muted">
+              {brandedView ? "/25" : "/100"}
+            </span>
+          </div>
+          <div className="mt-0.5 text-xl font-bold text-th-text">{avgVisibility}</div>
         </div>
         {(["positive", "neutral", "negative", "not-mentioned"] as const).map((s) => {
           const colors: Record<string, string> = {

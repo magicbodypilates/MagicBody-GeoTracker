@@ -3,6 +3,7 @@ import type { ScrapeRun } from "@/components/dashboard/types";
 import { VISIBLE_PROVIDERS, PROVIDER_LABELS, type Provider } from "@/components/dashboard/types";
 import type { RunDelta } from "@/components/dashboard/types";
 import { splitAnswerSections } from "@/components/dashboard/answer-utils";
+import { isBrandedPrompt } from "@/lib/client/branded-prompt";
 import { isRelatedCitation, isUrlMatchingCitedKeys } from "@/components/dashboard/citation-utils";
 
 type ReputationSourcesTabProps = {
@@ -562,16 +563,28 @@ export function ReputationSourcesTab({
   }, [filteredRuns, sortField]);
 
   // Insight stats — filteredRuns 기준 (자동/수동 탭 반영)
+  // brand 명 검색 응답은 점수 범위가 다르므로 통계 카드 집계에서 제외 (응답 목록에는 그대로 표시).
+  const informationalFilteredRuns = useMemo(
+    () =>
+      brandTerms.length === 0
+        ? filteredRuns
+        : filteredRuns.filter((r) => !isBrandedPrompt(r.prompt, brandTerms)),
+    [filteredRuns, brandTerms],
+  );
+
   const insights = useMemo(() => {
-    if (filteredRuns.length === 0) return null;
-    const avgScore = Math.round(filteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / filteredRuns.length);
+    if (informationalFilteredRuns.length === 0) return null;
+    const avgScore = Math.round(
+      informationalFilteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) /
+        informationalFilteredRuns.length,
+    );
     const sentiments = { positive: 0, neutral: 0, negative: 0, "not-mentioned": 0 };
     const providerCounts: Partial<Record<Provider, number>> = {};
     const providerScores: Partial<Record<Provider, number[]>> = {};
     let brandMentioned = 0;
     let totalSources = 0;
 
-    filteredRuns.forEach((r) => {
+    informationalFilteredRuns.forEach((r) => {
       sentiments[r.sentiment as keyof typeof sentiments] = (sentiments[r.sentiment as keyof typeof sentiments] ?? 0) + 1;
       providerCounts[r.provider] = (providerCounts[r.provider] ?? 0) + 1;
       if (!providerScores[r.provider]) providerScores[r.provider] = [];
@@ -588,7 +601,7 @@ export function ReputationSourcesTab({
     })).sort((a, b) => b.avg - a.avg);
 
     return { avgScore, sentiments, providerAvgs, brandMentioned, totalSources };
-  }, [filteredRuns]);
+  }, [informationalFilteredRuns]);
 
   // Auto-expand first group
   const isGroupOpen = (prompt: string, idx: number) => {

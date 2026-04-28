@@ -15,6 +15,7 @@ import {
   purgeWorkspace,
   setCachedWorkspaceId,
 } from "@/lib/client/server-store";
+import { isBrandedPrompt } from "@/lib/client/branded-prompt";
 import { DEMO_STATE } from "@/lib/demo-data";
 import { AeoAuditTab } from "@/components/dashboard/tabs/aeo-audit-tab";
 import { AutomationServerTab } from "@/components/dashboard/tabs/automation-server-tab";
@@ -808,9 +809,21 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   /** 자동 실행만 필터링 — KPI strip / 주요변동에 수동 데이터 섞이지 않게 */
   const autoRuns = useMemo(() => state.runs.filter((r) => r.auto === true), [state.runs]);
 
+  /**
+   * 일반 검색 응답만 (prompt 에 brand 별칭 미포함) — 클라이언트 측 통계 카드에서 사용.
+   * brand 명 검색은 점수 범위가 다르므로 평균/카운트 통계에 합산되지 않게 분리.
+   * 서버 stats API 들은 SQL informational 필터로 동일 분리 처리.
+   */
+  const informationalAutoRuns = useMemo(() => {
+    const brandTerms = getBrandTerms();
+    if (brandTerms.length === 0) return autoRuns;
+    return autoRuns.filter((r) => !isBrandedPrompt(r.prompt, brandTerms));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRuns, state.brand.brandName, state.brand.brandAliases]);
+
   const totalSources = useMemo(
-    () => autoRuns.reduce((acc, run) => acc + run.sources.length, 0),
-    [autoRuns],
+    () => informationalAutoRuns.reduce((acc, run) => acc + run.sources.length, 0),
+    [informationalAutoRuns],
   );
 
   /** Count unique domains cited in runs where the brand was NOT mentioned — these are outreach targets */
@@ -829,12 +842,12 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     return domains.size;
   }, [state.runs]);
 
-  const latestRun = autoRuns[0];
+  const latestRun = informationalAutoRuns[0];
 
-  /** Compute score deltas: for each prompt+provider, compare latest run to the previous one */
+  /** Compute score deltas: 일반 검색 응답 한정 (brand prompt 는 점수 의미가 달라 비교 부적절) */
   const runDeltas: RunDelta[] = useMemo(() => {
     const grouped = new Map<string, ScrapeRun[]>();
-    autoRuns.forEach((run) => {
+    informationalAutoRuns.forEach((run) => {
       const key = `${run.prompt}|||${run.provider}`;
       const list = grouped.get(key) ?? [];
       list.push(run);
@@ -865,15 +878,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     });
 
     return deltas.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-  }, [autoRuns]);
+  }, [informationalAutoRuns]);
 
   /** Top movers — biggest absolute delta changes */
   const movers = useMemo(() => runDeltas.slice(0, 4), [runDeltas]);
 
-  /** KPI delta: compare current period avg visibility vs prior period */
+  /** KPI delta: compare current period avg visibility vs prior period (informational only) */
   const kpiVisibilityDelta = useMemo(() => {
-    if (autoRuns.length < 2) return null;
-    const sorted = [...autoRuns].sort(
+    if (informationalAutoRuns.length < 2) return null;
+    const sorted = [...informationalAutoRuns].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
     const mid = Math.floor(sorted.length / 2);
@@ -883,7 +896,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const recentAvg = recentHalf.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / recentHalf.length;
     const olderAvg = olderHalf.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / olderHalf.length;
     return Math.round(recentAvg - olderAvg);
-  }, [autoRuns]);
+  }, [informationalAutoRuns]);
 
   /** Unread drift alerts count */
   const unreadAlertCount = useMemo(
@@ -2603,12 +2616,12 @@ ${exampleJson}
           {/* KPI strip - 메인/프롬프트허브/AI응답/가시성 페이지에만 노출 */}
           {SHOW_KPI_TABS.includes(activeTab) && (
             <section className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-3 xl:grid-cols-5">
-              <KpiCard label="전체 실행" value={autoRuns.length} />
+              <KpiCard label="전체 실행" value={informationalAutoRuns.length} />
               <KpiCard
                 label="평균 가시성"
                 value={
-                  autoRuns.length > 0
-                    ? `${Math.round(autoRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / autoRuns.length)}%`
+                  informationalAutoRuns.length > 0
+                    ? `${Math.round(informationalAutoRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / informationalAutoRuns.length)}%`
                     : "—"
                 }
                 delta={kpiVisibilityDelta}
@@ -2617,7 +2630,7 @@ ${exampleJson}
               />
               <KpiCard
                 label="브랜드 언급"
-                value={autoRuns.filter((r) => (r.brandMentions ?? []).some((m) => m && m.trim() !== "")).length}
+                value={informationalAutoRuns.filter((r) => (r.brandMentions ?? []).some((m) => m && m.trim() !== "")).length}
               />
               <KpiCard label="수집된 출처" value={totalSources} />
               <KpiCard

@@ -15,6 +15,7 @@ import {
   isRelatedCitation,
   isUrlMatchingCitedKeys,
 } from "@/components/dashboard/citation-utils";
+import { isBrandedPrompt } from "@/lib/client/branded-prompt";
 
 const PROVIDER_COLORS: Record<Provider, string> = {
   chatgpt: "#10a37f",
@@ -51,11 +52,13 @@ function downloadCsv(filename: string, content: string) {
 export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAnalyticsTabProps) {
   const [dataTab, setDataTab] = useState<"auto" | "manual">("auto");
 
-  // 자동/수동 필터링
-  const filteredRuns = useMemo(
-    () => (dataTab === "auto" ? runs.filter((r) => r.auto === true) : runs.filter((r) => r.auto !== true)),
-    [runs, dataTab],
-  );
+  // 자동/수동 필터링 + brand 명 검색 응답 제외 (점수 범위가 다르므로 통계 합산에서 분리).
+  // 응답 자체는 다른 탭에서 보이고, 가시성 분석 통계는 일반 검색만 집계.
+  const filteredRuns = useMemo(() => {
+    const base = dataTab === "auto" ? runs.filter((r) => r.auto === true) : runs.filter((r) => r.auto !== true);
+    if (brandTerms.length === 0) return base;
+    return base.filter((r) => !isBrandedPrompt(r.prompt, brandTerms));
+  }, [runs, dataTab, brandTerms]);
 
   const exportRunsCsv = useCallback(() => {
     const header =

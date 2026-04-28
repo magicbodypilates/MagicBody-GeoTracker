@@ -1062,38 +1062,56 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     sources: string[],
     brandTerms: string[],
   ): number {
-    if (brandTerms.length === 0) return 0;
+    if (brandTerms.length === 0 || !answer) return 0;
     const lower = answer.toLowerCase();
-    let score = 0;
 
-    // Brand mentioned at all? +30
-    const mentioned = brandTerms.some((t) => lower.includes(t.toLowerCase()));
-    if (!mentioned) return 0;
-    score += 30;
-
-    // Mentioned in first 200 chars (prominent position)? +20
-    const first200 = lower.slice(0, 200);
-    if (brandTerms.some((t) => first200.includes(t.toLowerCase()))) score += 20;
-
-    // Multiple mentions? +15
-    const mentionCount = brandTerms.reduce((acc, t) => {
-      const re = new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-      return acc + (lower.match(re)?.length ?? 0);
-    }, 0);
-    if (mentionCount >= 3) score += 15;
-    else if (mentionCount >= 2) score += 8;
-
-    // Brand official channel in sources? +20
-    // 일반 도메인은 호스트, 유튜브/인스타 등 공용 플랫폼은 채널 핸들까지 일치해야 함
-    const brandTargetKeys = buildTargetKeys(state.brand.websites);
-    if (
-      brandTargetKeys.length > 0 &&
-      sources.some((s) => isUrlMatchingCitedKeys(s, brandTargetKeys))
-    ) {
-      score += 20;
+    // 모든 brand term 등장 위치 수집 (자동화 runner 와 동일 로직)
+    const positions: number[] = [];
+    for (const t of brandTerms) {
+      const term = t.toLowerCase();
+      if (!term) continue;
+      let from = 0;
+      while (from < lower.length) {
+        const idx = lower.indexOf(term, from);
+        if (idx < 0) break;
+        positions.push(idx);
+        from = idx + term.length;
+      }
     }
 
-    // Positive sentiment bonus +15
+    // mentions=0 케이스: URL 노출만 약한 신호로 점수 부여
+    const brandTargetKeys = buildTargetKeys(state.brand.websites);
+    const hasCitationOnly =
+      brandTargetKeys.length > 0 &&
+      sources.some((s) => isUrlMatchingCitedKeys(s, brandTargetKeys));
+
+    if (positions.length === 0) {
+      // 본문에 자사 도메인 직접 노출 vs 출처에만 매칭의 구분은 client 에서는
+      // sources 만 보이므로 단순화 — 매칭 있으면 +2 (참고자료 신호로 간주).
+      // 자동화 runner 의 hasBodyUrl(+20) 케이스는 답변 본문에 brand 도메인 문자열이
+      // 직접 등장한 경우인데, 그러면 보통 brand 단어도 같이 나타나 mentions>=1 이 됨.
+      return hasCitationOnly ? 2 : 0;
+    }
+
+    // 50자 이내 근접 등장은 1회로 merge (별칭 풀어쓰기 중복 카운트 방지)
+    positions.sort((a, b) => a - b);
+    const MERGE_WINDOW = 50;
+    const merged: number[] = [positions[0]];
+    for (let i = 1; i < positions.length; i++) {
+      if (positions[i] - merged[merged.length - 1] > MERGE_WINDOW) {
+        merged.push(positions[i]);
+      }
+    }
+    const mentions = merged.length;
+    const firstPos = merged[0];
+
+    let score = 30; // 기본: 본문 brand 언급
+    if (firstPos < 200) score += 20;
+    if (mentions >= 3) score += 15;
+    else if (mentions >= 2) score += 8;
+
+    // 옵션 B: mentions>=1 일 때 URL 점수는 가산하지 않음 (이미 brand 언급으로 충분히 평가됨)
+
     const sent = detectSentiment(answer, brandTerms);
     if (sent === "positive") score += 15;
     else if (sent === "neutral") score += 5;

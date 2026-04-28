@@ -1061,11 +1061,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     answer: string,
     sources: string[],
     brandTerms: string[],
+    sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
+    isTopRanked: boolean,
+    isStronglyRecommended: boolean,
+    isBrandedQuery: boolean,
   ): number {
     if (brandTerms.length === 0 || !answer) return 0;
     const lower = answer.toLowerCase();
 
-    // 모든 brand term 등장 위치 수집 (자동화 runner 와 동일 로직)
+    // 모든 brand term 등장 위치 수집 (자동화 runner 와 동일)
     const positions: number[] = [];
     for (const t of brandTerms) {
       const term = t.toLowerCase();
@@ -1079,21 +1083,28 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       }
     }
 
-    // mentions=0 케이스: URL 노출만 약한 신호로 점수 부여
+    // brand 명 검색: 평가 어조만 점수
+    if (isBrandedQuery) {
+      if (positions.length === 0) return 0;
+      if (sentiment !== "positive") return 0;
+      let s = 10;
+      if (isStronglyRecommended) s += 15;
+      return Math.min(100, s);
+    }
+
+    // 일반 검색
     const brandTargetKeys = buildTargetKeys(state.brand.websites);
     const hasCitationOnly =
       brandTargetKeys.length > 0 &&
       sources.some((s) => isUrlMatchingCitedKeys(s, brandTargetKeys));
 
     if (positions.length === 0) {
-      // 본문에 자사 도메인 직접 노출 vs 출처에만 매칭의 구분은 client 에서는
-      // sources 만 보이므로 단순화 — 매칭 있으면 +2 (참고자료 신호로 간주).
-      // 자동화 runner 의 hasBodyUrl(+20) 케이스는 답변 본문에 brand 도메인 문자열이
-      // 직접 등장한 경우인데, 그러면 보통 brand 단어도 같이 나타나 mentions>=1 이 됨.
+      // mentions=0: URL 노출만 약한 신호. 클라이언트에선 sources 만 가지고 있어
+      // 본문 URL vs 참고자료 구분이 어렵지만, 매칭 자체가 약한 신호라 일관되게 +2 처리.
       return hasCitationOnly ? 2 : 0;
     }
 
-    // 50자 이내 근접 등장은 1회로 merge (별칭 풀어쓰기 중복 카운트 방지)
+    // 50자 이내 근접 등장은 1회로 merge
     positions.sort((a, b) => a - b);
     const MERGE_WINDOW = 50;
     const merged: number[] = [positions[0]];
@@ -1105,16 +1116,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const mentions = merged.length;
     const firstPos = merged[0];
 
-    let score = 30; // 기본: 본문 brand 언급
+    let score = 30;
     if (firstPos < 200) score += 20;
     if (mentions >= 3) score += 15;
     else if (mentions >= 2) score += 8;
 
-    // 옵션 B: mentions>=1 일 때 URL 점수는 가산하지 않음 (이미 brand 언급으로 충분히 평가됨)
+    if (sentiment === "positive") score += 15;
+    else if (sentiment === "neutral") score += 5;
 
-    const sent = detectSentiment(answer, brandTerms);
-    if (sent === "positive") score += 15;
-    else if (sent === "neutral") score += 5;
+    if (isTopRanked) score += 15;
+    void isStronglyRecommended; // brand 명 검색 분기 전용
 
     return Math.min(100, score);
   }
@@ -1196,6 +1207,42 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         competitorWebsiteUrls,
       );
 
+      // brand 명 검색 여부 — prompt 에 brand 별칭 중 하나라도 포함되면 branded query
+      const promptLower = prompt.toLowerCase();
+      const isBrandedQuery = brandTerms.some(
+        (t) => t && promptLower.includes(t.toLowerCase()),
+      );
+
+      // sentiment + ranking 분류 — 키워드 휴리스틱 1차, LLM 보강 2차 (자동화와 동일 흐름)
+      let runSentiment = detectSentiment(mainAnswer, brandTerms);
+      let isTopRanked = false;
+      let isStronglyRecommended = false;
+      if (runSentiment !== "not-mentioned" && mainAnswer.trim().length >= 20) {
+        try {
+          const llmRes = await fetch(BP + "/api/sentiment", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              answerText: mainAnswer,
+              brandName: brandTerms[0] ?? "",
+              brandAliases: brandTerms.slice(1),
+            }),
+          });
+          if (llmRes.ok) {
+            const llmData = (await llmRes.json()) as {
+              sentiment?: "positive" | "neutral" | "negative" | null;
+              isTopRanked?: boolean;
+              isStronglyRecommended?: boolean;
+            };
+            if (llmData.sentiment) runSentiment = llmData.sentiment;
+            isTopRanked = Boolean(llmData.isTopRanked);
+            isStronglyRecommended = Boolean(llmData.isStronglyRecommended);
+          }
+        } catch {
+          // LLM 분류 실패 시 키워드 휴리스틱 결과 그대로 사용
+        }
+      }
+
       const run: ScrapeRun = {
         provider: data.provider,
         // Store original (unprepended) prompt so UI lists/filters stay clean
@@ -1206,8 +1253,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         citations: citationList,
         createdAt: data.createdAt || new Date().toISOString(),
         // 스코어/감성/언급은 "메인 AI 본문"만 기준 — 부가 콘텐츠 섹션은 제외
-        visibilityScore: calcVisibilityScore(mainAnswer, sourceList, brandTerms),
-        sentiment: detectSentiment(mainAnswer, brandTerms),
+        visibilityScore: calcVisibilityScore(
+          mainAnswer,
+          sourceList,
+          brandTerms,
+          runSentiment,
+          isTopRanked,
+          isStronglyRecommended,
+          isBrandedQuery,
+        ),
+        sentiment: runSentiment,
         brandMentions: findMentions(mainAnswer, brandTerms),
         competitorMentions: findMentions(mainAnswer, competitorTerms),
         // 부가 콘텐츠 섹션에서의 노출은 별도 집계 (보조 신호)
@@ -2638,14 +2693,25 @@ ${exampleJson}
               <p className="text-sm text-th-text-secondary mb-3">
                 가시성 점수(0–100)는 AI 응답에서 브랜드가 얼마나 두드러지게 등장하는지 측정합니다. 각 요소가 점수에 기여합니다:
               </p>
+              <p className="mb-2 text-xs text-th-text-muted">
+                일반 검색 (prompt 에 brand 명 없음) — 만점 95점
+              </p>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 <ScoreFactorCard emoji="🔍" label="브랜드 언급" points="+30" desc="응답 본문에 브랜드명 또는 별칭이 등장" />
                 <ScoreFactorCard emoji="🏆" label="노출 위치" points="+20" desc="첫 200자 이내에 브랜드가 등장" />
                 <ScoreFactorCard emoji="🔁" label="반복 언급" points="+8~+15" desc="본문에 2회 이상(8점) 또는 3회 이상(15점) 언급" />
-                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+20" desc="브랜드 언급은 없지만 본문에 자사 URL/도메인 직접 노출 (mentions=0 케이스)" />
-                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="브랜드 언급도 본문 URL도 없는데 참고자료에만 URL 포함 (mentions=0 케이스, 약한 신호)" />
-                <ScoreFactorCard emoji="👍" label="긍정 감성" points="+15" desc="응답이 브랜드를 긍정적으로 언급" />
-                <ScoreFactorCard emoji="😐" label="중립 감성" points="+5" desc="응답이 브랜드를 중립적 문맥에서 언급" />
+                <ScoreFactorCard emoji="👍" label="긍정 감성" points="+15" desc="여러 brand 중 매직바디만 차이있게 긍정적으로 평가됨 (LLM 분류). 모두 같은 톤이면 NEUTRAL" />
+                <ScoreFactorCard emoji="😐" label="중립 감성" points="+5" desc="단순 등장·사실 설명·여러 옵션 중 하나로 나열" />
+                <ScoreFactorCard emoji="🥇" label="1순위 명시 추천" points="+15" desc='"가장 적절", "최고", "1위", "단연", "귀하 케이스에 적합" 등으로 명시적 1위 추천' />
+                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+15" desc="brand 언급 없이 본문에 자사 URL/도메인만 노출 (mentions=0 케이스)" />
+                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="brand 언급도 본문 URL도 없고 참고자료에만 URL 포함 (mentions=0 케이스)" />
+              </div>
+              <p className="mt-3 mb-2 text-xs text-th-text-muted">
+                brand 명 검색 (prompt 에 brand 명 포함, 예: &ldquo;매직바디 어때?&rdquo;) — 만점 25점, 통계 분리 집계
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <ScoreFactorCard emoji="✅" label="긍정 평가" points="+10" desc="brand 에 평가적·우호적 어조 사용. brand 명 검색은 언급/위치/반복 점수 없음" />
+                <ScoreFactorCard emoji="🌟" label="적극 추천 보너스" points="+15" desc='"강력 추천", "꼭 추천", "highly recommend" 같은 강한 추천 어조. 긍정 평가와 합산 시 25점' />
               </div>
             </section>
           )}

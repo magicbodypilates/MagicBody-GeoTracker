@@ -208,17 +208,31 @@ async function executeSchedule(
         const citedBrandDomains = matchCitationDomains(citations, brandWebsites);
         const citedCompetitorDomains = matchCitationDomains(citations, competitorWebsites);
 
-        // Sentiment: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 로 즉시 결정 (LLM 호출 낭비 방지).
-        // 언급이 있을 때만 LLM 에 "positive/neutral/negative" 판정 요청, 실패하면 키워드 휴리스틱으로 폴백.
-        let sentiment = detectSentiment(answerText, brandTerms);
+        // Sentiment + ranking signals: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 즉시 결정.
+        // 언급이 있을 때 LLM 에 sentiment + isTopRanked + isStronglyRecommended 한꺼번에 분류 요청.
+        let sentiment: "positive" | "neutral" | "negative" | "not-mentioned" = detectSentiment(
+          answerText,
+          brandTerms,
+        );
+        let isTopRanked = false;
+        let isStronglyRecommended = false;
         if (sentiment !== "not-mentioned") {
           const llm = await classifySentiment({
             answerText,
             brandName: brandTerms[0] ?? "",
             brandAliases: brandTerms.slice(1),
           });
-          if (llm) sentiment = llm;
+          if (llm) {
+            sentiment = llm.sentiment;
+            isTopRanked = llm.isTopRanked;
+            isStronglyRecommended = llm.isStronglyRecommended;
+          }
         }
+        // brand 명 검색 여부 — prompt 텍스트에 brand 별칭 중 하나라도 포함되면 branded query
+        const promptLower = prompt.text.toLowerCase();
+        const isBrandedQuery = brandTerms.some(
+          (t) => t && promptLower.includes(t.toLowerCase()),
+        );
         // 본문 내 자사 URL 등장 여부 판정.
         // 일반 도메인은 호스트 문자열 포함 여부로 매칭. 소셜 플랫폼(youtube.com, instagram.com 등)은
         // 호스트만으로 매칭하면 다른 채널 URL 도 매칭되는 false positive 발생 → 핸들(seg)까지
@@ -245,6 +259,9 @@ async function executeSchedule(
           hasBodyUrl,
           hasCitationOnly,
           sentiment,
+          isTopRanked,
+          isStronglyRecommended,
+          isBrandedQuery,
         );
 
         const inserted = await db
@@ -490,6 +507,9 @@ function calcVisibility(
   hasBodyUrl: boolean,
   hasCitationOnly: boolean,
   sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
+  isTopRanked: boolean,
+  isStronglyRecommended: boolean,
+  isBrandedQuery: boolean,
 ): number {
   if (!text) return 0;
   const lower = text.toLowerCase();
@@ -507,18 +527,33 @@ function calcVisibility(
       from = idx + term.length;
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────
+  // brand 명 검색 (예: "매직바디 어때?") — 평가 어조만 점수.
+  // 언급/위치/반복은 당연한 거라 의미 없음. URL 가산도 안 함 (brand 명 검색에서 의미 약함).
+  // ─────────────────────────────────────────────────────────────────
+  if (isBrandedQuery) {
+    if (positions.length === 0) return 0; // brand 명 검색인데 답변에 brand 언급조차 없으면 0
+    if (sentiment !== "positive") return 0;
+    let score = 10; // 긍정 평가
+    if (isStronglyRecommended) score += 15; // 강한 추천 보너스
+    return Math.min(score, 100);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // 일반 검색 (brand 명 없는 키워드 검색) — 기존 다차원 점수.
+  // ─────────────────────────────────────────────────────────────────
   if (positions.length === 0) {
-    // 본문에 brand 언급이 없는 경우에도 URL 노출은 약한 신호로 점수 부여 (사용자 합의):
-    //   - 본문에 자사 도메인 URL 등장   → +20 (실제 클릭 경로)
-    //   - 참고자료 패널에만 URL        → +2  (출처 인정만, 사용자 노출 약함)
-    // mentions=0 이면 노출 위치 / 반복 / 감성 점수는 의미 없음 (sentiment 도 not-mentioned).
-    if (hasBodyUrl) return 20;
+    // mentions=0: URL 노출만 약한 신호로 점수 부여
+    //   - 본문에 자사 도메인 URL 등장 → +15 (실제 클릭 경로)
+    //   - 참고자료 패널에만 URL     → +2 (약한 신호)
+    if (hasBodyUrl) return 15;
     if (hasCitationOnly) return 2;
     return 0;
   }
   positions.sort((a, b) => a - b);
 
-  // 근접한 위치(50자 이내)는 1회로 merge — "매직바디(국제재활필라테스협회)" 같은 별칭 풀어쓰기 중복 카운트 방지
+  // 근접한 위치(50자 이내)는 1회로 merge — 별칭 풀어쓰기 중복 카운트 방지
   const MERGE_WINDOW = 50;
   const merged: number[] = [positions[0]];
   for (let i = 1; i < positions.length; i++) {
@@ -534,15 +569,17 @@ function calcVisibility(
   if (mentions >= 3) score += 15; // 반복 언급
   else if (mentions >= 2) score += 8;
 
-  // URL 점수는 mentions=0 케이스에서만 적용 (위쪽 early return 분기에서 처리).
-  // 본문에 brand 언급이 있으면 이미 +30 ~ +65 로 충분히 평가되므로
-  // URL 노출 점수를 추가 가산하지 않음 (중복 집계 방지) — 사용자 합의.
-  // 사용 안 됨을 명시하기 위해 hasBodyUrl/hasCitationOnly 인자는 유지.
+  // URL 점수는 mentions=0 케이스에서만 적용 (위쪽 분기에서 처리).
   void hasBodyUrl;
   void hasCitationOnly;
 
   if (sentiment === "positive") score += 15;
   else if (sentiment === "neutral") score += 5;
+
+  // 1순위 추천 보너스 — 일반 검색에서 명시적 1위로 콕 집어 추천된 경우
+  if (isTopRanked) score += 15;
+  void isStronglyRecommended; // brand 명 검색 분기에서만 사용
+
   return Math.min(score, 100);
 }
 

@@ -22,6 +22,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import { getBrandTermsForWorkspace, informationalCondition } from "@/lib/server/branded-query-filter";
 import type { Citation } from "@/components/dashboard/types";
 import {
   normalizeTargetKey,
@@ -79,6 +80,9 @@ export async function GET(
     qualityFilter,
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
+  const __brandTerms = await getBrandTermsForWorkspace(id);
+  const __informational = informationalCondition(__brandTerms);
+  if (__informational) conditions.push(__informational);
 
   try {
     // 브랜드 + 경쟁사 키 매핑 (소셜 플랫폼은 채널 핸들까지 포함)

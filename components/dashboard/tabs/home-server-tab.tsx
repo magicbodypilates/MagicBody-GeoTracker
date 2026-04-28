@@ -120,6 +120,14 @@ type ProvidersResult = {
   }>;
 };
 
+type BrandedResult = {
+  days: number;
+  sampleCount: number;
+  positiveRate: number;
+  strongRecRate: number;
+  avgScore: number;
+};
+
 type DriftAlertRow = {
   id: string;
   promptText: string;
@@ -158,6 +166,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
   const [citations, setCitations] = useState<CitationsResult | null>(null);
   const [providersStats, setProvidersStats] = useState<ProvidersResult | null>(null);
   const [drift, setDrift] = useState<DriftResult | null>(null);
+  const [branded, setBranded] = useState<BrandedResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
 
@@ -184,8 +193,9 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
         fetch(`${BP}/api/workspaces/${wsId}/stats/citations${qs}&limit=15`, { credentials: "include" }),
         fetch(`${BP}/api/workspaces/${wsId}/stats/providers${qs}`, { credentials: "include" }),
         fetch(`${BP}/api/workspaces/${wsId}/drift?dismissed=false&limit=20`, { credentials: "include" }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/branded${qs}`, { credentials: "include" }),
       ]);
-      const [sumRes, tsRes, rankRes, benchRes, heatRes, citeRes, provRes, driftRes] = settled;
+      const [sumRes, tsRes, rankRes, benchRes, heatRes, citeRes, provRes, driftRes, brandedRes] = settled;
       if (sumRes.status === "fulfilled" && sumRes.value.ok) setSummary(await sumRes.value.json());
       if (tsRes.status === "fulfilled" && tsRes.value.ok) setTimeseries(await tsRes.value.json());
       if (rankRes.status === "fulfilled" && rankRes.value.ok) setRanking(await rankRes.value.json());
@@ -194,6 +204,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
       if (citeRes.status === "fulfilled" && citeRes.value.ok) setCitations(await citeRes.value.json());
       if (provRes.status === "fulfilled" && provRes.value.ok) setProvidersStats(await provRes.value.json());
       if (driftRes.status === "fulfilled" && driftRes.value.ok) setDrift(await driftRes.value.json());
+      if (brandedRes.status === "fulfilled" && brandedRes.value.ok) setBranded(await brandedRes.value.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -371,6 +382,37 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
               deltaSuffix="%p"
             />
           </div>
+
+          {/* brand 명 검색 통계 — 일반 검색과 점수 범위가 다르므로 별도 카드. */}
+          {/* "매직바디 어때?" 같이 prompt 에 brand 명이 직접 포함된 추적의 평가율. */}
+          {branded && branded.sampleCount > 0 && (
+            <section className="rounded-lg border border-th-border bg-th-card p-4">
+              <div className="mb-3 flex items-baseline gap-2">
+                <h3 className="text-base font-semibold text-th-text">brand 명 검색 평가</h3>
+                <span className="text-[11px] text-th-text-muted">
+                  prompt 에 brand 명이 포함된 추적 — 평균 가시성 통계와 분리 집계
+                </span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <KpiCard
+                  title="표본 수"
+                  value={String(branded.sampleCount)}
+                  suffix={`/ 최근 ${days}일`}
+                />
+                <KpiCard
+                  title="긍정 평가율"
+                  value={`${(branded.positiveRate * 100).toFixed(1)}%`}
+                />
+                <KpiCard
+                  title="적극 추천율"
+                  value={`${(branded.strongRecRate * 100).toFixed(1)}%`}
+                />
+              </div>
+              <p className="mt-2 text-[11px] text-th-text-muted">
+                brand 명 검색 만점 = 25점 (긍정 평가 +10 / 적극 추천 보너스 +15). 일반 검색 만점(95점)과 점수 의미가 다름.
+              </p>
+            </section>
+          )}
 
           {/* 시계열 차트 */}
           <div className="rounded-lg border border-th-border bg-th-card p-4">

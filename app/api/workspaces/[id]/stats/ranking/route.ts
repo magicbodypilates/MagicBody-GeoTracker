@@ -17,6 +17,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import { getBrandTermsForWorkspace, informationalCondition } from "@/lib/server/branded-query-filter";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,9 @@ export async function GET(
     qualityFilter,
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
+  const __brandTerms = await getBrandTermsForWorkspace(id);
+  const __informational = informationalCondition(__brandTerms);
+  if (__informational) conditions.push(__informational);
 
   try {
     const rows = await db

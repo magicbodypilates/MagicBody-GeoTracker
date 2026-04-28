@@ -16,6 +16,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import {
+  getBrandTermsForWorkspace,
+  informationalCondition,
+} from "@/lib/server/branded-query-filter";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +43,7 @@ async function aggregate(
   from: Date,
   to: Date,
   autoOnly: boolean,
+  brandTerms: string[],
 ): Promise<AggregateResult> {
   // parse_quality != 'low' (또는 NULL) 인 것만 집계
   const qualityFilter = or(
@@ -53,6 +58,9 @@ async function aggregate(
     qualityFilter,
   ];
   if (autoOnly) baseConditions.push(eq(schema.runs.isAuto, true));
+  // 일반 검색만 — brand 명 검색(branded query)은 점수 범위가 다르므로 평균 통계에서 제외
+  const informational = informationalCondition(brandTerms);
+  if (informational) baseConditions.push(informational);
 
   const [row] = await db
     .select({
@@ -124,9 +132,10 @@ export async function GET(
   const prevFrom = new Date(now.getTime() - 2 * days * 24 * 60 * 60 * 1000);
 
   try {
+    const brandTerms = await getBrandTermsForWorkspace(id);
     const [current, previous, health] = await Promise.all([
-      aggregate(id, from, now, autoOnly),
-      aggregate(id, prevFrom, from, autoOnly),
+      aggregate(id, from, now, autoOnly, brandTerms),
+      aggregate(id, prevFrom, from, autoOnly, brandTerms),
       autoHealth(id, from, now),
     ]);
 

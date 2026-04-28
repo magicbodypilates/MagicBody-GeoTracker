@@ -25,6 +25,7 @@ import { CronExpressionParser } from "cron-parser";
 import { db, schema } from "@/lib/server/db";
 import { runAiScraper } from "@/lib/server/brightdata-scraper";
 import { classifySentiment } from "@/lib/server/llm-sentiment";
+import { guardSentiment } from "@/lib/server/sentiment-guard";
 import {
   matchCitationDomains,
   normalizeTargetKey,
@@ -223,7 +224,8 @@ async function executeSchedule(
             brandAliases: brandTerms.slice(1),
           });
           if (llm) {
-            sentiment = llm.sentiment;
+            // 후처리 가드 — 약한 positive(=1위 명시 없고 적극 추천 없음)인데 비교 나열 응답이면 neutral 로 강제
+            sentiment = guardSentiment(answerText, brandTerms, llm);
             isTopRanked = llm.isTopRanked;
             isStronglyRecommended = llm.isStronglyRecommended;
           }
@@ -276,7 +278,7 @@ async function executeSchedule(
             citations: citations as never,
             visibilityScore,
             // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
-            scoreVersion: 4,
+            scoreVersion: 5,
             sentiment,
             brandMentions,
             competitorMentions,

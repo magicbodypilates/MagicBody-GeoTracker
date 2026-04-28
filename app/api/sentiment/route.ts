@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { classifySentiment } from "@/lib/server/llm-sentiment";
+import { guardSentiment } from "@/lib/server/sentiment-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -28,7 +29,10 @@ export async function POST(req: NextRequest) {
     if (!result) {
       return NextResponse.json({ sentiment: null, isTopRanked: false, isStronglyRecommended: false });
     }
-    return NextResponse.json(result);
+    // 후처리 가드 — 약한 positive(비교 나열 + ranking phrase 없음) 는 neutral 로 강제
+    const brandTerms = [parsed.brandName, ...(parsed.brandAliases ?? [])].filter(Boolean);
+    const guarded = guardSentiment(parsed.answerText, brandTerms, result);
+    return NextResponse.json({ ...result, sentiment: guarded });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input" }, { status: 400 });

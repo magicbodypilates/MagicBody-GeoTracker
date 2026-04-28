@@ -25,6 +25,7 @@ import { and, eq, lt, sql } from "drizzle-orm";
 import { getSession, requireAdmin } from "@/lib/server/auth-guard";
 import { calcVisibility } from "@/lib/server/automation-runner";
 import { classifySentiment } from "@/lib/server/llm-sentiment";
+import { guardSentiment } from "@/lib/server/sentiment-guard";
 import {
   matchCitationDomains,
   normalizeTargetKey,
@@ -36,7 +37,7 @@ import type { Citation } from "@/components/dashboard/types";
 export const dynamic = "force-dynamic";
 
 /** 현재 점수 룰 버전. 점수 체계 / LLM 프롬프트 변경 시 증가. */
-const CURRENT_SCORE_VERSION = 4;
+const CURRENT_SCORE_VERSION = 5;
 
 /** 키워드 휴리스틱 — automation-runner detectSentiment 와 동일 (간소화) */
 function detectSentimentFallback(
@@ -161,7 +162,8 @@ export async function POST(req: NextRequest) {
         brandAliases: brandTerms.slice(1),
       });
       if (llm) {
-        sentiment = llm.sentiment;
+        // 후처리 가드 — 약한 positive(비교 나열 + ranking phrase 없음) 는 neutral 로 강제
+        sentiment = guardSentiment(answerText, brandTerms, llm);
         isTopRanked = llm.isTopRanked;
         isStronglyRecommended = llm.isStronglyRecommended;
       } else {

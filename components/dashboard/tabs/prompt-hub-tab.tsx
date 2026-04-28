@@ -5,6 +5,8 @@ type PromptHubTabProps = {
   customPrompts: TaggedPrompt[];
   busy: boolean;
   activeProviderCount: number;
+  /** "제거 + 데이터 삭제" 버튼 노출 여부 — 응답 일괄 삭제 권한 (admin 전용) */
+  canCascadeDelete?: boolean;
   onAddCustomPrompt: (value: string) => void;
   onRemoveCustomPrompt: (value: string, deleteResponses?: boolean) => void;
   onUpdatePromptTags: (text: string, tags: string[]) => void;
@@ -17,6 +19,7 @@ export function PromptHubTab({
   customPrompts,
   busy,
   activeProviderCount,
+  canCascadeDelete = false,
   onAddCustomPrompt,
   onRemoveCustomPrompt,
   onUpdatePromptTags,
@@ -201,16 +204,18 @@ export function PromptHubTab({
                 >
                   제거
                 </button>
-                <button
-                  onClick={() => {
-                    if (window.confirm("이 프롬프트와 수집된 모든 응답 데이터를 함께 삭제하시겠습니까?")) {
-                      onRemoveCustomPrompt(item.text, true);
-                    }
-                  }}
-                  className="bd-chip rounded-md px-3 py-1.5 text-xs text-th-danger hover:bg-th-danger-soft"
-                >
-                  제거 + 데이터 삭제
-                </button>
+                {canCascadeDelete && (
+                  <button
+                    onClick={() => {
+                      if (window.confirm("이 프롬프트와 수집된 모든 응답 데이터를 함께 삭제하시겠습니까?")) {
+                        onRemoveCustomPrompt(item.text, true);
+                      }
+                    }}
+                    className="bd-chip rounded-md px-3 py-1.5 text-xs text-th-danger hover:bg-th-danger-soft"
+                  >
+                    제거 + 데이터 삭제
+                  </button>
+                )}
               </div>
             </li>
           ))}

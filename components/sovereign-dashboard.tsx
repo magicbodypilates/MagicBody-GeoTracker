@@ -1519,9 +1519,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         : prev.runs,
     }));
     if (serverWsId) {
-      removePromptByText(serverWsId, value).catch((e) =>
+      // deleteResponses=true 면 cascade=true 로 서버 DB 의 runs 도 함께 삭제
+      removePromptByText(serverWsId, value, deleteResponses).catch((e) =>
         console.error("[dashboard] 서버 프롬프트 삭제 실패:", e),
       );
+    }
+    if (deleteResponses) {
+      // 서버 stats API 들에 즉시 반영되도록 nonce 증가 (홈 탭 통계 즉시 갱신)
+      bumpStatsRefresh();
     }
   }
 
@@ -2161,6 +2166,9 @@ ${exampleJson}
           customPrompts={state.customPrompts}
           busy={busy}
           activeProviderCount={state.activeProviders.length}
+          // "제거 + 데이터 삭제" 는 응답 데이터 일괄 삭제 권한 — admin 전용.
+          // 일반관리자는 "제거" 만 사용 가능 (prompt 만 제거, runs 유지).
+          canCascadeDelete={auth.kind === "admin"}
           onAddCustomPrompt={addCustomPrompt}
           onRemoveCustomPrompt={removeCustomPrompt}
           onUpdatePromptTags={updatePromptTags}

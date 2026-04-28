@@ -309,13 +309,19 @@ export async function addPromptIfNew(
 }
 
 /** 텍스트로 찾아 제거. API 는 ID 기반이므로 먼저 목록 조회 후 매칭. */
-export async function removePromptByText(wsId: string, text: string): Promise<void> {
+export async function removePromptByText(
+  wsId: string,
+  text: string,
+  cascade = false,
+): Promise<void> {
   const { prompts } = await j<{ prompts: ServerPrompt[] }>(
     `${BP}/api/workspaces/${wsId}/prompts`,
   );
   const target = prompts.find((p) => p.text === text);
   if (!target) return;
-  await j(`${BP}/api/prompts/${target.id}`, { method: "DELETE" });
+  // cascade=true 면 같은 prompt_text 의 runs 도 서버 DB 에서 삭제 (admin 전용 권한 필요)
+  const url = `${BP}/api/prompts/${target.id}${cascade ? "?cascade=true" : ""}`;
+  await j(url, { method: "DELETE" });
 }
 
 export async function updatePromptTags(

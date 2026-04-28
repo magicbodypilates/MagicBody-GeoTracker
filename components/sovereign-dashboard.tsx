@@ -1096,12 +1096,18 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       }
     }
 
-    // brand 명 검색: 평가 어조만 점수
+    // brand 명 검색: 평가 어조 + URL 노출만 점수 (만점 55).
     if (isBrandedQuery) {
       if (positions.length === 0) return 0;
-      if (sentiment !== "positive") return 0;
-      let s = 10;
-      if (isStronglyRecommended) s += 15;
+      const brandTargetKeysB = buildTargetKeys(state.brand.websites);
+      const hasCitationOnlyB =
+        brandTargetKeysB.length > 0 &&
+        sources.some((s) => isUrlMatchingCitedKeys(s, brandTargetKeysB));
+      // 클라이언트는 본문 URL vs 참고자료 구분이 어려워 매칭=참고자료로 간주 (+2)
+      let s = 0;
+      if (sentiment === "positive") s += 20;
+      if (isStronglyRecommended) s += 30;
+      if (hasCitationOnlyB) s += 2;
       return Math.min(100, s);
     }
 
@@ -2728,11 +2734,13 @@ ${exampleJson}
                 <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="brand 언급도 본문 URL도 없고 참고자료에만 URL 포함 (mentions=0 케이스)" />
               </div>
               <p className="mt-3 mb-2 text-xs text-th-text-muted">
-                brand 명 검색 (prompt 에 brand 명 포함, 예: &ldquo;매직바디 어때?&rdquo;) — 만점 25점, 통계 분리 집계
+                brand 명 검색 (prompt 에 brand 명 포함, 예: &ldquo;매직바디 어때?&rdquo;) — 만점 55점, 통계 분리 집계
               </p>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <ScoreFactorCard emoji="✅" label="긍정 평가" points="+10" desc="brand 에 평가적·우호적 어조 사용. brand 명 검색은 언급/위치/반복 점수 없음" />
-                <ScoreFactorCard emoji="🌟" label="적극 추천 보너스" points="+15" desc='"강력 추천", "꼭 추천", "highly recommend" 같은 강한 추천 어조. 긍정 평가와 합산 시 25점' />
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <ScoreFactorCard emoji="✅" label="긍정 평가" points="+20" desc="brand 에 평가적·우호적 어조 사용. brand 명 검색은 언급/위치/반복 점수 없음" />
+                <ScoreFactorCard emoji="🌟" label="적극 추천 보너스" points="+30" desc='"강력 추천", "꼭 추천", "highly recommend" 같은 강한 추천 어조' />
+                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+5" desc="답변 본문에 자사 URL/도메인 직접 노출" />
+                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="본문 URL 없고 참고자료에만 URL 포함" />
               </div>
             </section>
           )}

@@ -672,7 +672,7 @@ export function ReputationSourcesTab({
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
           <InsightMini
             label="평균 점수"
-            value={`${insights.avgScore}/${responseTab === "auto-branded" ? "25" : "100"}`}
+            value={`${insights.avgScore}/${responseTab === "auto-branded" ? "55" : "100"}`}
             accent
           />
           <InsightMini label="브랜드 언급" value={`${insights.brandMentioned}/${filteredRuns.length}`} />

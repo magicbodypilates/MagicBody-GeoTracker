@@ -529,14 +529,18 @@ function calcVisibility(
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // brand 명 검색 (예: "매직바디 어때?") — 평가 어조만 점수.
-  // 언급/위치/반복은 당연한 거라 의미 없음. URL 가산도 안 함 (brand 명 검색에서 의미 약함).
+  // brand 명 검색 (예: "매직바디 어때?") — 평가 어조 + URL 노출만 점수.
+  // 언급/위치/반복은 당연한 거라 의미 없음.
+  // 만점 55 = 긍정 평가(+20) + 적극 추천 보너스(+30) + 본문 URL(+5).
   // ─────────────────────────────────────────────────────────────────
   if (isBrandedQuery) {
-    if (positions.length === 0) return 0; // brand 명 검색인데 답변에 brand 언급조차 없으면 0
-    if (sentiment !== "positive") return 0;
-    let score = 10; // 긍정 평가
-    if (isStronglyRecommended) score += 15; // 강한 추천 보너스
+    if (positions.length === 0) return 0; // 답변에 brand 언급조차 없으면 0
+    let score = 0;
+    if (sentiment === "positive") score += 20;
+    if (isStronglyRecommended) score += 30;
+    // URL 점수: 본문 URL 우선(+5), 참고자료에만(+2). 일반 모드보다 가중치 낮음.
+    if (hasBodyUrl) score += 5;
+    else if (hasCitationOnly) score += 2;
     return Math.min(score, 100);
   }
 

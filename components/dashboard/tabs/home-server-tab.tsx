@@ -158,7 +158,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
   const autoOnly = true; // 홈은 항상 자동화 데이터만 표시
   const [timeseriesTab, setTimeseriesTab] = useState<"visibility" | "mention">("visibility");
   // brand 모드 토글 — 체크박스 아래 모든 분석 카드의 데이터 소스 전환.
-  // false (기본) = 일반 검색만 / true = brand 명 검색만 (만점 25점 기준).
+  // false (기본) = 일반 검색만 / true = brand 명 검색만 (만점 55점 기준).
   // 상단 KPI strip 과 주요 변동은 이 토글과 무관하게 항상 일반 검색.
   const [brandedView, setBrandedView] = useState(false);
 
@@ -428,7 +428,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                 />
               </div>
               <p className="mt-2 text-[11px] text-th-text-muted">
-                brand 명 검색 만점 = 25점 (긍정 평가 +10 / 적극 추천 보너스 +15). 일반 검색 만점(95점)과 점수 의미가 다름.
+                brand 명 검색 만점 = 55점 (긍정 평가 +20 / 적극 추천 보너스 +30 / 본문 URL +5 또는 참고자료에만 +2). 일반 검색 만점(95점)과 점수 의미가 다름.
               </p>
             </section>
           )}

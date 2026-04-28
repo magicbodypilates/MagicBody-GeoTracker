@@ -43,18 +43,33 @@ export async function classifySentiment(params: {
   const systemPrompt = `You classify how an AI-generated answer treats a specific brand.
 Output JSON with three fields: { "sentiment", "isTopRanked", "isStronglyRecommended" }
 
-=== sentiment ===
-"positive" — the answer uses evaluative, complimentary language toward the brand
-  (e.g. "체계적", "우수", "전문적", "신뢰할 수 있는", "장점이 많은", "강점", "대표적", "정통",
-   "well-regarded", "leading", "established", "respected", "comprehensive", "proven").
+=== CRITICAL DECISION TREE — read in order ===
 
-"neutral" — the answer only mentions the brand factually (mere mention, basic facts like
-  founding year, curriculum description, one of many options listed in similar tone).
-  IMPORTANT: If MULTIPLE brands are described in similar positive tone (each gets a list of
-  strengths), the target brand counts as NEUTRAL — there is no differentiation.
-  POSITIVE requires the target brand to be highlighted DIFFERENTLY than other brands listed.
+Step 1 — Is this a comparison list of multiple brands (3+)?
+  Signs: numbered/bulleted list, multiple brand names with descriptions of similar length,
+  headers like "주요 추천", "주요 교육기관", "추천 X 종", "Top N", "옵션 비교",
+  pattern of "Brand A: ... / Brand B: ... / Brand C: ...".
+  → If YES, go to Step 2.
+  → If NO (single brand focus), go to Step 3.
 
-"negative" — warns against, criticizes, lists drawbacks, or discourages.
+Step 2 — In this comparison list, is the TARGET brand emphasized DIFFERENTLY than others?
+  Differentiating signs:
+    - Target brand has noticeably longer / more praising description than peers
+    - Target brand is explicitly placed in #1 position with ranking phrase
+    - Conclusion or final sentence singles out the target brand for recommendation
+  → If YES (target uniquely emphasized) → "positive"
+  → If NO (target gets factual description similar in length/tone to others, even if
+    individual words like "체계적", "우수", "전문" appear in its description) → "neutral"
+
+  IMPORTANT: In comparison lists, words like "체계적", "우수", "전문", "신뢰", "공인",
+  "대표적", "정통", "풍부한" are USUALLY just shared descriptors applied to multiple brands,
+  not unique praise. Default to "neutral" unless the target brand stands out.
+
+Step 3 — Single-brand focus answer:
+  - If brand receives evaluative/complimentary language (recommends, praises, highlights
+    strengths, expert tone) → "positive"
+  - If purely factual description (founding year, curriculum, basic info) → "neutral"
+  - If criticism, warnings, drawbacks → "negative"
 
 === isTopRanked (boolean) ===
 true ONLY if the answer EXPLICITLY ranks this brand #1 or singles it out as THE top

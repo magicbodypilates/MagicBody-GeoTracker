@@ -116,6 +116,8 @@ export async function POST(
       sources: parsed.sources,
       citations: parsed.citations as never,
       visibilityScore: parsed.visibilityScore,
+      // 신규 응답은 항상 최신 점수 룰 버전 (백필 대상 아님)
+      scoreVersion: 2,
       sentiment: parsed.sentiment,
       brandMentions: parsed.brandMentions,
       competitorMentions: parsed.competitorMentions,

@@ -163,6 +163,14 @@ export const runs = pgTable(
     isCachedResponse: boolean("is_cached_response").notNull().default(false),
     responseLength: integer("response_length"),
     executionDurationMs: integer("execution_duration_ms"),
+    /**
+     * visibility_score 가 산출된 점수 룰 버전.
+     *   0 = 옛 룰 (백필 대상). 새 응답은 항상 최신 버전으로 저장.
+     *   1 = 옵션 B (2026-04-24): 본문 brand 언급 차원 + URL 차원 분리, mentions>=1 시 URL 점수 안 줌
+     *   2 = brand 모드 점수 재조정 (2026-04-28): 긍정 +20, 적극 추천 +30, 본문 URL +5, 참고자료 +2
+     * 백필 스크립트는 score_version < CURRENT_VERSION 인 row 만 처리 → 멱등성 보장.
+     */
+    scoreVersion: integer("score_version").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({

@@ -275,6 +275,8 @@ async function executeSchedule(
             sources: result.sources ?? [],
             citations: citations as never,
             visibilityScore,
+            // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
+            scoreVersion: 2,
             sentiment,
             brandMentions,
             competitorMentions,
@@ -501,7 +503,7 @@ function findMentions(text: string, terms: string[]): string[] {
   return [...found];
 }
 
-function calcVisibility(
+export function calcVisibility(
   text: string,
   brandTerms: string[],
   hasBodyUrl: boolean,

@@ -2077,6 +2077,44 @@ ${exampleJson}
   }
 
   /** 응답/분석 이력만 초기화 (설정·프롬프트·경쟁사는 유지) */
+  /** admin 전용 — 점수 체계 변경 후 기존 runs 점수 재산출 (50건 batch) */
+  async function handleRecalcVisibility() {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
+    setBusy(true);
+    setMessage("점수 재산출 시작 — 50건씩 LLM 호출 중...");
+    try {
+      const res = await fetch(BP + "/api/admin/recalc-visibility", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ batchSize: 50 }),
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        processed?: number;
+        updated?: number;
+        remaining?: number;
+        message?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        setMessage(`점수 재산출 실패: ${data.error ?? res.status}`);
+      } else {
+        setMessage(
+          data.processed === 0
+            ? "재산출 완료 — 모든 응답이 최신 룰로 산출됨"
+            : `재산출 진행: ${data.updated}건 업데이트 · 남은 row ${data.remaining ?? 0}건. 0 이 될 때까지 다시 클릭하세요.`,
+        );
+        // 재산출 후 통계 즉시 갱신
+        bumpStatsRefresh();
+      }
+    } catch (err) {
+      setMessage(`점수 재산출 오류: ${err instanceof Error ? err.message : "unknown"}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleResetResponses() {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
     if (!window.confirm(
@@ -2162,6 +2200,7 @@ ${exampleJson}
           }}
           onReset={isSuperAdmin ? handleResetData : undefined}
           onResetResponses={isSuperAdmin ? handleResetResponses : undefined}
+          onRecalcVisibility={isSuperAdmin ? handleRecalcVisibility : undefined}
         />
       );
     }

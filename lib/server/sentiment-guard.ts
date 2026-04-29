@@ -62,12 +62,21 @@ const RANKING_PHRASES = [
 ];
 
 /**
- * target brand 인근 (앞뒤 50자) 에 ranking phrase 가 있는지 검사.
- * LLM 이 isStronglyRecommended=true 로 판정해도, 추천 phrase 가 다른 brand 대상이면
- * 매직바디는 단순 mention 일 뿐이므로 false positive.
+ * target brand 가 추천 phrase 의 대상인지 검사.
+ * 두 가지 패턴을 잡음:
+ *   1) 인근 검사: target brand 위치 앞뒤 100자 내 ranking phrase 존재
+ *      → "매직바디가 가장 적합합니다" 처럼 한 문장 안에 들어있는 경우
+ *   2) 결론 영역 검사: 응답 마지막 300자 안에 target brand 와 ranking phrase 가 모두 등장
+ *      → "매직바디는 ~ [긴 설명] ~ 사용자님께 매직바디를 추천드립니다" 처럼 결론에서 재언급되는 경우
+ *
+ * 둘 중 하나라도 맞으면 LLM 의 isStronglyRecommended=true 신호 신뢰.
+ * 둘 다 false 면 다른 brand 의 추천 어조를 잘못 연결한 false positive 로 판정.
  */
 function hasRankingPhraseNearBrand(answerText: string, brandTerms: string[]): boolean {
   const lower = answerText.toLowerCase();
+
+  // 1) 인근 검사 — target brand 앞뒤 100자
+  const NEAR_WINDOW = 100;
   for (const brand of brandTerms) {
     if (!brand) continue;
     const target = brand.toLowerCase();
@@ -75,8 +84,8 @@ function hasRankingPhraseNearBrand(answerText: string, brandTerms: string[]): bo
     while (from < lower.length) {
       const idx = lower.indexOf(target, from);
       if (idx === -1) break;
-      const start = Math.max(0, idx - 50);
-      const end = Math.min(lower.length, idx + target.length + 50);
+      const start = Math.max(0, idx - NEAR_WINDOW);
+      const end = Math.min(lower.length, idx + target.length + NEAR_WINDOW);
       const window = lower.slice(start, end);
       if (RANKING_PHRASES.some((p) => window.includes(p.toLowerCase()))) {
         return true;
@@ -84,6 +93,14 @@ function hasRankingPhraseNearBrand(answerText: string, brandTerms: string[]): bo
       from = idx + target.length;
     }
   }
+
+  // 2) 결론 영역 — 마지막 300자에 target brand + ranking phrase 가 모두 있으면 추천 인정
+  const TAIL_LEN = 300;
+  const tail = lower.slice(Math.max(0, lower.length - TAIL_LEN));
+  const brandInTail = brandTerms.some((b) => b && tail.includes(b.toLowerCase()));
+  const phraseInTail = RANKING_PHRASES.some((p) => tail.includes(p.toLowerCase()));
+  if (brandInTail && phraseInTail) return true;
+
   return false;
 }
 

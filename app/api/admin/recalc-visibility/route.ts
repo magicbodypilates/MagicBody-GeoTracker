@@ -37,7 +37,7 @@ import type { Citation } from "@/components/dashboard/types";
 export const dynamic = "force-dynamic";
 
 /** 현재 점수 룰 버전. 점수 체계 / LLM provider / 프롬프트 / 가드 변경 시 증가. */
-const CURRENT_SCORE_VERSION = 7;
+const CURRENT_SCORE_VERSION = 8;
 
 /** 키워드 휴리스틱 — automation-runner detectSentiment 와 동일 (간소화) */
 function detectSentimentFallback(

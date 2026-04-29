@@ -6,9 +6,21 @@
  *   - isTopRanked: 응답이 brand 를 명시적 1위로 콕 집어 추천 (일반 검색 보너스 트리거)
  *   - isStronglyRecommended: 응답이 brand 를 강한 추천 어조로 권유 (brand 명 검색 보너스 트리거)
  *
- * 환경변수: OPENAI_API_KEY, OPENAI_API_URL, OPENAI_API_MODEL
- * 타임아웃 5초 — 실패 시 null 반환 → 호출자가 키워드 휴리스틱으로 폴백.
+ * Provider 선택:
+ *   LLM_PROVIDER=claude → Claude (Anthropic SDK, claude-haiku-4-5 권장, 한국어 추론 우수)
+ *   LLM_PROVIDER=openai (기본) → OpenAI gpt-4o-mini
+ *
+ * 환경변수:
+ *   - LLM_PROVIDER          (선택, 기본 "openai")
+ *   - ANTHROPIC_API_KEY     (provider=claude 시 필수)
+ *   - ANTHROPIC_API_MODEL   (선택, 기본 "claude-haiku-4-5-20251001")
+ *   - OPENAI_API_KEY        (provider=openai 시 필수)
+ *   - OPENAI_API_URL / OPENAI_API_MODEL (선택)
+ *
+ * 타임아웃 8초 — 실패 시 null 반환 → 호출자가 키워드 휴리스틱으로 폴백.
  */
+
+import Anthropic from "@anthropic-ai/sdk";
 
 export type LlmSentiment = "positive" | "neutral" | "negative";
 
@@ -18,17 +30,17 @@ export type LlmClassification = {
   isStronglyRecommended: boolean;
 };
 
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || "openai").toLowerCase();
 const OPENAI_API_URL = process.env.OPENAI_API_URL ?? "https://api.openai.com/v1";
 const OPENAI_MODEL = process.env.OPENAI_API_MODEL || "gpt-4o-mini";
-const TIMEOUT_MS = 5_000;
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_API_MODEL || "claude-haiku-4-5-20251001";
+const TIMEOUT_MS = 8_000;
 
 export async function classifySentiment(params: {
   answerText: string;
   brandName: string;
   brandAliases?: string[];
 }): Promise<LlmClassification | null> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
   if (!params.answerText || params.answerText.trim().length < 20) return null;
 
   const brandLabels = [params.brandName, ...(params.brandAliases ?? [])]
@@ -124,6 +136,47 @@ ${truncated}
 
 Respond with JSON: {"sentiment":"positive"|"neutral"|"negative","isTopRanked":boolean,"isStronglyRecommended":boolean}`;
 
+  // Provider 분기 — Claude 우선, 없으면 OpenAI 로 폴백
+  if (LLM_PROVIDER === "claude") {
+    return classifyWithClaude(systemPrompt, userPrompt);
+  }
+  return classifyWithOpenAI(systemPrompt, userPrompt);
+}
+
+function parseClassification(content: string): LlmClassification | null {
+  try {
+    // Claude 응답엔 가끔 ```json ... ``` 블록이 섞일 수 있어 정리
+    const cleaned = content
+      .replace(/```json\s*/i, "")
+      .replace(/```\s*$/, "")
+      .trim();
+    // 첫 번째 { ... } 블록 추출
+    const match = cleaned.match(/\{[\s\S]*?\}/);
+    const jsonStr = match ? match[0] : cleaned;
+    const parsed = JSON.parse(jsonStr) as {
+      sentiment?: unknown;
+      isTopRanked?: unknown;
+      isStronglyRecommended?: unknown;
+    };
+    const s = parsed.sentiment;
+    if (s !== "positive" && s !== "neutral" && s !== "negative") return null;
+    return {
+      sentiment: s,
+      isTopRanked: parsed.isTopRanked === true,
+      isStronglyRecommended: parsed.isStronglyRecommended === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function classifyWithOpenAI(
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<LlmClassification | null> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -148,7 +201,7 @@ Respond with JSON: {"sentiment":"positive"|"neutral"|"negative","isTopRanked":bo
     });
 
     if (!res.ok) {
-      console.warn(`[llm-sentiment] HTTP ${res.status} — 폴백`);
+      console.warn(`[llm-sentiment][openai] HTTP ${res.status} — 폴백`);
       return null;
     }
 
@@ -157,28 +210,53 @@ Respond with JSON: {"sentiment":"positive"|"neutral"|"negative","isTopRanked":bo
     };
     const content = data.choices?.[0]?.message?.content;
     if (!content) return null;
-
-    const parsed = JSON.parse(content) as {
-      sentiment?: unknown;
-      isTopRanked?: unknown;
-      isStronglyRecommended?: unknown;
-    };
-    const s = parsed.sentiment;
-    if (s !== "positive" && s !== "neutral" && s !== "negative") return null;
-
-    return {
-      sentiment: s,
-      isTopRanked: parsed.isTopRanked === true,
-      isStronglyRecommended: parsed.isStronglyRecommended === true,
-    };
+    return parseClassification(content);
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      console.warn("[llm-sentiment] 5초 타임아웃 — 폴백");
+      console.warn("[llm-sentiment][openai] 타임아웃 — 폴백");
     } else {
-      console.warn("[llm-sentiment] 실패:", err instanceof Error ? err.message : err);
+      console.warn("[llm-sentiment][openai] 실패:", err instanceof Error ? err.message : err);
     }
     return null;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function classifyWithClaude(
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<LlmClassification | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const client = new Anthropic({ apiKey, timeout: TIMEOUT_MS });
+
+  try {
+    // prompt caching: 시스템 프롬프트는 매 요청 동일 → cache_control 로 90% 비용 절감.
+    // 매직바디 200건 재산출 시 system prompt 만 한 번 캐시에 올라가고 나머지는 재사용.
+    const response = await client.messages.create({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 100,
+      temperature: 0,
+      system: [
+        {
+          type: "text",
+          text: systemPrompt,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      messages: [{ role: "user", content: userPrompt }],
+    });
+
+    const block = response.content[0];
+    if (!block || block.type !== "text") return null;
+    return parseClassification(block.text);
+  } catch (err) {
+    console.warn(
+      "[llm-sentiment][claude] 실패:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
   }
 }

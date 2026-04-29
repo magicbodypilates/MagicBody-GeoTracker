@@ -1,0 +1,126 @@
+name: Setup LLM provider (sentiment 분류기 전환)
+
+# 운영 VM 의 .env 에 LLM_PROVIDER / 모델 / 키 설정.
+# 멱등성: 기존 LLM_PROVIDER / OPENROUTER_MODEL / ANTHROPIC_* 라인 제거 후 새로 작성.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: '사용할 LLM 제공자'
+        required: true
+        type: choice
+        options:
+          - openrouter
+          - claude
+          - openai
+        default: openrouter
+      openrouter_model:
+        description: 'OpenRouter 모델 ID (provider=openrouter 시 적용, 기본 anthropic/claude-haiku-4.5)'
+        required: false
+        type: string
+        default: 'anthropic/claude-haiku-4.5'
+      openrouter_key:
+        description: 'OPENROUTER_KEY 신규 등록/갱신 (필요 없으면 비워두기)'
+        required: false
+        type: string
+        default: ''
+      anthropic_key:
+        description: 'ANTHROPIC_API_KEY (provider=claude 시 필수, 그 외는 비워두기)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Mask secrets
+        run: |
+          if [ -n "${{ inputs.openrouter_key }}" ]; then
+            echo "::add-mask::${{ inputs.openrouter_key }}"
+          fi
+          if [ -n "${{ inputs.anthropic_key }}" ]; then
+            echo "::add-mask::${{ inputs.anthropic_key }}"
+          fi
+
+      - name: SSH and update .env + restart container
+        uses: appleboy/ssh-action@master
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          OPENROUTER_MODEL_INPUT: ${{ inputs.openrouter_model }}
+          OPENROUTER_KEY_INPUT: ${{ inputs.openrouter_key }}
+          ANTHROPIC_KEY_INPUT: ${{ inputs.anthropic_key }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 5m
+          envs: PROVIDER,OPENROUTER_MODEL_INPUT,OPENROUTER_KEY_INPUT,ANTHROPIC_KEY_INPUT
+          script: |
+            set -e
+            ENV_FILE=/datadrive/apps/geo-tracker/.env
+
+            if [ ! -w "$ENV_FILE" ]; then
+              echo "ERROR: $ENV_FILE not writable"
+              ls -la "$ENV_FILE"
+              exit 1
+            fi
+
+            # 1) 기존 LLM 관련 라인 제거 (멱등 — 재실행 시 중복 추가 방지)
+            sed -i '/^LLM_PROVIDER=/d' "$ENV_FILE"
+            sed -i '/^OPENROUTER_MODEL=/d' "$ENV_FILE"
+
+            # provider=openrouter 가 아닐 땐 OPENROUTER_MODEL 라인은 제거만 (재추가 안 함)
+            if [ "$PROVIDER" = "openrouter" ]; then
+              # OPENROUTER_KEY 검증/등록
+              if [ -n "$OPENROUTER_KEY_INPUT" ]; then
+                sed -i '/^OPENROUTER_KEY=/d' "$ENV_FILE"
+                echo "OPENROUTER_KEY=$OPENROUTER_KEY_INPUT" >> "$ENV_FILE"
+                echo "OPENROUTER_KEY 신규 등록됨"
+              else
+                if ! grep -q '^OPENROUTER_KEY=' "$ENV_FILE"; then
+                  echo "ERROR: OPENROUTER_KEY 가 .env 에 없음. workflow 입력으로 키를 제공하세요."
+                  exit 1
+                fi
+                echo "OPENROUTER_KEY 기존 값 유지"
+              fi
+              echo "" >> "$ENV_FILE"
+              echo "# LLM provider — OpenRouter 통한 Claude" >> "$ENV_FILE"
+              echo "LLM_PROVIDER=openrouter" >> "$ENV_FILE"
+              echo "OPENROUTER_MODEL=$OPENROUTER_MODEL_INPUT" >> "$ENV_FILE"
+            fi
+
+            if [ "$PROVIDER" = "claude" ]; then
+              sed -i '/^ANTHROPIC_API_KEY=/d' "$ENV_FILE"
+              if [ -n "$ANTHROPIC_KEY_INPUT" ]; then
+                echo "ANTHROPIC_API_KEY=$ANTHROPIC_KEY_INPUT" >> "$ENV_FILE"
+              else
+                echo "ERROR: provider=claude 일 때 anthropic_key 입력 필수"
+                exit 1
+              fi
+              echo "" >> "$ENV_FILE"
+              echo "# LLM provider — Anthropic 직접" >> "$ENV_FILE"
+              echo "LLM_PROVIDER=claude" >> "$ENV_FILE"
+            fi
+
+            if [ "$PROVIDER" = "openai" ]; then
+              echo "" >> "$ENV_FILE"
+              echo "# LLM provider — OpenAI (기본)" >> "$ENV_FILE"
+              echo "LLM_PROVIDER=openai" >> "$ENV_FILE"
+            fi
+
+            echo "===== .env 마지막 8줄 (검증, 키 마스킹) ====="
+            tail -8 "$ENV_FILE" | sed 's/\(KEY=\).*/\1***MASKED***/'
+
+            cd /datadrive/apps/geo-tracker
+            docker compose up -d --force-recreate mbd-geo-tracker
+
+            echo "===== 컨테이너 상태 ====="
+            docker ps --filter "name=mbd-geo-tracker" --format "table {{.Names}}\t{{.Status}}"
+
+            echo "Setup complete — provider=$PROVIDER"

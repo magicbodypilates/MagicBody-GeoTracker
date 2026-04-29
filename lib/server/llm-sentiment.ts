@@ -7,13 +7,16 @@
  *   - isStronglyRecommended: 응답이 brand 를 강한 추천 어조로 권유 (brand 명 검색 보너스 트리거)
  *
  * Provider 선택:
- *   LLM_PROVIDER=claude → Claude (Anthropic SDK, claude-haiku-4-5 권장, 한국어 추론 우수)
+ *   LLM_PROVIDER=openrouter → OpenRouter 통한 Claude (OPENROUTER_KEY 재활용, prompt caching 지원)
+ *   LLM_PROVIDER=claude     → Anthropic 직접 (claude-haiku-4-5, 비용 최저)
  *   LLM_PROVIDER=openai (기본) → OpenAI gpt-4o-mini
  *
  * 환경변수:
  *   - LLM_PROVIDER          (선택, 기본 "openai")
  *   - ANTHROPIC_API_KEY     (provider=claude 시 필수)
  *   - ANTHROPIC_API_MODEL   (선택, 기본 "claude-haiku-4-5-20251001")
+ *   - OPENROUTER_KEY        (provider=openrouter 시 필수)
+ *   - OPENROUTER_MODEL      (선택, 기본 "anthropic/claude-haiku-4.5")
  *   - OPENAI_API_KEY        (provider=openai 시 필수)
  *   - OPENAI_API_URL / OPENAI_API_MODEL (선택)
  *
@@ -34,6 +37,7 @@ const LLM_PROVIDER = (process.env.LLM_PROVIDER || "openai").toLowerCase();
 const OPENAI_API_URL = process.env.OPENAI_API_URL ?? "https://api.openai.com/v1";
 const OPENAI_MODEL = process.env.OPENAI_API_MODEL || "gpt-4o-mini";
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_API_MODEL || "claude-haiku-4-5-20251001";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "anthropic/claude-haiku-4.5";
 const TIMEOUT_MS = 8_000;
 
 export async function classifySentiment(params: {
@@ -136,7 +140,10 @@ ${truncated}
 
 Respond with JSON: {"sentiment":"positive"|"neutral"|"negative","isTopRanked":boolean,"isStronglyRecommended":boolean}`;
 
-  // Provider 분기 — Claude 우선, 없으면 OpenAI 로 폴백
+  // Provider 분기
+  if (LLM_PROVIDER === "openrouter") {
+    return classifyWithOpenRouter(systemPrompt, userPrompt);
+  }
   if (LLM_PROVIDER === "claude") {
     return classifyWithClaude(systemPrompt, userPrompt);
   }
@@ -216,6 +223,104 @@ async function classifyWithOpenAI(
       console.warn("[llm-sentiment][openai] 타임아웃 — 폴백");
     } else {
       console.warn("[llm-sentiment][openai] 실패:", err instanceof Error ? err.message : err);
+    }
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * OpenRouter 통한 Claude 호출 — OpenAI 호환 /chat/completions 사용.
+ * Anthropic prompt caching: system 메시지를 content array 로 보내면서 cache_control: ephemeral 적용.
+ * 응답의 usage.cache_read_input_tokens / usage.cache_creation_input_tokens 로 캐시 동작 검증.
+ */
+async function classifyWithOpenRouter(
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<LlmClassification | null> {
+  const apiKey = process.env.OPENROUTER_KEY;
+  if (!apiKey) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        // OpenRouter 추천 헤더 — 사용량 통계/모델 라우팅에 활용
+        "HTTP-Referer": "https://cms.magicbodypilates.co.kr/geo-tracker",
+        "X-Title": "MagicBody GeoTracker",
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        temperature: 0,
+        max_tokens: 100,
+        // Anthropic prompt caching — system content array + cache_control: ephemeral.
+        // OpenRouter 가 Anthropic 으로 패스스루하면서 캐시 적용.
+        messages: [
+          {
+            role: "system",
+            content: [
+              {
+                type: "text",
+                text: systemPrompt,
+                cache_control: { type: "ephemeral" },
+              },
+            ],
+          },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(`[llm-sentiment][openrouter] HTTP ${res.status} — ${body.slice(0, 200)}`);
+      return null;
+    }
+
+    const data = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+      };
+    };
+
+    // 캐시 히트 검증 로그 — Anthropic 패스스루 필드 또는 OpenAI 호환 필드 모두 확인
+    const u = data.usage ?? {};
+    const cacheRead =
+      u.cache_read_input_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+    const cacheCreate = u.cache_creation_input_tokens ?? 0;
+    if (cacheRead > 0 || cacheCreate > 0) {
+      console.log(
+        `[llm-sentiment][openrouter] cache: read=${cacheRead} create=${cacheCreate} prompt=${u.prompt_tokens ?? "?"} comp=${u.completion_tokens ?? "?"}`,
+      );
+    } else {
+      console.log(
+        `[llm-sentiment][openrouter] no-cache: prompt=${u.prompt_tokens ?? "?"} comp=${u.completion_tokens ?? "?"}`,
+      );
+    }
+
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) return null;
+    return parseClassification(content);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      console.warn("[llm-sentiment][openrouter] 타임아웃 — 폴백");
+    } else {
+      console.warn(
+        "[llm-sentiment][openrouter] 실패:",
+        err instanceof Error ? err.message : err,
+      );
     }
     return null;
   } finally {

@@ -1,0 +1,66 @@
+name: Apply Claude LLM provider
+
+# 운영 VM 의 /datadrive/apps/geo-tracker/.env 에 LLM_PROVIDER=claude + ANTHROPIC_API_KEY 추가 후
+# 앱 컨테이너 재시작. ANTHROPIC_API_KEY 는 GitHub Secrets 에 미리 등록되어 있어야 함.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '운영 .env 에 Claude provider 적용 + 컨테이너 재시작. "yes" 입력 필수.'
+        required: true
+        default: 'no'
+
+jobs:
+  apply:
+    if: ${{ inputs.confirm == 'yes' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH and update .env + restart container
+        uses: appleboy/ssh-action@master
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_MODEL: ${{ vars.ANTHROPIC_API_MODEL || 'claude-haiku-4-5-20251001' }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 5m
+          envs: ANTHROPIC_API_KEY,ANTHROPIC_API_MODEL
+          script: |
+            set -e
+            ENV_FILE=/datadrive/apps/geo-tracker/.env
+
+            if [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "ERROR: ANTHROPIC_API_KEY GitHub Secret 이 비어있음. 등록 후 다시 실행."
+              exit 1
+            fi
+
+            # 백업
+            cp "$ENV_FILE" "$ENV_FILE.bak.$(date +%s)"
+
+            # 기존 LLM 관련 줄 제거 (이전 값 잔존 방지)
+            sed -i '/^LLM_PROVIDER=/d' "$ENV_FILE"
+            sed -i '/^ANTHROPIC_API_KEY=/d' "$ENV_FILE"
+            sed -i '/^ANTHROPIC_API_MODEL=/d' "$ENV_FILE"
+
+            # 새 줄 추가
+            {
+              echo ""
+              echo "# Claude sentiment classification (set $(date))"
+              echo "LLM_PROVIDER=claude"
+              echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+              echo "ANTHROPIC_API_MODEL=$ANTHROPIC_API_MODEL"
+            } >> "$ENV_FILE"
+
+            echo "[apply-claude] .env updated. 마지막 4줄:"
+            tail -n 4 "$ENV_FILE" | sed 's/\(ANTHROPIC_API_KEY=\).*/\1***hidden***/'
+
+            # 컨테이너 재시작 — env 변경 반영
+            cd /datadrive/apps/geo-tracker
+            docker compose up -d --force-recreate mbd-geo-tracker
+            echo "[apply-claude] 컨테이너 재시작 완료"

@@ -62,9 +62,10 @@ export async function POST(req: NextRequest) {
       batchSize?: number;
       dryRun?: boolean;
     };
-    // batchSize 기본 20 — LLM 50회 순차 호출이 NPM proxy timeout(60s) 을 초과해 응답 잘림 → 작게.
-    // 병렬 처리(5 동시)와 결합하면 20건 ≈ 4 chunk × 5s = 20s 정도로 안전.
-    const batchSize = Math.min(Math.max(body.batchSize ?? 20, 1), 100);
+    // batchSize 기본 60 — Claude Haiku 4.5 + 병렬 10 동시 호출.
+    // 60건 ≈ 6 chunk × 3~5s = 18~30s, NPM proxy timeout(60s) 안전.
+    // 매직바디 200건 → 약 4번 클릭으로 완료.
+    const batchSize = Math.min(Math.max(body.batchSize ?? 60, 1), 200);
     const dryRun = body.dryRun === true;
 
   // 1) 처리 대상 runs (score_version < CURRENT_SCORE_VERSION) — batch 단위
@@ -201,8 +202,8 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // chunk 단위 병렬 처리 — LLM 5개 동시 호출. 20건 ≈ 4 chunk × 5s ≈ 20s.
-  const CONCURRENCY = 5;
+  // chunk 단위 병렬 처리 — LLM 10개 동시 호출. 60건 ≈ 6 chunk × 3~5s ≈ 18~30s.
+  const CONCURRENCY = 10;
   let updated = 0;
   let errors = 0;
   const samples: Sample[] = [];

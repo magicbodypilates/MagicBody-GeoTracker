@@ -2077,47 +2077,75 @@ ${exampleJson}
   }
 
   /** 응답/분석 이력만 초기화 (설정·프롬프트·경쟁사는 유지) */
-  /** admin 전용 — 점수 체계 변경 후 기존 runs 점수 재산출 (20건 batch, 5 동시) */
+  /**
+   * admin 전용 — 점수 체계 변경 후 기존 runs 점수 재산출.
+   * 한 번 클릭으로 끝까지 자동 진행: 60건씩 batch + 클라이언트 반복 호출.
+   * 각 호출은 NPM proxy timeout 안전 범위(30초)이고, 응답에 remaining 카운트 보고 0 될 때까지 반복.
+   */
   async function handleRecalcVisibility() {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
     setBusy(true);
-    setMessage("점수 재산출 시작 — 20건 LLM 병렬 호출 중...");
+    let totalProcessed = 0;
+    let iteration = 0;
+    const MAX_ITERATIONS = 100; // 안전장치: 무한루프 방지 (60×100 = 6000건까지 처리 가능)
     try {
-      const res = await fetch(BP + "/api/admin/recalc-visibility", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ batchSize: 20 }),
-      });
-      // body 가 비어있을 수도 있음 (proxy timeout 등) → text() 후 안전하게 JSON 파싱
-      const rawText = await res.text();
-      let data: {
-        ok?: boolean;
-        processed?: number;
-        updated?: number;
-        remaining?: number;
-        message?: string;
-        error?: string;
-      } = {};
-      try {
-        if (rawText) data = JSON.parse(rawText);
-      } catch {
-        // 파싱 실패 — 빈 응답 또는 HTML
-      }
-      if (!res.ok) {
-        setMessage(`점수 재산출 실패: ${data.error ?? res.status}${rawText ? ` (응답 ${rawText.slice(0, 100)})` : ""}`);
-      } else if (!data.ok) {
-        setMessage("점수 재산출 응답이 비어있음 — proxy timeout 가능. batchSize 더 줄여 재시도하세요.");
-      } else {
+      while (iteration < MAX_ITERATIONS) {
+        iteration += 1;
         setMessage(
-          data.processed === 0
-            ? "재산출 완료 — 모든 응답이 최신 룰로 산출됨"
-            : `재산출 진행: ${data.updated}건 업데이트 · 남은 row ${data.remaining ?? 0}건. 0 이 될 때까지 다시 클릭하세요.`,
+          `점수 재산출 진행 중... (${iteration}회차, 누적 ${totalProcessed}건 처리)`,
         );
-        bumpStatsRefresh();
+        const res = await fetch(BP + "/api/admin/recalc-visibility", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ batchSize: 60 }),
+        });
+        const rawText = await res.text();
+        let data: {
+          ok?: boolean;
+          processed?: number;
+          updated?: number;
+          remaining?: number;
+          message?: string;
+          error?: string;
+        } = {};
+        try {
+          if (rawText) data = JSON.parse(rawText);
+        } catch {
+          // 빈 응답 또는 HTML
+        }
+        if (!res.ok) {
+          setMessage(
+            `점수 재산출 실패 (${iteration}회차): ${data.error ?? res.status}${rawText ? ` — ${rawText.slice(0, 150)}` : ""}. 누적 처리: ${totalProcessed}건. 다시 클릭하면 이어서 처리됩니다.`,
+          );
+          return;
+        }
+        if (!data.ok) {
+          setMessage(
+            `점수 재산출 응답 비어있음 (${iteration}회차) — proxy timeout 가능. 누적 처리: ${totalProcessed}건. 다시 클릭하면 이어서 처리됩니다.`,
+          );
+          return;
+        }
+        totalProcessed += data.updated ?? 0;
+        // 처리 대상 없으면 종료
+        if ((data.processed ?? 0) === 0) {
+          if (totalProcessed === 0) {
+            setMessage("재산출 완료 — 모든 응답이 이미 최신 룰로 산출됨");
+          } else {
+            setMessage(`재산출 완료 — 총 ${totalProcessed}건 새 룰로 재산출됨`);
+          }
+          bumpStatsRefresh();
+          return;
+        }
       }
+      setMessage(
+        `재산출 ${MAX_ITERATIONS}회 도달 후 종료 (누적 ${totalProcessed}건). 데이터가 매우 많은 경우 다시 클릭해서 이어서 처리하세요.`,
+      );
+      bumpStatsRefresh();
     } catch (err) {
-      setMessage(`점수 재산출 오류: ${err instanceof Error ? err.message : "unknown"}`);
+      setMessage(
+        `점수 재산출 오류: ${err instanceof Error ? err.message : "unknown"}. 누적 처리: ${totalProcessed}건. 다시 클릭하면 이어서 처리됩니다.`,
+      );
     } finally {
       setBusy(false);
     }

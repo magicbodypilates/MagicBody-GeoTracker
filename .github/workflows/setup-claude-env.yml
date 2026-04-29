@@ -1,0 +1,63 @@
+name: Setup Claude env (one-time)
+
+# 운영 VM 의 .env 에 Claude API 키 추가 + 컨테이너 재시작.
+# 멱등성: 기존 LLM_PROVIDER / ANTHROPIC_API_KEY / ANTHROPIC_API_MODEL 라인은 제거 후 새로 작성.
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_key:
+        description: 'Claude API Key (sk-ant-... 형태). 입력값은 즉시 GITHUB_OUTPUT 에서 마스킹됨.'
+        required: true
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Mask API key
+        run: |
+          echo "::add-mask::${{ inputs.api_key }}"
+
+      - name: SSH and update .env + restart container
+        uses: appleboy/ssh-action@master
+        env:
+          API_KEY: ${{ inputs.api_key }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 5m
+          envs: API_KEY
+          script: |
+            set -e
+            ENV_FILE=/datadrive/apps/geo-tracker/.env
+
+            # 1) 기존 LLM 관련 라인 제거 (멱등 — 재실행 시 중복 추가 방지)
+            sudo sed -i '/^LLM_PROVIDER=/d' "$ENV_FILE"
+            sudo sed -i '/^ANTHROPIC_API_KEY=/d' "$ENV_FILE"
+            sudo sed -i '/^ANTHROPIC_API_MODEL=/d' "$ENV_FILE"
+
+            # 2) 새 라인 추가
+            echo "" | sudo tee -a "$ENV_FILE" >/dev/null
+            echo "# LLM provider — Claude Haiku 4.5 (한국어 sentiment 정확도 ↑)" | sudo tee -a "$ENV_FILE" >/dev/null
+            echo "LLM_PROVIDER=claude" | sudo tee -a "$ENV_FILE" >/dev/null
+            echo "ANTHROPIC_API_KEY=$API_KEY" | sudo tee -a "$ENV_FILE" >/dev/null
+            echo "ANTHROPIC_API_MODEL=claude-haiku-4-5-20251001" | sudo tee -a "$ENV_FILE" >/dev/null
+
+            # 3) 추가된 라인 검증 (key 자체는 마스킹 처리됨)
+            echo "===== .env 마지막 5줄 (검증) ====="
+            sudo tail -5 "$ENV_FILE" | sed 's/ANTHROPIC_API_KEY=.*/ANTHROPIC_API_KEY=***MASKED***/'
+
+            # 4) 컨테이너 재시작 (새 env 반영)
+            cd /datadrive/apps/geo-tracker
+            docker compose up -d --force-recreate mbd-geo-tracker
+
+            echo "===== 컨테이너 상태 ====="
+            docker ps --filter "name=mbd-geo-tracker" --format "table {{.Names}}\t{{.Status}}"
+
+            echo "Setup complete."

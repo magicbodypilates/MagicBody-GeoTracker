@@ -37,21 +37,30 @@ jobs:
             set -e
             ENV_FILE=/datadrive/apps/geo-tracker/.env
 
+            # 파일 쓰기 권한 확인 (보통 deploy user 가 직접 쓸 수 있도록 setup 됨)
+            if [ ! -w "$ENV_FILE" ]; then
+              echo "ERROR: $ENV_FILE not writable by current user. 파일 권한을 deploy user 로 chown 하세요."
+              ls -la "$ENV_FILE"
+              exit 1
+            fi
+
             # 1) 기존 LLM 관련 라인 제거 (멱등 — 재실행 시 중복 추가 방지)
-            sudo sed -i '/^LLM_PROVIDER=/d' "$ENV_FILE"
-            sudo sed -i '/^ANTHROPIC_API_KEY=/d' "$ENV_FILE"
-            sudo sed -i '/^ANTHROPIC_API_MODEL=/d' "$ENV_FILE"
+            sed -i '/^LLM_PROVIDER=/d' "$ENV_FILE"
+            sed -i '/^ANTHROPIC_API_KEY=/d' "$ENV_FILE"
+            sed -i '/^ANTHROPIC_API_MODEL=/d' "$ENV_FILE"
 
             # 2) 새 라인 추가
-            echo "" | sudo tee -a "$ENV_FILE" >/dev/null
-            echo "# LLM provider — Claude Haiku 4.5 (한국어 sentiment 정확도 ↑)" | sudo tee -a "$ENV_FILE" >/dev/null
-            echo "LLM_PROVIDER=claude" | sudo tee -a "$ENV_FILE" >/dev/null
-            echo "ANTHROPIC_API_KEY=$API_KEY" | sudo tee -a "$ENV_FILE" >/dev/null
-            echo "ANTHROPIC_API_MODEL=claude-haiku-4-5-20251001" | sudo tee -a "$ENV_FILE" >/dev/null
+            {
+              echo ""
+              echo "# LLM provider — Claude Haiku 4.5 (한국어 sentiment 정확도 ↑)"
+              echo "LLM_PROVIDER=claude"
+              echo "ANTHROPIC_API_KEY=$API_KEY"
+              echo "ANTHROPIC_API_MODEL=claude-haiku-4-5-20251001"
+            } >> "$ENV_FILE"
 
             # 3) 추가된 라인 검증 (key 자체는 마스킹 처리됨)
             echo "===== .env 마지막 5줄 (검증) ====="
-            sudo tail -5 "$ENV_FILE" | sed 's/ANTHROPIC_API_KEY=.*/ANTHROPIC_API_KEY=***MASKED***/'
+            tail -5 "$ENV_FILE" | sed 's/ANTHROPIC_API_KEY=.*/ANTHROPIC_API_KEY=***MASKED***/'
 
             # 4) 컨테이너 재시작 (새 env 반영)
             cd /datadrive/apps/geo-tracker

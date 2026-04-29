@@ -278,7 +278,7 @@ async function executeSchedule(
             citations: citations as never,
             visibilityScore,
             // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
-            scoreVersion: 6,
+            scoreVersion: 7,
             sentiment,
             brandMentions,
             competitorMentions,

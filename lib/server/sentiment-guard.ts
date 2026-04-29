@@ -62,6 +62,32 @@ const RANKING_PHRASES = [
 ];
 
 /**
+ * target brand 인근 (앞뒤 50자) 에 ranking phrase 가 있는지 검사.
+ * LLM 이 isStronglyRecommended=true 로 판정해도, 추천 phrase 가 다른 brand 대상이면
+ * 매직바디는 단순 mention 일 뿐이므로 false positive.
+ */
+function hasRankingPhraseNearBrand(answerText: string, brandTerms: string[]): boolean {
+  const lower = answerText.toLowerCase();
+  for (const brand of brandTerms) {
+    if (!brand) continue;
+    const target = brand.toLowerCase();
+    let from = 0;
+    while (from < lower.length) {
+      const idx = lower.indexOf(target, from);
+      if (idx === -1) break;
+      const start = Math.max(0, idx - 50);
+      const end = Math.min(lower.length, idx + target.length + 50);
+      const window = lower.slice(start, end);
+      if (RANKING_PHRASES.some((p) => window.includes(p.toLowerCase()))) {
+        return true;
+      }
+      from = idx + target.length;
+    }
+  }
+  return false;
+}
+
+/**
  * 후처리 가드 적용 — false positive 의심 시 neutral 로 강제 변환.
  * @returns 보정된 sentiment
  */
@@ -76,20 +102,30 @@ export function guardSentiment(
 ): LlmSentiment {
   const { sentiment, isTopRanked, isStronglyRecommended } = llmResult;
 
-  // 강한 긍정 신호 (1위 명시 OR 적극 추천) 가 있으면 LLM 결과 그대로 신뢰
   if (sentiment !== "positive") return sentiment;
-  if (isTopRanked || isStronglyRecommended) return sentiment;
 
-  // "약한 긍정" 으로 잡힌 케이스만 추가 검증
-  const lower = answerText.toLowerCase();
   const brandCount = countDistinctBrands(answerText, brandTerms);
-  const hasRankingPhrase = RANKING_PHRASES.some((p) => lower.includes(p.toLowerCase()));
+  const isComparisonList = brandCount >= 3;
 
-  // 비교 나열 응답(3+ brand)인데 ranking phrase 없으면 neutral 로 강제
-  if (brandCount >= 3 && !hasRankingPhrase) {
+  // 비교 나열(3+ brand) 응답에서는 LLM 의 isStronglyRecommended 신호도 의심.
+  // target brand 인근에 실제 ranking phrase 가 있어야 신뢰.
+  if (isComparisonList && isStronglyRecommended && !isTopRanked) {
+    if (!hasRankingPhraseNearBrand(answerText, brandTerms)) {
+      // LLM 이 다른 brand 의 추천 어조를 target brand 로 잘못 연결한 케이스
+      return "neutral";
+    }
+  }
+
+  // isTopRanked 는 LLM 의 1위 명시 판정 — 신뢰
+  if (isTopRanked) return sentiment;
+  if (isStronglyRecommended) return sentiment;
+
+  // "약한 긍정" — 비교 나열인데 ranking phrase 자체가 본문에 없으면 neutral
+  const lower = answerText.toLowerCase();
+  const hasRankingPhrase = RANKING_PHRASES.some((p) => lower.includes(p.toLowerCase()));
+  if (isComparisonList && !hasRankingPhrase) {
     return "neutral";
   }
 
-  // 그 외 케이스 (단독 brand 응답이거나 ranking phrase 있음) 는 LLM 결과 신뢰
   return "positive";
 }

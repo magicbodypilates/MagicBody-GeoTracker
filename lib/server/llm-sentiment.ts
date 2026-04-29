@@ -123,10 +123,22 @@ false if:
   - The answer is about a single brand (no comparison)
 
 === isStronglyRecommended (boolean) ===
-true if the answer actively recommends/endorses the brand with strong recommendation
-language, urging the reader to consider it. Independent of comparison context.
-  - 한국어 예: "강력 추천", "꼭 추천", "적극 추천", "권유합니다", "가장 좋은 선택"
-  - English 예: "highly recommend", "strongly recommend", "definitely worth", "absolute best"
+true ONLY if the recommendation phrase is DIRECTLY about the TARGET brand.
+The recommendation must be syntactically attached to the target brand name.
+
+Verify both conditions:
+  (a) Strong recommendation language exists near the target brand:
+      한국어: "강력 추천", "꼭 추천", "적극 추천", "권유합니다", "가장 좋은 선택"
+      English: "highly recommend", "strongly recommend", "definitely worth", "absolute best"
+  (b) The phrase's grammatical SUBJECT/OBJECT is the target brand
+      (not a different brand, not the question, not the user's situation in general)
+
+CRITICAL false positive examples to AVOID:
+  - "스탓이나 폴스타를 추천합니다" — recommends STOTT/Polestar, NOT the target brand → false
+  - "대표 기관: 모던, 케어, 매직바디 등" — listing only, no recommendation → false
+  - "응답 전체가 추천 어조" but target brand only appears as one of many examples → false
+
+Only mark true when target brand is the explicit object of recommendation.
 A mild positive description ("우수한 협회", "좋은 옵션") alone is NOT strong recommendation.
 
 If both isTopRanked and isStronglyRecommended apply, output both as true.`;

@@ -1,0 +1,71 @@
+name: Check LLM cache stats (진단)
+
+# 운영 컨테이너 로그에서 [llm-sentiment] 캐시 통계를 집계.
+# 실행 후 Actions 로그에 read/create 토큰 합계가 출력됨.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tail_lines:
+        description: '읽을 로그 라인 수 (기본 1000)'
+        required: false
+        type: string
+        default: '1000'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH and grep llm-sentiment logs
+        uses: appleboy/ssh-action@master
+        env:
+          TAIL_LINES: ${{ inputs.tail_lines }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 2m
+          envs: TAIL_LINES
+          script: |
+            set -e
+            echo "===== llm-sentiment 최근 로그 (tail $TAIL_LINES) ====="
+            docker logs --tail "$TAIL_LINES" mbd-geo-tracker 2>&1 | grep llm-sentiment | tail -30 || echo "[로그 없음]"
+
+            echo ""
+            echo "===== 캐시 동작 집계 ====="
+            CACHE_LINES=$(docker logs --tail "$TAIL_LINES" mbd-geo-tracker 2>&1 | grep "llm-sentiment.*cache:" || true)
+            NOCACHE_LINES=$(docker logs --tail "$TAIL_LINES" mbd-geo-tracker 2>&1 | grep "llm-sentiment.*no-cache:" || true)
+
+            CACHE_COUNT=$(echo "$CACHE_LINES" | grep -c . || echo 0)
+            NOCACHE_COUNT=$(echo "$NOCACHE_LINES" | grep -c . || echo 0)
+
+            echo "캐시 동작 호출: $CACHE_COUNT 건"
+            echo "캐시 미동작 호출: $NOCACHE_COUNT 건"
+
+            if [ -n "$CACHE_LINES" ]; then
+              echo ""
+              echo "===== 캐시 read/create 토큰 합계 (Anthropic 패스스루 필드 기준) ====="
+              echo "$CACHE_LINES" | awk '
+                {
+                  for (i=1; i<=NF; i++) {
+                    if ($i ~ /^read=/) { split($i, a, "="); read += a[2] }
+                    if ($i ~ /^create=/) { split($i, a, "="); create += a[2] }
+                    if ($i ~ /^prompt=/) { split($i, a, "="); prompt += a[2] }
+                    if ($i ~ /^comp=/) { split($i, a, "="); comp += a[2] }
+                  }
+                }
+                END {
+                  printf "캐시 read 토큰 누적:   %d\n", read
+                  printf "캐시 create 토큰 누적: %d\n", create
+                  printf "전체 prompt 토큰:      %d\n", prompt
+                  printf "전체 completion 토큰:  %d\n", comp
+                  if (read > 0 && prompt > 0) {
+                    printf "캐시 read / prompt 비율: %.1f%% (높을수록 절감 효과 큼)\n", (read*100/prompt)
+                  }
+                }
+              '
+            fi

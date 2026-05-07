@@ -156,7 +156,7 @@ async function triggerSnapshot(
     {
       url: platform.targetUrl,
       prompt: keyword,
-      country: "US",
+      country: "KR",
     },
   ];
 

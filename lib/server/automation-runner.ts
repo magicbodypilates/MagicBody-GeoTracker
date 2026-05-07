@@ -196,7 +196,7 @@ async function executeSchedule(
         const result = await runAiScraper({
           provider: provider as "chatgpt" | "perplexity" | "copilot" | "gemini" | "google_ai" | "grok",
           prompt: prompt.text,
-          country: sched.geolocation ?? undefined,
+          country: sched.geolocation ?? "kr",
         });
 
         const executionDurationMs = Date.now() - started;

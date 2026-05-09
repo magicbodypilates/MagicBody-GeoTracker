@@ -70,15 +70,24 @@ function buildInputRecord(
   const url = providerBaseUrl[provider];
   const countryValue = country ?? "";
 
+  // ChatGPT 데이터셋은 country 파라미터를 지원하지 않음 — 비어 있지 않은 값을 보내면
+  // Bright Data 가 "country is not available for this scraper" 로 400 거부.
+  // Perplexity / Google AI / Copilot 는 ISO 3166-1 alpha-2 대문자만 허용 (KR ✓, kr ✗).
   switch (provider) {
     case "chatgpt":
-      return { url, prompt, country: countryValue, web_search: false, additional_prompt: "" };
-    case "perplexity":
-      return { url, prompt, country: countryValue, index: 1 };
+      return { url, prompt, web_search: false, additional_prompt: "" };
+    case "perplexity": {
+      const rec: Record<string, unknown> = { url, prompt, index: 1 };
+      if (countryValue) rec.country = countryValue;
+      return rec;
+    }
     case "gemini":
       return { url, prompt, index: 1 };
-    case "google_ai":
-      return { url, prompt, country: countryValue };
+    case "google_ai": {
+      const rec: Record<string, unknown> = { url, prompt };
+      if (countryValue) rec.country = countryValue;
+      return rec;
+    }
     case "copilot":
     case "grok":
     default: {

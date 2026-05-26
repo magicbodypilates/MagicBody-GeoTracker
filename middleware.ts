@@ -93,6 +93,18 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // 3-b) /api/admin/** — 최고관리자 전용 1차 게이트.
+  //   기존 /api/admin/* 라우트(runs-stats·ensure-schema·recalc-visibility 는 route 단에서
+  //   requireAdmin 보유 / import 는 가드 부재) 전부를 admin 쿠키로 우선 차단.
+  //   import 는 호출 클라이언트가 repo 에 없어 실사용 회귀 없음 + 가드 부재 보안갭을 닫음.
+  //   결제 통계 신규 라우트(/api/admin/payment-stats)도 이 분기로 보호됨.
+  //   반드시 아래 /api/** (user OR admin) 분기보다 먼저 평가되어야 admin-only 로 좁혀진다.
+  if (pathname.startsWith("/api/admin/")) {
+    const adminOk = await verifyCookie(adminCookie, "admin");
+    if (adminOk) return NextResponse.next();
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
   // 4) /api/** — 일반/최고관리자 둘 다 허용
   if (pathname.startsWith("/api/")) {
     const userOk = await verifyCookie(userCookie, "user");

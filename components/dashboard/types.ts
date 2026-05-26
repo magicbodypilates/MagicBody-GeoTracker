@@ -216,6 +216,7 @@ export type AppState = {
 
 export const tabs = [
   "Home",
+  "Payment Stats",
   "Prompt Hub",
   "Responses",
   "Visibility Analytics",
@@ -264,6 +265,7 @@ export type TabKey = (typeof tabs)[number];
  * 숨김 사유: 미완성 / 베타 / 개발자 전용 영역. 추후 정식 기능으로 정리되면 이 배열에서 제거.
  */
 export const REGULAR_ADMIN_HIDDEN_TABS: readonly TabKey[] = [
+  "Payment Stats",
   "Citation Opportunities",
   "SRO Analysis",
   "NAVER AI",

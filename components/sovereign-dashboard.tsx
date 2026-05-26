@@ -30,6 +30,7 @@ import { ReputationSourcesTab } from "@/components/dashboard/tabs/reputation-sou
 import { VisibilityAnalyticsTab } from "@/components/dashboard/tabs/visibility-analytics-tab";
 import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab";
 import { HomeServerTab } from "@/components/dashboard/tabs/home-server-tab";
+import { PaymentStatsTab } from "@/components/dashboard/tabs/payment-stats-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-tab";
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
@@ -80,6 +81,12 @@ const tabIcons: Record<TabKey, ReactNode> = {
   Home: (
     <Icon>
       <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2h-5v-7h-4v7H5a2 2 0 0 1-2-2z" />
+    </Icon>
+  ),
+  "Payment Stats": (
+    <Icon>
+      <line x1="12" y1="1" x2="12" y2="23" />
+      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
     </Icon>
   ),
   "Project Settings": (
@@ -243,6 +250,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     tooltip: "핵심 지표와 모델별 가시성을 한눈에 봅니다.",
     details:
       "공통 통계 박스와 모델별 브랜드 언급/가시성 추이, AI 유입 현황을 통합 요약합니다.",
+  },
+  "Payment Stats": {
+    title: "결제 통계",
+    tooltip: "클래스타입별·강의별 매출(정가)과 판매 건수를 기간별로 봅니다.",
+    details:
+      "CMS 결제 데이터를 클래스타입별 시계열과 강의별 순위로 분석합니다. 그래프·테이블 금액은 정가(할인 전, GMV) 기준이며, 별도 KPI 로 실매출(할인 후)·총 할인액을 제공합니다. 취소(환불)건은 제외됩니다. 최고관리자 전용.",
   },
   "Project Settings": {
     title: "프로젝트 설정",
@@ -2221,6 +2234,10 @@ ${exampleJson}
           refreshNonce={statsRefreshNonce}
         />
       );
+    }
+
+    if (activeTab === "Payment Stats") {
+      return <PaymentStatsTab />;
     }
 
     if (activeTab === "Project Settings") {

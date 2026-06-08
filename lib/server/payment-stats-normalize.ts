@@ -4,9 +4,9 @@
  * .NET PaymentController 의 신규 통계 응답(ReturnModels)을 GeoTracker 프론트가 쓰는
  * 안정적 JSON 형태로 변환한다. 모든 함수는 순수(I/O·시간·전역 의존 없음) — vitest 대상(H5).
  *
- * 매출 정의(확정 S1): 모든 금액 = 실매출(쿠폰·포인트 차감 후).
- *   타입별·강의별·건별 = 주문 net 안분 라인 net. 요약 netRevenue = SUM(주문 net).
- *   gmv = SUM(originalamount)는 참고용 정가(실매출 계산 미사용).
+ * 매출 정의(확정 S1 + 2026-06-08 정정): 모든 금액 = 실매출(= 실결제 Amount, 쿠폰·포인트·추가할인 차감 후).
+ *   타입별·강의별·건별 = 주문 실수령(pl.Amount) 안분 라인 net. 요약 netRevenue = SUM(pl.Amount).
+ *   gmv = SUM(originalamount)는 참고용 정가(실매출 계산 미사용). totalDiscount = gmv − netRevenue.
  * 계획: ~/.claude/state/plans/geotracker-payment-stats-S1-v2.md
  *
  * 핵심 규칙:
@@ -134,7 +134,7 @@ export type ByTransactionsNormalized = {
   rows: TransactionRow[];
 };
 
-const METRIC_LABELS = { amount: "실매출(쿠폰·포인트 차감)", salesCount: "판매 건수" } as const;
+const METRIC_LABELS = { amount: "실매출(쿠폰·포인트·할인 차감)", salesCount: "판매 건수" } as const;
 
 function safeNum(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);

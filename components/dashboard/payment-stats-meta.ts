@@ -7,9 +7,9 @@
 
 export type MetricKey = "amount" | "salesCount";
 
-/** 지표 토글 라벨. amount 는 실매출(쿠폰·포인트 차감 후) 임을 UI 에서 명시. */
+/** 지표 토글 라벨. amount 는 실매출(쿠폰·포인트·추가할인 차감 후, = 실결제 Amount) 임을 UI 에서 명시. */
 export const METRIC_META: Record<MetricKey, { label: string; unit: string }> = {
-  amount: { label: "실매출(쿠폰·포인트 차감)", unit: "원" },
+  amount: { label: "실매출(쿠폰·포인트·할인 차감)", unit: "원" },
   salesCount: { label: "판매 건수", unit: "건" },
 };
 

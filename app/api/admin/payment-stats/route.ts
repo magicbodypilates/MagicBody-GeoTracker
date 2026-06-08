@@ -10,8 +10,8 @@
  *   view=byTransactions &start=YYYY-MM-DD&end=YYYY-MM-DD&contType=(빈값=전체|...)&limit=1~2000(기본 500)
  *   view=summary        &start=YYYY-MM-DD&end=YYYY-MM-DD
  *
- * 매출 정의(확정 S1): 모든 금액 = 실매출(쿠폰·포인트 차감 후). 주문 net 안분 라인 net.
- *   gmv = SUM(originalamount)는 참고용 정가(실매출 계산 미사용).
+ * 매출 정의(확정 S1 + 2026-06-08 정정): 모든 금액 = 실매출(= 실결제 Amount, 쿠폰·포인트·추가할인 차감 후). 주문 실수령(pl.Amount) 안분 라인 net.
+ *   gmv = SUM(originalamount)는 참고용 정가(실매출 계산 미사용). totalDiscount = gmv − netRevenue.
  *   계획: ~/.claude/state/plans/geotracker-payment-stats-S1-v2.md
  *
  * 실패(H4): zod 실패→400 invalid_input / config→500 / timeout→504 upstream_timeout /

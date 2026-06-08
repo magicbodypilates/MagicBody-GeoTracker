@@ -6,7 +6,7 @@
  *
  * 핵심 불변식 검증:
  *  - byType: zero-fill(빈 버킷 0), all 시리즈 재합산 금지(백엔드값 그대로), 표준 contType 항상 노출,
- *            metricLabels.amount = "실매출(쿠폰·포인트 차감)" (S1 라벨 정정 BLOCKER 가드).
+ *            metricLabels.amount = "실매출(쿠폰·포인트·할인 차감)" (S1 라벨 정정 BLOCKER 가드).
  *  - byContents: 실매출 내림차순, title null/빈값 → "(삭제됨 #id)", contType 빈값 → unknown.
  *  - byTransactions: items 봉투 파싱, buyerName 빈값 → "(비회원/미상)", truncated 플래그, 음수 net → 0.
  *  - summary: 누락 필드 0 안전.
@@ -89,7 +89,7 @@ describe("normalizeByType", () => {
     ];
     const out = normalizeByType(rows, { granularity: "month", start: "2025-01-01", end: "2025-03-31" });
     // S1 라벨 정정 가드(BLOCKER): amount 는 실매출 표기여야 함(정가/GMV/할인 전 금지).
-    expect(out.metricLabels.amount).toBe("실매출(쿠폰·포인트 차감)");
+    expect(out.metricLabels.amount).toBe("실매출(쿠폰·포인트·할인 차감)");
     expect(out.metricLabels.amount).not.toMatch(/정가|GMV|할인 전/);
     // 축: 2025-01, 2025-02(빈), 2025-03
     expect(out.buckets).toEqual(["2025-01", "2025-02", "2025-03"]);
@@ -276,17 +276,21 @@ describe("normalizeByTransactions", () => {
 
 /* ── normalizeSummary ────────────────────────────────────────────────────── */
 describe("normalizeSummary", () => {
-  it("실 검증값(전 기간) 그대로 통과", () => {
+  it("백엔드 KPI 그대로 통과(passthrough)", () => {
+    // normalizeSummary 는 .NET 산출 KPI 를 그대로 매핑(passthrough)한다.
+    // 정정된 정의(netRevenue=SUM(pl.Amount), totalDiscount=gmv−netRevenue)와 일관된 예시값 사용.
     const out = normalizeSummary(
-      { netRevenue: 260118540, gmv: 324905300, totalDiscount: 44053800, salesCount: 1617 },
+      { netRevenue: 269256540, gmv: 336823300, totalDiscount: 67566760, salesCount: 1651 },
       { start: "2023-01-01", end: "2026-12-31" },
     );
     expect(out).toMatchObject({
-      netRevenue: 260118540,
-      gmv: 324905300,
-      totalDiscount: 44053800,
-      salesCount: 1617,
+      netRevenue: 269256540,
+      gmv: 336823300,
+      totalDiscount: 67566760,
+      salesCount: 1651,
     });
+    // 등식 정합(정정 핵심): gmv − totalDiscount === netRevenue.
+    expect(out.gmv - out.totalDiscount).toBe(out.netRevenue);
   });
   it("null/누락 입력 → 0 안전", () => {
     const out = normalizeSummary(null, { start: "2025-01-01", end: "2025-12-31" });

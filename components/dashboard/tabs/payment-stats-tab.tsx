@@ -6,7 +6,7 @@
  *   ② 강의별: 상위 N 가로 BarChart + 전체 정렬 테이블 + 타입 필터
  *   ③ 건별: 라인별 거래 테이블(날짜·강의명·구매자 이름·실결제금액·결제수단·주문ID)
  *
- * 매출 정의(확정 S1): 모든 금액 = 실매출(쿠폰·포인트 차감 후). 주문 net 안분 라인 net.
+ * 매출 정의(확정 S1 + 2026-06-08 정정): 모든 금액 = 실매출(= 실결제 Amount, 쿠폰·포인트·추가할인 차감 후). 주문 실수령(pl.Amount) 안분 라인 net.
  *   gmv 는 참고용 정가(실매출 계산 미사용). 취소(환불) 건·패키지 자식 라인 제외.
  *   계획: ~/.claude/state/plans/geotracker-payment-stats-S1-v2.md
  *
@@ -418,7 +418,7 @@ export function PaymentStatsTab() {
 
       {/* 실매출 정의 안내 — 항상 노출(오해 방지) */}
       <p className="rounded-md border border-th-accent/30 bg-th-accent-soft px-3 py-2 text-[11px] text-th-text-secondary">
-        모든 금액은 <strong className="text-th-text">실매출(쿠폰·포인트 차감 후 실제 받은 금액)</strong> 기준입니다.
+        모든 금액은 <strong className="text-th-text">실매출(쿠폰·포인트·추가 할인 차감 후 실제 결제·입금된 금액)</strong> 기준입니다.
         취소(환불)된 건은 제외됩니다. KPI 의 <strong className="text-th-text">정가 합(GMV)</strong> 은 참고용이며 실매출 계산에는 사용하지 않습니다.
       </p>
 
@@ -428,8 +428,8 @@ export function PaymentStatsTab() {
           {/* 요약 KPI (주문 레벨 전체 기간 합) */}
           {summary && (
             <div className="grid gap-3 sm:grid-cols-4">
-              <KpiCard title="실매출 (쿠폰·포인트 차감 후)" value={formatWon(summary.netRevenue)} />
-              <KpiCard title="총 할인액 (쿠폰·포인트)" value={formatWon(summary.totalDiscount)} />
+              <KpiCard title="실매출 (쿠폰·포인트·할인 차감 후)" value={formatWon(summary.netRevenue)} />
+              <KpiCard title="총 할인액 (쿠폰·포인트·할인)" value={formatWon(summary.totalDiscount)} />
               <KpiCard title="주문 수" value={formatCount(summary.salesCount)} />
               <KpiCard
                 title="참고: 정가 합 (GMV)"
@@ -510,7 +510,7 @@ export function PaymentStatsTab() {
             )}
             <p className="mt-1.5 text-xs text-th-text-muted">
               {metric === "amount"
-                ? "축 단위: 만원 · 툴팁: 원화. 실매출(쿠폰·포인트 차감) 기준. '전체'는 백엔드 집계값(라인 단순합과 다를 수 있음)."
+                ? "축 단위: 만원 · 툴팁: 원화. 실매출(쿠폰·포인트·할인 차감) 기준. '전체'는 백엔드 집계값(라인 단순합과 다를 수 있음)."
                 : "판매 건수 = 결제 1건당 1 (DISTINCT 주문). '전체'는 버킷 내 고유 주문수."}
             </p>
           </div>

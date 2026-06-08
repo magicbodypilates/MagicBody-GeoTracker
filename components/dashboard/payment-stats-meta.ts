@@ -7,9 +7,9 @@
 
 export type MetricKey = "amount" | "salesCount";
 
-/** 지표 토글 라벨. amount 는 "정가(할인 전, GMV)" 임을 UI 에서 명시. */
+/** 지표 토글 라벨. amount 는 실매출(쿠폰·포인트 차감 후) 임을 UI 에서 명시. */
 export const METRIC_META: Record<MetricKey, { label: string; unit: string }> = {
-  amount: { label: "금액(정가·할인 전)", unit: "원" },
+  amount: { label: "실매출(쿠폰·포인트 차감)", unit: "원" },
   salesCount: { label: "판매 건수", unit: "건" },
 };
 
@@ -79,4 +79,30 @@ export function formatCount(v: number): string {
 export function formatMetric(metric: MetricKey, v: number, full: boolean): string {
   if (metric === "amount") return full ? formatWon(v) : formatManwon(v);
   return full ? formatCount(v) : Math.round(v).toLocaleString("ko-KR");
+}
+
+/**
+ * 결제수단 코드 → 한글 라벨(알 수 없으면 원문). 미지정은 "-".
+ * SoT: MagicBody-API PaymentModel.cs pay_method_tostring (코드 집합·한글 표기 동기화).
+ */
+const PAY_METHOD_LABELS: Record<string, string> = {
+  trans: "계좌이체",
+  card: "신용카드",
+  kakaopay: "카카오페이",
+  naverpay: "네이버페이",
+  bank: "실시간계좌이체",
+  vacct: "무통장입금",
+  admin: "관리자",
+};
+
+export function payMethodLabel(m: string): string {
+  if (!m) return "-";
+  return PAY_METHOD_LABELS[m.toLowerCase()] ?? m;
+}
+
+/** ISO datetime/날짜 문자열 → "YYYY-MM-DD" (시간 절삭). 파싱 실패 시 원문. */
+export function formatDateOnly(s: string): string {
+  if (!s) return "-";
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  return m ? m[1] : s;
 }

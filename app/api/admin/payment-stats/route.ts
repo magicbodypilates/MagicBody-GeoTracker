@@ -5,12 +5,14 @@
  * 데이터: CMS(.NET PaymentController) 신규 통계 액션을 서버에서 AppID/AppKey 숨겨 프록시.
  *
  * 쿼리:
- *   view=byType     &start=YYYY-MM-DD&end=YYYY-MM-DD&granularity=day|week|month(기본 month)
- *   view=byContents &start=YYYY-MM-DD&end=YYYY-MM-DD&contType=(빈값=전체|online|offline|ebook|package)
- *   view=summary    &start=YYYY-MM-DD&end=YYYY-MM-DD
+ *   view=byType         &start=YYYY-MM-DD&end=YYYY-MM-DD&granularity=day|week|month(기본 day)
+ *   view=byContents     &start=YYYY-MM-DD&end=YYYY-MM-DD&contType=(빈값=전체|online|offline|ebook|package)
+ *   view=byTransactions &start=YYYY-MM-DD&end=YYYY-MM-DD&contType=(빈값=전체|...)&limit=1~2000(기본 500)
+ *   view=summary        &start=YYYY-MM-DD&end=YYYY-MM-DD
  *
- * 매출 정의(확정): 타입별·강의별 = 정가(GMV, pc.amount). 요약 KPI만 실매출(pl.Amount).
- *   계약: ~/.claude/state/plans/geotracker-payment-stats-S0-results.md §C
+ * 매출 정의(확정 S1): 모든 금액 = 실매출(쿠폰·포인트 차감 후). 주문 net 안분 라인 net.
+ *   gmv = SUM(originalamount)는 참고용 정가(실매출 계산 미사용).
+ *   계획: ~/.claude/state/plans/geotracker-payment-stats-S1-v2.md
  *
  * 실패(H4): zod 실패→400 invalid_input / config→500 / timeout→504 upstream_timeout /
  *           5xx·네트워크→502 upstream_error / 파싱 실패→502 schema_mismatch.
@@ -25,9 +27,11 @@ import {
   normalizeByType,
   normalizeByContents,
   normalizeSummary,
+  normalizeByTransactions,
   type ClassTypeStatRaw,
   type ContentsStatRaw,
   type PaymentSummaryRaw,
+  type PaymentTransactionsRaw,
   type Granularity,
 } from "@/lib/server/payment-stats-normalize";
 
@@ -37,12 +41,15 @@ const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
 const QuerySchema = z
   .object({
-    view: z.enum(["byType", "byContents", "summary"]),
+    view: z.enum(["byType", "byContents", "byTransactions", "summary"]),
     start: z.string().regex(YMD, "start must be YYYY-MM-DD"),
     end: z.string().regex(YMD, "end must be YYYY-MM-DD"),
-    granularity: z.enum(["day", "week", "month"]).default("month"),
+    // 기본 day (S1 — 최근 7일 + 일 단위 기본). day|week|month.
+    granularity: z.enum(["day", "week", "month"]).default("day"),
     // 빈 문자열 = 전체 타입. 화이트리스트로 제한(임의 값 차단).
     contType: z.enum(["", "online", "offline", "ebook", "package", "unknown"]).default(""),
+    // 건별 목록 상한 1~2000(기본 500). 숫자 문자열만 허용.
+    limit: z.coerce.number().int().min(1).max(2000).default(500),
   })
   .refine((q) => q.start <= q.end, { message: "start must be <= end", path: ["start"] });
 
@@ -76,6 +83,7 @@ export async function GET(req: NextRequest) {
     end: sp.get("end") ?? undefined,
     granularity: sp.get("granularity") ?? undefined,
     contType: sp.get("contType") ?? undefined,
+    limit: sp.get("limit") ?? undefined,
   });
   if (!parsed.success) {
     return NextResponse.json(
@@ -83,7 +91,7 @@ export async function GET(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { view, start, end, granularity, contType } = parsed.data;
+  const { view, start, end, granularity, contType, limit } = parsed.data;
 
   try {
     if (view === "byType") {
@@ -108,6 +116,22 @@ export async function GET(req: NextRequest) {
       if (!res.ok) return errorToResponse(res.error, correlationId);
       const rows = Array.isArray(res.data) ? (res.data as ContentsStatRaw[]) : [];
       return NextResponse.json(normalizeByContents(rows, { start, end, contTypeFilter: contType }));
+    }
+
+    if (view === "byTransactions") {
+      const res = await postCmsPayment("/api/Payment/GetPaymentTransactions/", {
+        sdate: start,
+        edate: end,
+        contType,
+        limit,
+      });
+      if (!res.ok) return errorToResponse(res.error, correlationId);
+      // datas 봉투 = { items, truncated, limit }. 비객체면 빈 봉투로 안전 처리.
+      const env =
+        res.data && typeof res.data === "object" ? (res.data as PaymentTransactionsRaw) : {};
+      return NextResponse.json(
+        normalizeByTransactions(env, { start, end, contTypeFilter: contType }),
+      );
     }
 
     // view === "summary"

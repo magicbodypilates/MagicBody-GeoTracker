@@ -4,13 +4,16 @@
  * .NET PaymentController 의 신규 통계 응답(ReturnModels)을 GeoTracker 프론트가 쓰는
  * 안정적 JSON 형태로 변환한다. 모든 함수는 순수(I/O·시간·전역 의존 없음) — vitest 대상(H5).
  *
- * 매출 정의(확정): 타입별·강의별 = 정가(GMV, pc.amount). 요약 KPI만 실매출(pl.Amount).
- * 계약: ~/.claude/state/plans/geotracker-payment-stats-S0-results.md §C
+ * 매출 정의(확정 S1): 모든 금액 = 실매출(쿠폰·포인트 차감 후).
+ *   타입별·강의별·건별 = 주문 net 안분 라인 net. 요약 netRevenue = SUM(주문 net).
+ *   gmv = SUM(originalamount)는 참고용 정가(실매출 계산 미사용).
+ * 계획: ~/.claude/state/plans/geotracker-payment-stats-S1-v2.md
  *
  * 핵심 규칙:
  *  - byType: contType 시리즈 + "all" 시리즈(백엔드 직접계산, 프론트 재합산 금지) + zero-fill.
  *  - byContents: 강의별 1행, title null → "(삭제됨)", zero-fill 무의미(없는 강의는 행 없음).
- *  - summary: 주문 레벨 KPI(실매출·총할인·GMV·총건수).
+ *  - byTransactions: 라인별 1행 목록 + truncated 플래그(상한 초과). buyerName 빈값 → "(비회원/미상)".
+ *  - summary: 주문 레벨 KPI(실매출·총할인·정가·총건수).
  *  - bucket 포맷: day="YYYY-MM-DD" / week="YYYY-Www"(ISO, 목요일 기준 연도) / month="YYYY-MM".
  *    week ISO 계산은 .NET StatBucketExpr(week) 와 동일 정의(목요일 기준)로 복제.
  */
@@ -48,6 +51,24 @@ export type PaymentSummaryRaw = {
   gmv?: number;
   totalDiscount?: number;
   salesCount?: number;
+};
+
+/** GetPaymentTransactions 행 (라인 레벨, PII: 이름만) */
+export type PaymentTransactionRaw = {
+  orderdate?: string | null;
+  title?: string | null;
+  contType?: string;
+  buyerName?: string | null;
+  lineNet?: number;
+  payMethod?: string | null;
+  paymentid?: string;
+};
+
+/** GetPaymentTransactions 응답 봉투(datas) — Controller 가 truncated 와 함께 래핑. */
+export type PaymentTransactionsRaw = {
+  items?: PaymentTransactionRaw[];
+  truncated?: boolean;
+  limit?: number;
 };
 
 /** contType 표준 순서 — 'all' 은 별도(시리즈로 분리). unknown 은 항상 마지막. */
@@ -92,7 +113,28 @@ export type SummaryNormalized = {
   salesCount: number;
 };
 
-const METRIC_LABELS = { amount: "정가(할인 전)", salesCount: "판매 건수" } as const;
+export type TransactionRow = {
+  orderdate: string;
+  title: string;
+  contType: string;
+  buyerName: string;
+  lineNet: number;
+  payMethod: string;
+  paymentid: string;
+};
+
+export type ByTransactionsNormalized = {
+  view: "byTransactions";
+  timezone: "Asia/Seoul";
+  range: { start: string; end: string };
+  contTypeFilter: string;
+  /** 상한 초과로 일부 행이 잘렸는지 여부(.NET TOP(limit+1) 기반). */
+  truncated: boolean;
+  limit: number;
+  rows: TransactionRow[];
+};
+
+const METRIC_LABELS = { amount: "실매출(쿠폰·포인트 차감)", salesCount: "판매 건수" } as const;
 
 function safeNum(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
@@ -248,7 +290,7 @@ export function normalizeByType(
 }
 
 /**
- * byContents 정규화. title null/빈값 → "(삭제됨 #contentsid)". GMV 내림차순 정렬.
+ * byContents 정규화. title null/빈값 → "(삭제됨 #contentsid)". 실매출(amount) 내림차순 정렬.
  */
 export function normalizeByContents(
   rows: ContentsStatRaw[],
@@ -269,7 +311,7 @@ export function normalizeByContents(
       salesCount: safeInt(r.salesCount),
     };
   });
-  // 기본 정렬 = GMV desc (UI 가 지표 토글 시 클라이언트에서 재정렬).
+  // 기본 정렬 = 실매출(amount) desc (UI 가 지표 토글 시 클라이언트에서 재정렬).
   normalized.sort((a, b) => b.amount - a.amount);
 
   return {
@@ -295,5 +337,45 @@ export function normalizeSummary(
     gmv: safeNum(r.gmv),
     totalDiscount: safeNum(r.totalDiscount),
     salesCount: safeInt(r.salesCount),
+  };
+}
+
+/**
+ * byTransactions 정규화 (라인별 건별 목록).
+ *  - 입력 raw 봉투: { items, truncated, limit }. items 누락/비배열은 빈 배열.
+ *  - buyerName 빈값/공백 → "(비회원/미상)". title 빈값 → "(삭제됨)". payMethod 빈값 → "".
+ *  - lineNet 은 숫자 안전 처리(음수/NaN → 0). 정렬은 .NET 이 이미 적용(Orderdate DESC) — 보존.
+ */
+export function normalizeByTransactions(
+  raw: PaymentTransactionsRaw | null | undefined,
+  opts: { start: string; end: string; contTypeFilter: string },
+): ByTransactionsNormalized {
+  const env = raw ?? {};
+  const items = Array.isArray(env.items) ? env.items : [];
+  const rows: TransactionRow[] = items.map((r) => {
+    const orderdate = typeof r.orderdate === "string" ? r.orderdate : "";
+    const rawTitle = typeof r.title === "string" ? r.title.trim() : "";
+    const rawBuyer = typeof r.buyerName === "string" ? r.buyerName.trim() : "";
+    const net = safeNum(r.lineNet);
+    return {
+      orderdate,
+      title: rawTitle.length > 0 ? rawTitle : "(삭제됨)",
+      contType:
+        typeof r.contType === "string" && r.contType.length > 0 ? r.contType : "unknown",
+      buyerName: rawBuyer.length > 0 ? rawBuyer : "(비회원/미상)",
+      lineNet: net < 0 ? 0 : net,
+      payMethod: typeof r.payMethod === "string" ? r.payMethod : "",
+      paymentid: typeof r.paymentid === "string" ? r.paymentid : "",
+    };
+  });
+
+  return {
+    view: "byTransactions",
+    timezone: "Asia/Seoul",
+    range: { start: opts.start, end: opts.end },
+    contTypeFilter: opts.contTypeFilter,
+    truncated: env.truncated === true,
+    limit: safeInt(env.limit) || rows.length,
+    rows,
   };
 }

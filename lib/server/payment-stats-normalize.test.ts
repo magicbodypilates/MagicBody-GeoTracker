@@ -5,8 +5,10 @@
  * 행동 기반(입력→기대 출력). 외부 의존 없음(순수함수) — mock 불필요.
  *
  * 핵심 불변식 검증:
- *  - byType: zero-fill(빈 버킷 0), all 시리즈 재합산 금지(백엔드값 그대로), 표준 contType 항상 노출.
- *  - byContents: GMV 내림차순, title null/빈값 → "(삭제됨 #id)", contType 빈값 → unknown.
+ *  - byType: zero-fill(빈 버킷 0), all 시리즈 재합산 금지(백엔드값 그대로), 표준 contType 항상 노출,
+ *            metricLabels.amount = "실매출(쿠폰·포인트 차감)" (S1 라벨 정정 BLOCKER 가드).
+ *  - byContents: 실매출 내림차순, title null/빈값 → "(삭제됨 #id)", contType 빈값 → unknown.
+ *  - byTransactions: items 봉투 파싱, buyerName 빈값 → "(비회원/미상)", truncated 플래그, 음수 net → 0.
  *  - summary: 누락 필드 0 안전.
  *  - isoWeekLabel: ISO 8601 연말경계(2024-12-30→2025-W01 등) — .NET StatBucketExpr(week)와 일치.
  *  - buildBucketAxis: day/week/month 축 생성 + 역전 방어.
@@ -17,11 +19,13 @@ import {
   normalizeByType,
   normalizeByContents,
   normalizeSummary,
+  normalizeByTransactions,
   isoWeekLabel,
   buildBucketAxis,
   PAYMENT_CONTTYPES,
   type ClassTypeStatRaw,
   type ContentsStatRaw,
+  type PaymentTransactionsRaw,
 } from "@/lib/server/payment-stats-normalize";
 
 /* ── isoWeekLabel: .NET week 식과 1:1 대조한 골든값(검증 완료) ───────────── */
@@ -84,6 +88,9 @@ describe("normalizeByType", () => {
       { bucket: "2025-03", contType: "all", amount: 50, salesCount: 1 },
     ];
     const out = normalizeByType(rows, { granularity: "month", start: "2025-01-01", end: "2025-03-31" });
+    // S1 라벨 정정 가드(BLOCKER): amount 는 실매출 표기여야 함(정가/GMV/할인 전 금지).
+    expect(out.metricLabels.amount).toBe("실매출(쿠폰·포인트 차감)");
+    expect(out.metricLabels.amount).not.toMatch(/정가|GMV|할인 전/);
     // 축: 2025-01, 2025-02(빈), 2025-03
     expect(out.buckets).toEqual(["2025-01", "2025-02", "2025-03"]);
     for (const t of PAYMENT_CONTTYPES) expect(out.series[t]).toBeDefined();
@@ -128,7 +135,7 @@ describe("normalizeByType", () => {
 
 /* ── normalizeByContents ─────────────────────────────────────────────────── */
 describe("normalizeByContents", () => {
-  it("GMV 내림차순 정렬", () => {
+  it("실매출 내림차순 정렬", () => {
     const rows: ContentsStatRaw[] = [
       { contentsid: "a", title: "A", contType: "online", amount: 10, salesCount: 1 },
       { contentsid: "b", title: "B", contType: "offline", amount: 100, salesCount: 5 },
@@ -154,6 +161,116 @@ describe("normalizeByContents", () => {
     const rows = [{ contentsid: "x", title: "X", amount: "bad", salesCount: null }] as unknown as ContentsStatRaw[];
     const out = normalizeByContents(rows, { start: "2025-01-01", end: "2025-12-31", contTypeFilter: "" });
     expect(out.rows[0]).toMatchObject({ amount: 0, salesCount: 0 });
+  });
+});
+
+/* ── normalizeByTransactions ─────────────────────────────────────────────── */
+describe("normalizeByTransactions", () => {
+  it("items 봉투 파싱 + 정렬(백엔드 적용) 보존", () => {
+    const raw: PaymentTransactionsRaw = {
+      items: [
+        {
+          orderdate: "2025-06-08T10:00:00",
+          title: "재활 필라테스 기초",
+          contType: "offline",
+          buyerName: "홍길동",
+          lineNet: 195000,
+          payMethod: "card",
+          paymentid: "aid-cnme-250608-0001",
+        },
+        {
+          orderdate: "2025-06-07T09:00:00",
+          title: "온라인 강의 A",
+          contType: "online",
+          buyerName: "김철수",
+          lineNet: 156000,
+          payMethod: "trans",
+          paymentid: "aid-cnme-250607-0002",
+        },
+      ],
+      truncated: false,
+      limit: 500,
+    };
+    const out = normalizeByTransactions(raw, {
+      start: "2025-06-01",
+      end: "2025-06-30",
+      contTypeFilter: "",
+    });
+    expect(out.view).toBe("byTransactions");
+    expect(out.rows).toHaveLength(2);
+    expect(out.rows[0].title).toBe("재활 필라테스 기초");
+    expect(out.rows[0].lineNet).toBe(195000);
+    expect(out.truncated).toBe(false);
+    expect(out.limit).toBe(500);
+  });
+
+  it("buyerName 빈값/공백 → '(비회원/미상)', title 빈값 → '(삭제됨)', 음수 net → 0", () => {
+    const raw: PaymentTransactionsRaw = {
+      items: [
+        {
+          orderdate: "2025-06-08T10:00:00",
+          title: null,
+          contType: "",
+          buyerName: "   ",
+          lineNet: -100,
+          payMethod: null,
+          paymentid: "p1",
+        },
+      ],
+      truncated: true,
+      limit: 1,
+    };
+    const out = normalizeByTransactions(raw, {
+      start: "2025-06-01",
+      end: "2025-06-30",
+      contTypeFilter: "online",
+    });
+    expect(out.rows[0].buyerName).toBe("(비회원/미상)");
+    expect(out.rows[0].title).toBe("(삭제됨)");
+    expect(out.rows[0].contType).toBe("unknown");
+    expect(out.rows[0].lineNet).toBe(0);
+    expect(out.rows[0].payMethod).toBe("");
+    expect(out.truncated).toBe(true);
+    expect(out.contTypeFilter).toBe("online");
+  });
+
+  it("null/비배열 items → 빈 목록 안전", () => {
+    const out = normalizeByTransactions(null, {
+      start: "2025-06-01",
+      end: "2025-06-30",
+      contTypeFilter: "",
+    });
+    expect(out.rows).toEqual([]);
+    expect(out.truncated).toBe(false);
+  });
+
+  it("email·tel 필드가 raw 에 와도 정규화 출력에 노출되지 않음(H4)", () => {
+    const raw = {
+      items: [
+        {
+          orderdate: "2025-06-08",
+          title: "X",
+          contType: "offline",
+          buyerName: "이영희",
+          lineNet: 100,
+          payMethod: "card",
+          paymentid: "p",
+          buyerEmail: "leak@example.com",
+          buyerTel: "010-0000-0000",
+        },
+      ],
+    } as unknown as PaymentTransactionsRaw;
+    const out = normalizeByTransactions(raw, {
+      start: "2025-06-01",
+      end: "2025-06-30",
+      contTypeFilter: "",
+    });
+    const row = out.rows[0] as Record<string, unknown>;
+    expect(row.buyerEmail).toBeUndefined();
+    expect(row.buyerTel).toBeUndefined();
+    expect(Object.keys(row).sort()).toEqual(
+      ["buyerName", "contType", "lineNet", "orderdate", "payMethod", "paymentid", "title"].sort(),
+    );
   });
 });
 

@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { gscSearchAnalytics, getSavedSiteUrl } from "@/lib/server/gsc-client";
+import {
+  gscSearchAnalytics,
+  getSavedSiteUrl,
+  gscConfigStatus,
+} from "@/lib/server/gsc-client";
+import { computeActionable } from "@/lib/server/gsc-actionable";
 
 const Input = z.object({
   siteUrl: z.string().optional(),
@@ -51,8 +56,15 @@ export async function POST(req: NextRequest) {
     const body = Input.parse(await req.json());
     const siteUrl = body.siteUrl ?? (await getSavedSiteUrl());
     if (!siteUrl) {
+      // 구조화 복구 응답 (HIGH-7) — UI가 사이트 선택 단계로 유도할 수 있게 code·recovery 제공.
+      const cfg = await gscConfigStatus();
       return NextResponse.json(
-        { error: "siteUrl 이 설정되지 않았습니다. GSC Performance에서 사이트를 먼저 선택하세요." },
+        {
+          error: "siteUrl 이 설정되지 않았습니다. GSC Performance에서 사이트를 먼저 선택하세요.",
+          code: "SITE_NOT_SELECTED",
+          recovery: "사이트 목록을 새로고침한 뒤 사이트를 선택하고 '기본 사이트로 저장'을 누르세요.",
+          config: cfg,
+        },
         { status: 400 },
       );
     }
@@ -209,6 +221,26 @@ export async function POST(req: NextRequest) {
       position: r.position,
     }));
 
+    // ── Actionable 섹션 (마케팅 실행 가능 — LOW-4 threshold) ──────────────
+    // 순수 계산은 lib/server/gsc-actionable.ts 로 분리 (단위 테스트 대상).
+    const actionable = computeActionable({
+      queries: mapRows(queryData.rows ?? []).map((r) => ({
+        query: r.keys[0] ?? "",
+        clicks: r.clicks,
+        impressions: r.impressions,
+        ctr: r.ctr,
+        position: r.position,
+      })),
+      pages: mapRows(pageData.rows ?? []).map((r) => ({
+        page: r.keys[0] ?? "",
+        clicks: r.clicks,
+        impressions: r.impressions,
+        ctr: r.ctr,
+        position: r.position,
+      })),
+      queryDelta,
+    });
+
     // 8) Totals
     const totals = (queryData.rows ?? []).reduce(
       (acc: { clicks: number; impressions: number }, r) => ({
@@ -239,6 +271,7 @@ export async function POST(req: NextRequest) {
       topPages,
       byDevice,
       byCountry,
+      actionable,
       fetchedAt: new Date().toISOString(),
     });
   } catch (error) {

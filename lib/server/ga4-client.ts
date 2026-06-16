@@ -1,5 +1,11 @@
 import { google } from "googleapis";
 import { getAuthedClient } from "./gsc-client";
+import {
+  aggregateAiReferralTiers,
+  aggregateEngagementByPlatform,
+  mergeActiveUsersByPlatform,
+  mergeActiveUsersByDate,
+} from "./ga4-aggregate";
 
 /** AI 플랫폼 referrer 도메인 목록. GA4 sessionSource 디멘션 값과 매칭. */
 export const AI_REFERRER_DOMAINS = [
@@ -58,6 +64,52 @@ export function platformOf(source: string): string {
   return PLATFORM_MAP[source.toLowerCase()] ?? source;
 }
 
+/**
+ * GA4 기본 채널그룹 "AI Assistant" 값.
+ * 구글이 자체 분류하는 AI 유입 신호 — sessionSource 도메인 필터와 별개의 2차 신호.
+ * 도메인 필터(referrer 살아있는 출처만)와 채널그룹(구글 분류)을 합집합으로 잡아야 누락이 최소화된다.
+ * (단계1 진단: 도메인필터 35세션 / 채널그룹 12세션 — 각자 불완전, 합집합 필요)
+ */
+export const AI_CHANNEL_GROUP = "AI Assistant";
+
+/** 채널그룹은 AI인데 sessionSource로 플랫폼을 특정할 수 없는 세션의 라벨 */
+export const AI_UNCLASSIFIED_PLATFORM = "기타 AI (분류상)";
+
+/** AI 유입 신뢰도 등급 (AD-1) */
+export type AiReferralTier =
+  | "confirmed_ai_referral" // source/referrer 또는 GA4 채널그룹으로 AI 유입이 확인된 세션
+  | "suspected_ai_organic" // GA4만으론 분리 불가하나 별도 근거가 있는 제한적 케이스 (단계1: 근거 없음 → 미산출)
+  | "organic_search"; // 일반 검색 (AI 구간에서 제외)
+
+/**
+ * 한 행의 (sessionSource, sessionDefaultChannelGroup) 조합을 신뢰도 등급으로 분류.
+ * - source가 알려진 AI 플랫폼 도메인 → confirmed (referrer 신호 살아있음)
+ * - source는 모호하나 GA4 채널그룹이 "AI Assistant" → confirmed (구글이 AI로 확정)
+ * - 그 외 → organic_search (AI 구간 제외)
+ *
+ * suspected_ai_organic은 단계1 실데이터에서 분리 근거가 실증되지 않아 이 함수에서 산출하지 않는다
+ * (gemini=google/organic, copilot=bing/organic은 일반 검색과 분리 불가 → 과장 회피).
+ */
+export function classifyAiReferral(
+  source: string,
+  channelGroup: string,
+): AiReferralTier {
+  if (PLATFORM_MAP[source.toLowerCase()]) return "confirmed_ai_referral";
+  if (channelGroup === AI_CHANNEL_GROUP) return "confirmed_ai_referral";
+  return "organic_search";
+}
+
+/**
+ * 행의 플랫폼 라벨 결정.
+ * source로 플랫폼을 특정할 수 있으면 그 이름, 채널그룹만 AI면 "기타 AI (분류상)".
+ */
+export function platformOfRow(source: string, channelGroup: string): string {
+  const mapped = PLATFORM_MAP[source.toLowerCase()];
+  if (mapped) return mapped;
+  if (channelGroup === AI_CHANNEL_GROUP) return AI_UNCLASSIFIED_PLATFORM;
+  return source;
+}
+
 export function getDefaultPropertyId(): string | null {
   const raw = process.env.GA4_PROPERTY_ID ?? "";
   return raw.trim() || null;
@@ -67,12 +119,31 @@ export interface Ga4ReferralRow {
   date: string;
   source: string;
   platform: string;
+  /** GA4 기본 채널그룹 (예: "AI Assistant", "Organic Search") */
+  channelGroup: string;
+  /** 신뢰도 등급 — 이 행이 어떤 신호로 AI 유입으로 잡혔는지 */
+  tier: AiReferralTier;
   landingPage: string;
   sessions: number;
   activeUsers: number;
   screenPageViews: number;
   averageSessionDuration: number;
   engagementRate: number;
+}
+
+/** 신뢰도 등급별 집계 + 분리불가 안내 (AD-1·LOW-3) */
+export interface AiReferralTiers {
+  /** source 또는 GA4 채널그룹으로 확인된 AI 유입 세션 */
+  confirmedSessions: number;
+  /** confirmed 중 sessionSource로 플랫폼을 특정할 수 없어 "기타 AI(분류상)"로 잡힌 세션 */
+  unclassifiedSessions: number;
+  /** GA4만으로 분리 근거가 실증된 추정 세션 (단계1: 근거 없음 → 항상 0, 빈 등급) */
+  suspectedSessions: number;
+  /**
+   * 분리 불가 안내 — gemini/copilot처럼 구글·빙 검색에 묶여 별도 측정이 불가능한 분량.
+   * 수치가 아니라 "분리 측정 불가"라는 사실만 명시 (근거 없는 추정 등급 금지).
+   */
+  inseparableNote: string;
 }
 
 export interface Ga4ReferralSnapshot {
@@ -84,6 +155,8 @@ export interface Ga4ReferralSnapshot {
     activeUsers: number;
     screenPageViews: number;
   };
+  /** 신뢰도 등급별 집계 + 분리불가 안내 (AD-1·LOW-3) */
+  tiers: AiReferralTiers;
   byPlatform: Array<{
     platform: string;
     sessions: number;
@@ -156,8 +229,42 @@ function formatDate(ymd: string): string {
 }
 
 /**
- * AI 플랫폼 referrer 트래픽을 GA4에서 조회.
- * sessionSource in AI_REFERRER_DOMAINS 로 필터링.
+ * AI 유입 탐지 필터 — 2신호 합집합 (AD-1).
+ *   (a) sessionSource in AI_REFERRER_DOMAINS (referrer 신호 살아있는 출처)
+ *   (b) sessionDefaultChannelGroup = "AI Assistant" (구글 자체 분류, 주 신호)
+ * 단일 orGroup으로 묶어 GA4가 디멘션 튜플 단위로 dedup하게 한다 — 두 쿼리를 코드에서
+ * 합치면 두 신호 모두에 잡힌 세션을 중복 카운트할 위험이 있어 단일 필터가 정확하고 단순하다.
+ */
+const AI_REFERRAL_FILTER = {
+  orGroup: {
+    expressions: [
+      {
+        filter: {
+          fieldName: "sessionSource",
+          inListFilter: {
+            values: [...AI_REFERRER_DOMAINS],
+            caseSensitive: false,
+          },
+        },
+      },
+      {
+        filter: {
+          fieldName: "sessionDefaultChannelGroup",
+          stringFilter: {
+            matchType: "EXACT",
+            value: AI_CHANNEL_GROUP,
+            caseSensitive: false,
+          },
+        },
+      },
+    ],
+  },
+};
+
+/**
+ * AI 플랫폼 유입 트래픽을 GA4에서 조회.
+ * 2신호 합집합(도메인 referrer + GA4 "AI Assistant" 채널그룹)으로 탐지하고,
+ * 행별로 신뢰도 등급(confirmed/organic)과 플랫폼 라벨을 매핑한다.
  */
 export async function fetchAiReferralReport(params: {
   propertyId: string;
@@ -170,18 +277,13 @@ export async function fetchAiReferralReport(params: {
   const property = `properties/${params.propertyId}`;
   const dateRange = { startDate: params.startDate, endDate: params.endDate };
 
-  // sessionSource in AI_REFERRER_DOMAINS
-  const sourceFilter = {
-    filter: {
-      fieldName: "sessionSource",
-      inListFilter: {
-        values: [...AI_REFERRER_DOMAINS],
-        caseSensitive: false,
-      },
-    },
-  };
+  // 2신호 합집합 필터 (모든 서브쿼리 공통)
+  const sourceFilter = AI_REFERRAL_FILTER;
 
   // 1) 원본 일자 × 소스 × 랜딩페이지 rows + 추가 분석 쿼리 병렬 실행
+  //   activeUsers는 비가산(고유 사용자) 지표라 detail rows 합산이 중복 카운트를 일으킨다.
+  //   표시 레벨(전체/일자/플랫폼)별 전용 쿼리로 GA4가 직접 dedup한 값을 받는다(MED 정정).
+  //   detail·activeUsers 전용 3쿼리는 핵심 수치라 .catch()로 0 폴백하지 않는다(거짓 0 방지).
   const [
     detailResp,
     engagementResp,
@@ -189,6 +291,9 @@ export async function fetchAiReferralReport(params: {
     newReturnResp,
     eventsResp,
     pagesResp,
+    totalsActiveUsersResp,
+    dateActiveUsersResp,
+    platformActiveUsersResp,
   ] = await Promise.all([
     analytics.properties.runReport({
       property,
@@ -198,6 +303,7 @@ export async function fetchAiReferralReport(params: {
           { name: "date" },
           { name: "sessionSource" },
           { name: "landingPagePlusQueryString" },
+          { name: "sessionDefaultChannelGroup" },
         ],
         metrics: [
           { name: "sessions" },
@@ -214,12 +320,15 @@ export async function fetchAiReferralReport(params: {
         limit: "1000",
       },
     }),
-    // 2) 플랫폼별 engagement
+    // 2) 플랫폼별 engagement (채널그룹 디멘션 동반 — 채널그룹만 AI인 행 라벨 정확화)
     analytics.properties.runReport({
       property,
       requestBody: {
         dateRanges: [dateRange],
-        dimensions: [{ name: "sessionSource" }],
+        dimensions: [
+          { name: "sessionSource" },
+          { name: "sessionDefaultChannelGroup" },
+        ],
         metrics: [
           { name: "sessions" },
           { name: "averageSessionDuration" },
@@ -281,14 +390,55 @@ export async function fetchAiReferralReport(params: {
         limit: "10",
       },
     }).catch(() => null),
+    // 7) totals.activeUsers — 디멘션 없이 단일 조회 → 기간 전체 고유 사용자 (완전 dedup)
+    //    하위 행 합산이 아니라 GA4가 직접 dedup한 진짜 고유 사용자 수.
+    analytics.properties.runReport({
+      property,
+      requestBody: {
+        dateRanges: [dateRange],
+        metrics: [{ name: "activeUsers" }],
+        dimensionFilter: sourceFilter,
+        limit: "1",
+      },
+    }),
+    // 8) byDate.activeUsers — date 디멘션만 → 일자별 고유 사용자 (하루 단위 dedup은 정확)
+    analytics.properties.runReport({
+      property,
+      requestBody: {
+        dateRanges: [dateRange],
+        dimensions: [{ name: "date" }],
+        metrics: [{ name: "activeUsers" }],
+        dimensionFilter: sourceFilter,
+        limit: "1000",
+      },
+    }),
+    // 9) byPlatform.activeUsers — source + channelGroup만 → 플랫폼별 고유 사용자.
+    //    engagement 쿼리와 동일 디멘션으로 platformOfRow 라벨을 일치시킨다. 같은 플랫폼이
+    //    여러 source면 합산(mergeActiveUsersByPlatform) — cross-source 중복 한계는 함수 주석 참조.
+    analytics.properties.runReport({
+      property,
+      requestBody: {
+        dateRanges: [dateRange],
+        dimensions: [
+          { name: "sessionSource" },
+          { name: "sessionDefaultChannelGroup" },
+        ],
+        metrics: [{ name: "activeUsers" }],
+        dimensionFilter: sourceFilter,
+        limit: "100",
+      },
+    }),
   ]);
 
   const rows: Ga4ReferralRow[] = (detailResp.data.rows ?? []).map((r) => {
     const source = rowValue(r, 1);
+    const channelGroup = rowValue(r, 3);
     return {
       date: formatDate(rowValue(r, 0)),
       source,
-      platform: platformOf(source),
+      platform: platformOfRow(source, channelGroup),
+      channelGroup,
+      tier: classifyAiReferral(source, channelGroup),
       landingPage: rowValue(r, 2),
       sessions: rowMetric(r, 0),
       activeUsers: rowMetric(r, 1),
@@ -298,39 +448,64 @@ export async function fetchAiReferralReport(params: {
     };
   });
 
-  // 2) 집계 (플랫폼별)
+  // activeUsers 표시 레벨 전용 쿼리 결과 → 플랫폼·일자별 dedup된 고유 사용자 맵
+  const platformActiveUsers = mergeActiveUsersByPlatform(
+    (platformActiveUsersResp.data.rows ?? []).map((r) => ({
+      platform: platformOfRow(rowValue(r, 0), rowValue(r, 1)),
+      activeUsers: rowMetric(r, 0),
+    })),
+  );
+  const dateActiveUsers = mergeActiveUsersByDate(
+    (dateActiveUsersResp.data.rows ?? []).map((r) => ({
+      date: formatDate(rowValue(r, 0)),
+      activeUsers: rowMetric(r, 0),
+    })),
+  );
+
+  // 2) 집계 (플랫폼별) — sessions·screenPageViews는 detail rows 합산(가산 지표라 정확),
+  //    activeUsers는 비가산이라 전용 쿼리 dedup 값으로 대체(detail 합산 시 중복).
   const platformMap = new Map<
     string,
-    { sessions: number; activeUsers: number; screenPageViews: number }
+    { sessions: number; screenPageViews: number }
   >();
   for (const row of rows) {
     const p = platformMap.get(row.platform) ?? {
       sessions: 0,
-      activeUsers: 0,
       screenPageViews: 0,
     };
     p.sessions += row.sessions;
-    p.activeUsers += row.activeUsers;
     p.screenPageViews += row.screenPageViews;
     platformMap.set(row.platform, p);
   }
   const byPlatform = [...platformMap.entries()]
-    .map(([platform, v]) => ({ platform, ...v }))
+    .map(([platform, v]) => ({
+      platform,
+      sessions: v.sessions,
+      activeUsers: platformActiveUsers.get(platform) ?? 0,
+      screenPageViews: v.screenPageViews,
+    }))
     .sort((a, b) => b.sessions - a.sessions);
 
-  // 3) 일자별
-  const dateMap = new Map<string, { sessions: number; activeUsers: number }>();
+  // 3) 일자별 — sessions는 detail rows 합산(가산), activeUsers는 일자별 전용 쿼리 dedup 값.
+  const dateMap = new Map<string, { sessions: number }>();
   for (const row of rows) {
-    const d = dateMap.get(row.date) ?? { sessions: 0, activeUsers: 0 };
+    const d = dateMap.get(row.date) ?? { sessions: 0 };
     d.sessions += row.sessions;
-    d.activeUsers += row.activeUsers;
     dateMap.set(row.date, d);
   }
   const byDate = [...dateMap.entries()]
-    .map(([date, v]) => ({ date, ...v }))
+    .map(([date, v]) => ({
+      date,
+      sessions: v.sessions,
+      activeUsers: dateActiveUsers.get(date) ?? 0,
+    }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
 
-  // 4) 상위 랜딩페이지 (상위 30)
+  // 4) 상위 랜딩페이지 (상위 30) — sessions 기준 정렬·표시.
+  //    sessions는 가산이라 정확. activeUsers는 (platform×landingPage) 단위로 detail rows를
+  //    합산하므로 같은 사용자가 여러 날 같은 랜딩페이지를 보면 중복될 수 있는 비가산 한계가
+  //    남아 있다(랜딩페이지 단위 전용 dedup 쿼리는 이번 정정 범위 밖 — 보조 지표라 유지).
+  //    핵심 카드/차트인 totals·byPlatform·byDate는 전용 dedup 쿼리로 정정됨.
   const lpMap = new Map<
     string,
     { platform: string; landingPage: string; sessions: number; activeUsers: number }
@@ -351,61 +526,36 @@ export async function fetchAiReferralReport(params: {
     .sort((a, b) => b.sessions - a.sessions)
     .slice(0, 30);
 
-  // 5) 전체 합계
-  const totals = rows.reduce(
+  // 5) 전체 합계 — sessions·screenPageViews는 detail rows 합산(가산 지표라 정확).
+  //    activeUsers는 비가산이라 합산하면 중복 카운트(고유 사용자 부풀림) → 디멘션 없는
+  //    전용 쿼리(7)의 단일 dedup 값을 쓴다. 가장 눈에 띄는 카드라 반드시 정확해야 한다.
+  const totalsBase = rows.reduce(
     (acc, r) => ({
       sessions: acc.sessions + r.sessions,
-      activeUsers: acc.activeUsers + r.activeUsers,
       screenPageViews: acc.screenPageViews + r.screenPageViews,
     }),
-    { sessions: 0, activeUsers: 0, screenPageViews: 0 },
+    { sessions: 0, screenPageViews: 0 },
   );
+  const totals = {
+    sessions: totalsBase.sessions,
+    activeUsers: rowMetric((totalsActiveUsersResp.data.rows ?? [])[0] ?? {}, 0),
+    screenPageViews: totalsBase.screenPageViews,
+  };
 
-  // 6) 플랫폼별 engagement
+  // 6) 플랫폼별 engagement (source + channelGroup으로 라벨 정확화)
   const byPlatformEngagement = (engagementResp?.data.rows ?? []).map((r) => {
     const source = rowValue(r, 0);
+    const channelGroup = rowValue(r, 1);
     return {
-      platform: platformOf(source),
+      platform: platformOfRow(source, channelGroup),
       sessions: rowMetric(r, 0),
       averageSessionDuration: rowMetric(r, 1),
       pageViewsPerSession: rowMetric(r, 2),
       engagementRate: rowMetric(r, 3),
     };
   });
-  // 동일 플랫폼 여러 source → 세션 가중 평균으로 합치기
-  const engAgg = new Map<
-    string,
-    {
-      platform: string;
-      sessions: number;
-      durationSum: number;
-      pvSum: number;
-      engSum: number;
-    }
-  >();
-  for (const e of byPlatformEngagement) {
-    const prev = engAgg.get(e.platform) ?? {
-      platform: e.platform,
-      sessions: 0,
-      durationSum: 0,
-      pvSum: 0,
-      engSum: 0,
-    };
-    prev.sessions += e.sessions;
-    prev.durationSum += e.averageSessionDuration * e.sessions;
-    prev.pvSum += e.pageViewsPerSession * e.sessions;
-    prev.engSum += e.engagementRate * e.sessions;
-    engAgg.set(e.platform, prev);
-  }
-  const platformEngagement = [...engAgg.values()]
-    .map((v) => ({
-      platform: v.platform,
-      sessions: v.sessions,
-      averageSessionDuration: v.sessions > 0 ? v.durationSum / v.sessions : 0,
-      pageViewsPerSession: v.sessions > 0 ? v.pvSum / v.sessions : 0,
-      engagementRate: v.sessions > 0 ? v.engSum / v.sessions : 0,
-    }))
-    .sort((a, b) => b.sessions - a.sessions);
+  // 동일 플랫폼 여러 source → 세션 가중 평균으로 합치기 (MED-3: 순수함수 추출)
+  const platformEngagement = aggregateEngagementByPlatform(byPlatformEngagement);
 
   // 7) 시간대 히트맵
   const hourlyHeatmap = (hourlyResp?.data.rows ?? []).map((r) => ({
@@ -436,11 +586,18 @@ export async function fetchAiReferralReport(params: {
     screenPageViews: rowMetric(r, 2),
   }));
 
+  // 11) 신뢰도 등급 집계 (AD-1·LOW-3 / MED-3: 순수함수 추출)
+  //   - confirmed: 도메인 referrer 또는 GA4 "AI Assistant" 채널그룹으로 확인된 세션 (필터가 admit한 전부)
+  //   - unclassified: confirmed 중 source로 플랫폼을 특정 못 해 "기타 AI(분류상)"로 잡힌 분량
+  //   - suspected: 단계1에서 분리 근거가 실증되지 않아 항상 0 (빈 등급 — 과장 회피)
+  const tiers: AiReferralTiers = aggregateAiReferralTiers(rows);
+
   return {
     propertyId: params.propertyId,
     startDate: params.startDate,
     endDate: params.endDate,
     totals,
+    tiers,
     byPlatform,
     byDate,
     topLandingPages,

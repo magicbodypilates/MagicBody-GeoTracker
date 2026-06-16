@@ -128,6 +128,39 @@ type GscAnalytics = {
     ctr: number;
     position: number;
   }>;
+  actionable?: {
+    thresholds: {
+      impressionsP75: number;
+      siteAvgCtr: number;
+      quickWinPositionMin: number;
+      quickWinPositionMax: number;
+    };
+    opportunityQueries: Array<{
+      query: string;
+      clicks: number;
+      impressions: number;
+      ctr: number;
+      position: number;
+      ctrGapPct: number;
+      potentialClicks: number;
+    }>;
+    quickWinPages: Array<{
+      page: string;
+      clicks: number;
+      impressions: number;
+      ctr: number;
+      position: number;
+    }>;
+    risingQueries: Array<{
+      query: string;
+      currentClicks: number;
+      previousClicks: number;
+      delta: number;
+      deltaPct: number | null;
+      currentPosition: number;
+      previousPosition: number;
+    }>;
+  };
   fetchedAt: string;
 };
 
@@ -345,7 +378,15 @@ export function GscPerformanceTab({
         }),
       });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error ?? "분석 실패");
+      if (!r.ok) {
+        if (data.code === "SITE_NOT_SELECTED") {
+          setAnalyticsMessage(
+            `${data.error}${data.recovery ? `\n→ ${data.recovery}` : ""}`,
+          );
+          return;
+        }
+        throw new Error(data.error ?? "분석 실패");
+      }
       setAnalytics(data as GscAnalytics);
       setCache(cacheKey, data);
       setAnalyticsMessage(
@@ -612,13 +653,18 @@ export function GscPerformanceTab({
           </button>
         </div>
         {analyticsMessage && (
-          <div className="mb-3 rounded-lg border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-secondary">
+          <div className="mb-3 whitespace-pre-wrap rounded-lg border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-secondary">
             {analyticsMessage}
           </div>
         )}
 
         {analytics && (
           <div className="space-y-4">
+            {/* ── Actionable 섹션 (마케팅 실행 — 상단 배치, LOW-4) ── */}
+            {analytics.actionable && (
+              <ActionableSections actionable={analytics.actionable} />
+            )}
+
             {/* 기간 대비 */}
             <div className="grid gap-2 sm:grid-cols-4">
               <AnalyticsStat
@@ -838,10 +884,17 @@ export function GscPerformanceTab({
         <div className="mb-1 text-sm font-semibold text-th-text">
           AI Overview 인용 추적
         </div>
-        <p className="mb-3 text-xs text-th-text-muted">
+        <p className="mb-2 text-xs text-th-text-muted">
           Google 검색 결과 상단의 AI Overview 블록에 브랜드가 인용되는지 확인합니다.
           Bright Data SERP 스크래핑 기반.
         </p>
+        <div className="mb-3 rounded-lg border border-th-border bg-th-card-alt px-3 py-2 text-[11px] leading-relaxed text-th-text-muted">
+          <strong className="text-th-text-secondary">측정 한계:</strong> Google Search Console API는
+          AI Overview·AI Mode에서 발생한 노출·클릭을 일반 검색 실적과 분리해 제공하지 않습니다.
+          위 GSC 표·차트의 노출/클릭에는 AI Overview 분량이 섞여 있을 수 있으나 구분이 불가능합니다.
+          이 섹션의 SERP 스크래핑은 &apos;특정 키워드에 AI Overview가 떴는지 + 우리 브랜드가 인용됐는지&apos;를
+          직접 확인하는 보조 수단이며, 노출 횟수 집계가 아닙니다.
+        </div>
         <div className="grid gap-3 sm:grid-cols-4">
           <div className="sm:col-span-2">
             <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">키워드</label>
@@ -1254,6 +1307,201 @@ function PositionHeatmap({ analytics }: { analytics: GscAnalytics }) {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+/** 마케팅 실행 가능 3섹션 — 기회 검색어 / 빠른 개선 페이지 / 뜨는 검색어 (LOW-4) */
+function ActionableSections({
+  actionable,
+}: {
+  actionable: NonNullable<GscAnalytics["actionable"]>;
+}) {
+  const { thresholds, opportunityQueries, quickWinPages, risingQueries } =
+    actionable;
+  const avgCtrPct = (thresholds.siteAvgCtr * 100).toFixed(2);
+
+  return (
+    <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-4">
+      <div className="mb-1 text-sm font-semibold text-th-text">
+        실행 우선순위 (Actionable)
+      </div>
+      <p className="mb-3 text-xs leading-relaxed text-th-text-muted">
+        아래 표를 raw 데이터보다 먼저 보세요. 노출은 많은데 클릭이 적은 검색어, 1페이지 진입 직전 페이지,
+        클릭이 늘고 있는 검색어를 GSC 실데이터로 자동 선별했습니다.
+        <span className="ml-1 text-th-text-muted/80">
+          (기준: 노출 상위 25% = {thresholds.impressionsP75.toLocaleString()}회 이상 · 사이트 평균 CTR {avgCtrPct}% ·
+          빠른 개선 = 순위 {thresholds.quickWinPositionMin}~{thresholds.quickWinPositionMax}위)
+        </span>
+      </p>
+
+      <div className="space-y-3">
+        {/* (a) 기회 검색어 */}
+        <div className="rounded-lg border border-th-border bg-th-card p-3">
+          <div className="mb-1 text-sm font-semibold text-th-text">
+            ① 기회 검색어 — 노출 많은데 클릭 적음
+          </div>
+          <p className="mb-2 text-[11px] text-th-text-muted">
+            노출은 상위권인데 CTR이 사이트 평균({avgCtrPct}%) 미만인 검색어입니다. 제목·메타 설명·스니펫을
+            개선하면 같은 노출에서 클릭을 더 가져올 수 있습니다. &apos;기대 추가 클릭&apos;은 평균 CTR까지 회복 시
+            추정치입니다.
+          </p>
+          {opportunityQueries.length === 0 ? (
+            <div className="text-xs text-th-text-muted">
+              해당 조건을 만족하는 검색어가 없습니다. (모든 상위 노출 검색어의 CTR이 평균 이상)
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-xs">
+                <thead>
+                  <tr className="border-b border-th-border text-[10px] uppercase tracking-wider text-th-text-muted">
+                    <th className="px-2 py-1 text-left">검색어</th>
+                    <th className="px-2 py-1 text-right">노출</th>
+                    <th className="px-2 py-1 text-right">클릭</th>
+                    <th className="px-2 py-1 text-right">CTR</th>
+                    <th className="px-2 py-1 text-right">순위</th>
+                    <th className="px-2 py-1 text-right">기대 추가 클릭</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {opportunityQueries.map((r) => (
+                    <tr
+                      key={r.query}
+                      className="border-b border-th-border/40 last:border-0"
+                    >
+                      <td
+                        className="max-w-[260px] truncate px-2 py-1 text-th-text-secondary"
+                        title={r.query}
+                      >
+                        {r.query}
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text">
+                        {r.impressions.toLocaleString()}
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">
+                        {r.clicks.toLocaleString()}
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">
+                        {(r.ctr * 100).toFixed(2)}%
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">
+                        {r.position.toFixed(1)}
+                      </td>
+                      <td className="px-2 py-1 text-right font-semibold text-th-success">
+                        +{r.potentialClicks.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* (b) 빠른 개선 페이지 */}
+        <div className="rounded-lg border border-th-border bg-th-card p-3">
+          <div className="mb-1 text-sm font-semibold text-th-text">
+            ② 빠른 개선 페이지 — 1페이지 진입 직전
+          </div>
+          <p className="mb-2 text-[11px] text-th-text-muted">
+            평균 순위 {thresholds.quickWinPositionMin}~{thresholds.quickWinPositionMax}위 구간 페이지입니다.
+            내부 링크·콘텐츠 보강으로 조금만 올리면 검색 1페이지(상위 10위)에 들어가 노출·클릭이 크게 늘 수 있습니다.
+          </p>
+          {quickWinPages.length === 0 ? (
+            <div className="text-xs text-th-text-muted">
+              순위 {thresholds.quickWinPositionMin}~{thresholds.quickWinPositionMax}위 구간 페이지가 없습니다.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-xs">
+                <thead>
+                  <tr className="border-b border-th-border text-[10px] uppercase tracking-wider text-th-text-muted">
+                    <th className="px-2 py-1 text-left">페이지</th>
+                    <th className="px-2 py-1 text-right">노출</th>
+                    <th className="px-2 py-1 text-right">클릭</th>
+                    <th className="px-2 py-1 text-right">CTR</th>
+                    <th className="px-2 py-1 text-right">순위</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {quickWinPages.map((r) => (
+                    <tr
+                      key={r.page}
+                      className="border-b border-th-border/40 last:border-0"
+                    >
+                      <td
+                        className="max-w-[320px] truncate px-2 py-1 text-th-text-secondary"
+                        title={r.page}
+                      >
+                        {r.page}
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text">
+                        {r.impressions.toLocaleString()}
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">
+                        {r.clicks.toLocaleString()}
+                      </td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">
+                        {(r.ctr * 100).toFixed(2)}%
+                      </td>
+                      <td className="px-2 py-1 text-right font-semibold text-th-text">
+                        {r.position.toFixed(1)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* (c) 뜨는 검색어 */}
+        <div className="rounded-lg border border-th-border bg-th-card p-3">
+          <div className="mb-1 text-sm font-semibold text-th-text">
+            ③ 뜨는 검색어 — 클릭 증가 상위
+          </div>
+          <p className="mb-2 text-[11px] text-th-text-muted">
+            직전 동일 기간 대비 클릭이 늘어난 검색어입니다. 지금 콘텐츠가 먹히는 주제이니 추가 콘텐츠로
+            확장하면 상승세를 이어갈 수 있습니다.
+          </p>
+          {risingQueries.length === 0 ? (
+            <div className="text-xs text-th-text-muted">
+              직전 기간 대비 클릭이 증가한 검색어가 없습니다.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {risingQueries.map((r) => {
+                const pctText =
+                  r.deltaPct === null
+                    ? "신규"
+                    : `${r.deltaPct > 0 ? "+" : ""}${r.deltaPct.toFixed(1)}%`;
+                return (
+                  <div
+                    key={r.query}
+                    className="flex items-center gap-2 rounded-md border border-th-border bg-th-card-alt px-2.5 py-1.5 text-xs"
+                  >
+                    <span
+                      className="min-w-0 flex-1 truncate text-th-text-secondary"
+                      title={r.query}
+                    >
+                      {r.query}
+                    </span>
+                    <span className="w-24 text-right text-[10px] text-th-text-muted">
+                      {r.previousClicks.toLocaleString()} → {r.currentClicks.toLocaleString()}
+                    </span>
+                    <span className="w-16 text-right font-semibold text-th-success">
+                      +{r.delta.toLocaleString()}
+                    </span>
+                    <span className="w-16 text-right text-[10px] text-th-success">
+                      {pctText}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

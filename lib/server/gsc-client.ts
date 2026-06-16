@@ -166,3 +166,56 @@ export async function isAuthed(): Promise<boolean> {
   const t = await loadTokens();
   return Boolean(t?.refresh_token);
 }
+
+/** GSC/GA4 인증·설정 진단 (HIGH-7) — 절대 throw하지 않고 구조화 상태만 반환. */
+export interface GscConfigStatus {
+  /** GSC_TOKEN_FILE 환경변수 설정 여부 (운영 영속의 핵심) */
+  tokenFileEnvSet: boolean;
+  /** 실제 사용 중인 토큰 파일 경로 (절대경로) */
+  tokenFilePath: string;
+  /** 토큰 파일 또는 env refresh_token으로 자격이 로드되는지 */
+  tokensLoaded: boolean;
+  /** refresh_token 보유 여부 */
+  hasRefreshToken: boolean;
+  /** 기본 사이트(siteUrl) 저장 여부 */
+  siteUrlSaved: boolean;
+  /** 운영 영속이 안전한 상태인지 (env 설정 + refresh_token 보유) */
+  healthy: boolean;
+  /** 사람이 읽을 수 있는 경고 (문제 있을 때만 채워짐) */
+  warnings: string[];
+}
+
+/**
+ * 부팅·상태조회 시 GSC/GA4 설정을 진단한다.
+ * 운영 재배포 후 siteUrl/토큰 유실을 조기에 감지하기 위한 방어적 점검 — 동작 중인 경로를
+ * 깨지 않도록 throw하지 않고 구조화 상태만 돌려준다(HIGH-7).
+ */
+export async function gscConfigStatus(): Promise<GscConfigStatus> {
+  const tokenFileEnvSet = Boolean(process.env.GSC_TOKEN_FILE);
+  const tokens = await loadTokens().catch(() => null);
+  const hasRefreshToken = Boolean(tokens?.refresh_token);
+  const siteUrlSaved = Boolean(tokens?.siteUrl);
+
+  const warnings: string[] = [];
+  if (!tokenFileEnvSet) {
+    warnings.push(
+      "GSC_TOKEN_FILE 미설정 — Next.js standalone 모드에서 재빌드 시 토큰이 유실될 수 있습니다. 프로젝트 데이터 볼륨의 절대경로로 지정하세요.",
+    );
+  }
+  if (!hasRefreshToken) {
+    warnings.push("refresh_token 부재 — Google 계정 재연결이 필요합니다.");
+  }
+  if (hasRefreshToken && !siteUrlSaved) {
+    warnings.push("기본 사이트(siteUrl) 미저장 — GSC Performance에서 사이트를 선택해 저장하세요.");
+  }
+
+  return {
+    tokenFileEnvSet,
+    tokenFilePath: TOKEN_FILE,
+    tokensLoaded: Boolean(tokens),
+    hasRefreshToken,
+    siteUrlSaved,
+    healthy: tokenFileEnvSet && hasRefreshToken,
+    warnings,
+  };
+}

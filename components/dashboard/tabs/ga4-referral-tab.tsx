@@ -20,10 +20,17 @@ const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 type Status = { authed: boolean; propertyId: string | null };
 
+type AiReferralTier =
+  | "confirmed_ai_referral"
+  | "suspected_ai_organic"
+  | "organic_search";
+
 type Ga4ReferralRow = {
   date: string;
   source: string;
   platform: string;
+  channelGroup: string;
+  tier: AiReferralTier;
   landingPage: string;
   sessions: number;
   activeUsers: number;
@@ -32,11 +39,19 @@ type Ga4ReferralRow = {
   engagementRate: number;
 };
 
+type AiReferralTiers = {
+  confirmedSessions: number;
+  unclassifiedSessions: number;
+  suspectedSessions: number;
+  inseparableNote: string;
+};
+
 type Ga4ReferralSnapshot = {
   propertyId: string;
   startDate: string;
   endDate: string;
   totals: { sessions: number; activeUsers: number; screenPageViews: number };
+  tiers?: AiReferralTiers;
   byPlatform: Array<{
     platform: string;
     sessions: number;
@@ -220,9 +235,11 @@ export function Ga4ReferralTab() {
       <div>
         <div className="mb-1.5 text-base font-semibold text-th-text">AI Referral Traffic</div>
         <p className="text-sm leading-relaxed text-th-text-muted">
-          실제 사용자가 ChatGPT, Perplexity, Gemini, Copilot, Claude, Grok 등 AI 플랫폼에서
-          우리 사이트로 유입된 세션을 Google Analytics 4 Data API로 조회합니다. 이는 시뮬레이션이 아닌
-          <strong className="text-th-text-secondary"> 실제 사용자 행동 데이터</strong>입니다.
+          실제 사용자가 ChatGPT, Perplexity, Claude 등 AI 플랫폼에서 우리 사이트로 유입된 세션을
+          Google Analytics 4 Data API로 조회합니다. 이는 시뮬레이션이 아닌
+          <strong className="text-th-text-secondary"> 실제 사용자 행동 데이터</strong>이며,
+          AI 플랫폼 도메인(referrer)과 GA4의 <strong className="text-th-text-secondary">&apos;AI Assistant&apos; 채널그룹</strong>
+          두 신호를 합쳐 누락을 줄였습니다.
         </p>
       </div>
 
@@ -338,19 +355,58 @@ export function Ga4ReferralTab() {
         <>
           {/* 총계 */}
           <div className="grid gap-3 sm:grid-cols-3">
-            <SummaryCard label="전체 AI 유입 세션" value={snapshot.totals.sessions.toLocaleString()} accent />
+            <SummaryCard
+              label="확인된 AI 유입 세션"
+              value={(
+                snapshot.tiers?.confirmedSessions ?? snapshot.totals.sessions
+              ).toLocaleString()}
+              accent
+              tag="Confirmed"
+            />
             <SummaryCard label="활성 사용자" value={snapshot.totals.activeUsers.toLocaleString()} />
             <SummaryCard label="페이지뷰" value={snapshot.totals.screenPageViews.toLocaleString()} />
           </div>
 
+          {/* 신뢰도·분리불가 정직 표기 (AD-1·LOW-3) */}
+          {snapshot.tiers && (
+            <div className="rounded-lg border border-th-border bg-th-card-alt p-4">
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-th-success/30 bg-th-success-soft px-2 py-0.5 text-xs font-semibold text-th-success">
+                  Confirmed {snapshot.tiers.confirmedSessions.toLocaleString()} 세션
+                </span>
+                {snapshot.tiers.unclassifiedSessions > 0 && (
+                  <span className="rounded-full border border-th-border bg-th-card px-2 py-0.5 text-xs text-th-text-secondary">
+                    이 중 플랫폼 미상(기타 AI) {snapshot.tiers.unclassifiedSessions.toLocaleString()} 세션
+                  </span>
+                )}
+                <span className="rounded-full border border-th-border bg-th-card px-2 py-0.5 text-xs text-th-text-muted">
+                  Estimated(추정) — 산출 안 함
+                </span>
+              </div>
+              <p className="text-xs leading-relaxed text-th-text-muted">
+                {snapshot.tiers.inseparableNote}
+              </p>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-th-text-muted">
+                <strong className="text-th-text-secondary">왜 &apos;추정&apos; 수치가 없나요?</strong>{" "}
+                Gemini·Copilot 유입은 구글·빙 일반 검색에 섞여 들어와 GA4에서 분리할 근거가 없습니다.
+                근거 없는 추정 수치를 만들지 않고, 분리 측정이 불가능하다는 사실만 명시합니다.
+              </p>
+            </div>
+          )}
+
           {/* 플랫폼별 순위 */}
           <div className="rounded-lg border border-th-border bg-th-card p-4">
-            <div className="mb-3 text-sm font-semibold text-th-text">
-              AI 플랫폼별 유입 ({snapshot.byPlatform.length}개 플랫폼 감지)
+            <div className="mb-1 text-sm font-semibold text-th-text">
+              확인된 AI 플랫폼별 유입 (플랫폼 식별 {snapshot.byPlatform.length}종)
             </div>
+            <p className="mb-3 text-xs leading-relaxed text-th-text-muted">
+              referrer가 살아있어 플랫폼을 특정할 수 있는 유입입니다. 현재는 ChatGPT가 사실상 유일하게
+              확인되는 유입원이며, &apos;기타 AI(분류상)&apos;는 GA4가 AI로 분류했으나 출처를 특정하지 못한 세션입니다.
+              Gemini·Copilot은 검색 트래픽에 묶여 여기에 나타나지 않습니다(위 안내 참조).
+            </p>
             {snapshot.byPlatform.length === 0 ? (
               <p className="text-sm text-th-text-muted">
-                선택한 기간에 AI 플랫폼 referrer 유입이 없습니다. 아직 AI 검색 결과에 노출되지 않았거나
+                선택한 기간에 확인된 AI 플랫폼 유입이 없습니다. 아직 AI 검색 결과에 노출되지 않았거나
                 데이터가 아직 집계되지 않았을 수 있습니다.
               </p>
             ) : (
@@ -736,10 +792,12 @@ function SummaryCard({
   label,
   value,
   accent,
+  tag,
 }: {
   label: string;
   value: string;
   accent?: boolean;
+  tag?: string;
 }) {
   return (
     <div
@@ -747,7 +805,14 @@ function SummaryCard({
         accent ? "border-th-accent/30 bg-th-accent-soft" : "border-th-border bg-th-card"
       }`}
     >
-      <div className="text-xs uppercase tracking-wider text-th-text-muted">{label}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs uppercase tracking-wider text-th-text-muted">{label}</div>
+        {tag && (
+          <span className="rounded-full border border-th-success/30 bg-th-success-soft px-1.5 py-0.5 text-[10px] font-semibold text-th-success">
+            {tag}
+          </span>
+        )}
+      </div>
       <div className="mt-1 text-xl font-bold text-th-text">{value}</div>
     </div>
   );

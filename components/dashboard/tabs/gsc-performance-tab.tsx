@@ -161,6 +161,24 @@ type GscAnalytics = {
       previousPosition: number;
     }>;
   };
+  /** 브랜드 검색 추이 (실사용자 중심 재배치 상단 카드) */
+  brandSearch?: {
+    configured: boolean;
+    totals: { clicks: number; impressions: number };
+    totalsPrev: { clicks: number; impressions: number };
+    queries: Array<{
+      query: string;
+      clicks: number;
+      impressions: number;
+      ctr: number;
+      position: number;
+    }>;
+    daily: Array<{ date: string; clicks: number; impressions: number }>;
+  };
+  /** geo-tracker 자동 조사 질문 제외 건수 (투명성 표기) */
+  excludedBotQueryCount?: number;
+  /** 봇 제외 기능 활성 여부 (false = DB 미가용 등으로 제외 비활성) */
+  botExclusionActive?: boolean;
   fetchedAt: string;
 };
 
@@ -375,6 +393,9 @@ export function GscPerformanceTab({
           startDate,
           endDate,
           topQueryLimit: 10,
+          // 브랜드 검색 추이 산출용 — 없으면 브랜드 섹션은 "미설정"으로 표기.
+          brandName,
+          brandAliases,
         }),
       });
       const data = await r.json();
@@ -660,7 +681,22 @@ export function GscPerformanceTab({
 
         {analytics && (
           <div className="space-y-4">
-            {/* ── Actionable 섹션 (마케팅 실행 — 상단 배치, LOW-4) ── */}
+            {/* ── 봇 질문 제외 투명성 안내 (실사용자 검색만 표시) ── */}
+            <BotExclusionNotice
+              excludedCount={analytics.excludedBotQueryCount}
+              active={analytics.botExclusionActive}
+            />
+
+            {/* ── ① 브랜드 검색 추이 (실사용자 중심 — 최상단) ── */}
+            <BrandSearchSection
+              brandSearch={analytics.brandSearch}
+              brandName={brandName}
+            />
+
+            {/* ── ② 실사용자 검색어 (클릭 있는 것 우선) ── */}
+            <RealUserQuerySection topQueries={analytics.topQueries} />
+
+            {/* ── Actionable 섹션 (마케팅 실행 — LOW-4) ── */}
             {analytics.actionable && (
               <ActionableSections actionable={analytics.actionable} />
             )}
@@ -1503,6 +1539,228 @@ function ActionableSections({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** geo-tracker 자동 조사 질문 제외 안내 (투명성 — 실사용자 검색만 표시) */
+function BotExclusionNotice({
+  excludedCount,
+  active,
+}: {
+  excludedCount?: number;
+  active?: boolean;
+}) {
+  // 제외 기능이 비활성(DB 미가용 등)이면 솔직하게 그 상태를 알린다 — 침묵보다 정직.
+  if (active === false) {
+    return (
+      <div className="rounded-lg border border-th-border bg-th-card-alt px-3 py-2 text-[11px] leading-relaxed text-th-text-muted">
+        <strong className="text-th-text-secondary">참고:</strong> 자동 조사 질문 제외 기능이 지금
+        비활성 상태입니다(조사 질문 DB에 연결되지 않음). 아래 검색어에 geo-tracker 자동 조사 질문이
+        섞여 있을 수 있습니다.
+      </div>
+    );
+  }
+  const n = excludedCount ?? 0;
+  if (n <= 0) {
+    return (
+      <div className="rounded-lg border border-th-success/30 bg-th-success-soft px-3 py-2 text-[11px] leading-relaxed text-th-text-muted">
+        실사용자 검색어만 표시 중입니다. (이 기간에는 제외할 geo-tracker 자동 조사 질문이 없었습니다.)
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-th-success/30 bg-th-success-soft px-3 py-2 text-[11px] leading-relaxed text-th-text-secondary">
+      <strong className="text-th-text">실사용자 검색만 표시 중</strong> — geo-tracker가 AI 답변을
+      조사하려고 구글에 검색한 자동 질문 <strong className="text-th-text">{n.toLocaleString()}건</strong>을
+      제외했습니다. 아래 모든 검색어·기회·추이는 실제 사람이 검색한 것만 집계한 결과입니다.
+    </div>
+  );
+}
+
+/** 브랜드 검색 추이 — 매직바디 + 별칭의 클릭·노출 (기간 비교 + 일자별 라인) */
+function BrandSearchSection({
+  brandSearch,
+  brandName,
+}: {
+  brandSearch?: GscAnalytics["brandSearch"];
+  brandName: string;
+}) {
+  if (!brandSearch || !brandSearch.configured) {
+    return (
+      <div className="rounded-lg border border-th-border bg-th-card p-4">
+        <div className="mb-1 text-sm font-semibold text-th-text">브랜드 검색 추이</div>
+        <p className="text-xs leading-relaxed text-th-text-muted">
+          브랜드명이 설정되지 않아 브랜드 검색을 분리할 수 없습니다. 프로젝트 설정에서 브랜드명·별칭을
+          입력하면 &apos;{brandName || "브랜드"}&apos; 검색의 클릭·노출 추이를 여기에 표시합니다.
+        </p>
+      </div>
+    );
+  }
+
+  const { totals, totalsPrev, queries, daily } = brandSearch;
+  const clickDelta = totals.clicks - totalsPrev.clicks;
+  const imprDelta = totals.impressions - totalsPrev.impressions;
+  const hasData = totals.clicks > 0 || totals.impressions > 0;
+
+  return (
+    <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-4">
+      <div className="mb-1 text-sm font-semibold text-th-text">
+        브랜드 검색 추이 — &apos;{brandName}&apos; 직접 검색
+      </div>
+      <p className="mb-3 text-xs leading-relaxed text-th-text-muted">
+        브랜드명·별칭으로 직접 검색한 실사용자입니다. 브랜드 인지도의 직접 지표 — 늘어날수록 사람들이
+        매직바디를 이름으로 찾고 있다는 뜻입니다.
+      </p>
+
+      {!hasData ? (
+        <div className="rounded-lg border border-th-border bg-th-card p-3 text-xs text-th-text-muted">
+          이 기간에는 브랜드 검색 유입이 집계되지 않았습니다. 실사용자 일반 검색 유입이 아직 초기
+          단계일 수 있습니다(과장 없이 사실대로 표시).
+        </div>
+      ) : (
+        <>
+          <div className="mb-3 grid gap-2 sm:grid-cols-3">
+            <AnalyticsStat
+              label="브랜드 검색 클릭"
+              value={totals.clicks.toLocaleString()}
+              sub={`전기간 ${totalsPrev.clicks.toLocaleString()} (${formatDelta(clickDelta)})`}
+              accent={clickDelta >= 0}
+            />
+            <AnalyticsStat
+              label="브랜드 검색 노출"
+              value={totals.impressions.toLocaleString()}
+              sub={`전기간 ${totalsPrev.impressions.toLocaleString()} (${formatDelta(imprDelta)})`}
+              accent={imprDelta >= 0}
+            />
+            <AnalyticsStat
+              label="브랜드 검색어 수"
+              value={`${queries.length}개`}
+              sub="브랜드명·별칭 포함 검색어"
+            />
+          </div>
+
+          {daily.length > 0 && (
+            <div className="mb-3 rounded-lg border border-th-border bg-th-card p-3">
+              <div className="mb-1 text-xs font-semibold text-th-text-secondary">
+                일자별 브랜드 검색 (클릭 · 노출)
+              </div>
+              <div className="h-48">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={daily}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--th-border)" />
+                    <XAxis
+                      dataKey="date"
+                      stroke="var(--th-text-muted)"
+                      fontSize={9}
+                      tickFormatter={(v: string) => v.slice(5)}
+                    />
+                    <YAxis stroke="var(--th-text-muted)" fontSize={9} allowDecimals={false} />
+                    <Tooltip
+                      contentStyle={{
+                        background: "var(--th-card)",
+                        border: "1px solid var(--th-border)",
+                        fontSize: 11,
+                      }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Line type="monotone" dataKey="clicks" name="클릭" stroke="#10a37f" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="impressions" name="노출" stroke="#6b46c1" strokeWidth={1.5} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
+          {queries.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-th-border bg-th-card">
+              <table className="min-w-full text-xs">
+                <thead>
+                  <tr className="border-b border-th-border text-[10px] uppercase tracking-wider text-th-text-muted">
+                    <th className="px-2 py-1.5 text-left">브랜드 검색어</th>
+                    <th className="px-2 py-1.5 text-right">클릭</th>
+                    <th className="px-2 py-1.5 text-right">노출</th>
+                    <th className="px-2 py-1.5 text-right">CTR</th>
+                    <th className="px-2 py-1.5 text-right">순위</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {queries.map((r) => (
+                    <tr key={r.query} className="border-b border-th-border/40 last:border-0">
+                      <td className="max-w-[260px] truncate px-2 py-1 text-th-text-secondary" title={r.query}>
+                        {r.query}
+                      </td>
+                      <td className="px-2 py-1 text-right font-semibold text-th-text">{r.clicks.toLocaleString()}</td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">{r.impressions.toLocaleString()}</td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">{(r.ctr * 100).toFixed(2)}%</td>
+                      <td className="px-2 py-1 text-right text-th-text-secondary">{r.position.toFixed(1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** 실사용자 검색어 표 — 클릭 있는 것 우선, 봇 제외 후 실제 사람 검색만 */
+function RealUserQuerySection({
+  topQueries,
+}: {
+  topQueries: GscAnalytics["topQueries"];
+}) {
+  // 클릭 내림차순 → 클릭 동률이면 노출 내림차순. 클릭 있는 검색어가 위로.
+  const sorted = [...topQueries].sort(
+    (a, b) => b.clicks - a.clicks || b.impressions - a.impressions,
+  );
+  const withClicks = sorted.filter((q) => q.clicks > 0);
+  const display = withClicks.length > 0 ? withClicks : sorted;
+
+  return (
+    <div className="rounded-lg border border-th-border bg-th-card p-4">
+      <div className="mb-1 text-sm font-semibold text-th-text">
+        실사용자 검색어 {withClicks.length > 0 ? "(클릭 발생 우선)" : ""}
+      </div>
+      <p className="mb-3 text-xs leading-relaxed text-th-text-muted">
+        실제 사람이 검색해 매직바디가 노출된 검색어입니다(geo-tracker 자동 조사 질문 제외 후).
+        {withClicks.length === 0 &&
+          " 아직 클릭으로 이어진 일반 검색어가 없어 노출 기준으로 표시합니다 — 실사용자 일반검색 유입 초기 단계."}
+      </p>
+      {display.length === 0 ? (
+        <div className="text-xs text-th-text-muted">
+          표시할 실사용자 검색어가 없습니다. (브랜드 검색 위주이거나 일반검색 유입 초기 단계)
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead>
+              <tr className="border-b border-th-border text-[10px] uppercase tracking-wider text-th-text-muted">
+                <th className="px-2 py-1.5 text-left">검색어</th>
+                <th className="px-2 py-1.5 text-right">클릭</th>
+                <th className="px-2 py-1.5 text-right">노출</th>
+                <th className="px-2 py-1.5 text-right">CTR</th>
+                <th className="px-2 py-1.5 text-right">순위</th>
+              </tr>
+            </thead>
+            <tbody>
+              {display.map((r) => (
+                <tr key={r.query} className="border-b border-th-border/40 last:border-0">
+                  <td className="max-w-[300px] truncate px-2 py-1 text-th-text-secondary" title={r.query}>
+                    {r.query}
+                  </td>
+                  <td className="px-2 py-1 text-right font-semibold text-th-text">{r.clicks.toLocaleString()}</td>
+                  <td className="px-2 py-1 text-right text-th-text-secondary">{r.impressions.toLocaleString()}</td>
+                  <td className="px-2 py-1 text-right text-th-text-secondary">{(r.ctr * 100).toFixed(2)}%</td>
+                  <td className="px-2 py-1 text-right text-th-text-secondary">{r.position.toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

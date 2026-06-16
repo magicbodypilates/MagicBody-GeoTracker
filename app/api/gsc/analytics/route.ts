@@ -6,12 +6,21 @@ import {
   gscConfigStatus,
 } from "@/lib/server/gsc-client";
 import { computeActionable } from "@/lib/server/gsc-actionable";
+import { getBotPromptSet } from "@/lib/server/gsc-bot-prompts";
+import {
+  excludeBotQueries,
+  buildBrandTermsFromStrings,
+  computeBrandSearch,
+} from "@/lib/server/gsc-bot-exclusion";
 
 const Input = z.object({
   siteUrl: z.string().optional(),
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   topQueryLimit: z.number().int().min(1).max(50).optional(),
+  /** 브랜드 검색 추이 산출용 — 브랜드 명·별칭. 없으면 브랜드 섹션은 "미설정"으로 표기. */
+  brandName: z.string().optional(),
+  brandAliases: z.string().optional(),
 });
 
 type Row = {
@@ -119,32 +128,76 @@ export async function POST(req: NextRequest) {
         }),
       ]);
 
-    // 1) Top queries (current)
-    const topQueries = mapRows(queryData.rows ?? [])
+    // ── 봇 질문 제외 (실사용자 검색어만) ────────────────────────────────────
+    // geo-tracker 자동 조사 프롬프트와 정확히 일치하는 GSC 검색어를 제외한다.
+    // DB 미가용 시 botPromptSet 은 빈 Set → 제외 0건(기존 동작 유지·graceful).
+    const botPromptSet = await getBotPromptSet();
+    const brandTerms = buildBrandTermsFromStrings(body.brandName, body.brandAliases);
+
+    // 검색어 단위 행을 query/clicks/... 형태로 매핑 (현재·직전 기간)
+    const curQueriesRaw = mapRows(queryData.rows ?? []).map((r) => ({
+      query: r.keys[0] ?? "",
+      clicks: r.clicks,
+      impressions: r.impressions,
+      ctr: r.ctr,
+      position: r.position,
+    }));
+    const prevQueriesRaw = mapRows(queryPrev.rows ?? []).map((r) => ({
+      query: r.keys[0] ?? "",
+      clicks: r.clicks,
+      impressions: r.impressions,
+      ctr: r.ctr,
+      position: r.position,
+    }));
+
+    // 봇 질문 제외 → 실사용자 검색어만 남김 (모든 후속 계산의 기준)
+    const { kept: curQueries, excludedCount: excludedCur } = excludeBotQueries(
+      curQueriesRaw,
+      botPromptSet,
+    );
+    const { kept: prevQueries, excludedCount: excludedPrev } = excludeBotQueries(
+      prevQueriesRaw,
+      botPromptSet,
+    );
+    const excludedBotQueryCount = excludedCur + excludedPrev;
+
+    // date×query 행도 봇 질문 제외 (브랜드 추이·트렌드 모두 실사용자 기준)
+    const dateQueryRaw = mapRows(dateQueryData.rows ?? []).map((r) => ({
+      date: r.keys[0] ?? "",
+      query: r.keys[1] ?? "",
+      clicks: r.clicks,
+      impressions: r.impressions,
+      ctr: r.ctr,
+      position: r.position,
+    }));
+    const { kept: dateQueryClean } = excludeBotQueries(dateQueryRaw, botPromptSet);
+
+    // 1) Top queries (current, 봇 제외 후 = 실사용자 검색어)
+    const topQueries = [...curQueries]
       .sort((a, b) => b.clicks - a.clicks)
       .slice(0, topLimit)
       .map((r) => ({
-        query: r.keys[0] ?? "",
+        query: r.query,
         clicks: r.clicks,
         impressions: r.impressions,
         ctr: r.ctr,
         position: r.position,
       }));
 
-    // 2) Previous-period queries lookup
+    // 2) Previous-period queries lookup (봇 제외 후)
     const prevMap = new Map<string, { clicks: number; impressions: number; position: number }>();
-    for (const r of mapRows(queryPrev.rows ?? [])) {
-      prevMap.set(r.keys[0] ?? "", {
+    for (const r of prevQueries) {
+      prevMap.set(r.query, {
         clicks: r.clicks,
         impressions: r.impressions,
         position: r.position,
       });
     }
 
-    // 3) Query delta (current top 100 merged with previous)
+    // 3) Query delta (현재 검색어 ∪ 직전 검색어, 봇 제외 후)
     const curMap = new Map<string, { clicks: number; impressions: number; position: number }>();
-    for (const r of mapRows(queryData.rows ?? [])) {
-      curMap.set(r.keys[0] ?? "", {
+    for (const r of curQueries) {
+      curMap.set(r.query, {
         clicks: r.clicks,
         impressions: r.impressions,
         position: r.position,
@@ -179,13 +232,14 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 4) Date × Query (only Top queries for trend)
+    // 4) Date × Query (only Top queries for trend) — 봇 제외된 dateQueryClean 사용.
+    //    (raw dateQueryData 를 쓰면 봇 질문이 트렌드 차트에 다시 새어 들어온다.)
     const topQueryNames = new Set(topQueries.map((q) => q.query));
-    const queryTrend = mapRows(dateQueryData.rows ?? [])
-      .filter((r) => topQueryNames.has(r.keys[1] ?? ""))
+    const queryTrend = dateQueryClean
+      .filter((r) => topQueryNames.has(r.query))
       .map((r) => ({
-        date: r.keys[0] ?? "",
-        query: r.keys[1] ?? "",
+        date: r.date,
+        query: r.query,
         clicks: r.clicks,
         impressions: r.impressions,
         ctr: r.ctr,
@@ -223,9 +277,13 @@ export async function POST(req: NextRequest) {
 
     // ── Actionable 섹션 (마케팅 실행 가능 — LOW-4 threshold) ──────────────
     // 순수 계산은 lib/server/gsc-actionable.ts 로 분리 (단위 테스트 대상).
+    // 핵심: queries 는 봇 제외된 curQueries 로 넣는다. raw 를 쓰면 geo-tracker
+    // 자동 조사 질문이 "기회 검색어"로 잡혀 마케팅 실행 목록을 오염시킨다(사용자 지적 근본 원인).
+    // pages 는 page 디멘션이라 검색어 단위 봇 제외가 불가 — 봇 질문은 query 에만 잡히고
+    // quickWinPages 는 페이지 순위 기반이라 원본을 유지한다. queryDelta 는 이미 봇 제외됨.
     const actionable = computeActionable({
-      queries: mapRows(queryData.rows ?? []).map((r) => ({
-        query: r.keys[0] ?? "",
+      queries: curQueries.map((r) => ({
+        query: r.query,
         clicks: r.clicks,
         impressions: r.impressions,
         ctr: r.ctr,
@@ -241,21 +299,26 @@ export async function POST(req: NextRequest) {
       queryDelta,
     });
 
-    // 8) Totals
-    const totals = (queryData.rows ?? []).reduce(
-      (acc: { clicks: number; impressions: number }, r) => ({
-        clicks: acc.clicks + (r.clicks ?? 0),
-        impressions: acc.impressions + (r.impressions ?? 0),
-      }),
-      { clicks: 0, impressions: 0 },
-    );
-    const totalsPrev = (queryPrev.rows ?? []).reduce(
-      (acc: { clicks: number; impressions: number }, r) => ({
-        clicks: acc.clicks + (r.clicks ?? 0),
-        impressions: acc.impressions + (r.impressions ?? 0),
-      }),
-      { clicks: 0, impressions: 0 },
-    );
+    // 8) Totals — 봇 제외된 실사용자 검색어만 합산 (raw 를 쓰면 봇 노출/클릭이 총계를 부풀린다).
+    const sumStats = (rows: Array<{ clicks: number; impressions: number }>) =>
+      rows.reduce(
+        (acc, r) => ({
+          clicks: acc.clicks + r.clicks,
+          impressions: acc.impressions + r.impressions,
+        }),
+        { clicks: 0, impressions: 0 },
+      );
+    const totals = sumStats(curQueries);
+    const totalsPrev = sumStats(prevQueries);
+
+    // 9) 브랜드 검색 추이 (실사용자 중심 재배치의 상단 카드) — 봇 제외된 데이터로 산출.
+    //    브랜드 토큰이 없으면 configured=false → UI 가 "브랜드 미설정"으로 표기(과장 없음).
+    const brandSearch = computeBrandSearch({
+      queries: curQueries,
+      queriesPrev: prevQueries,
+      dateQueries: dateQueryClean,
+      brandTerms,
+    });
 
     return NextResponse.json({
       siteUrl,
@@ -272,6 +335,11 @@ export async function POST(req: NextRequest) {
       byDevice,
       byCountry,
       actionable,
+      brandSearch,
+      // 투명성: geo-tracker 자동 조사 질문을 몇 건 제외했는지 + 제외 기능 활성 여부.
+      // botExclusionActive=false 이면 (로컬 DB off 등) 봇 프롬프트 집합이 비어 제외가 비활성.
+      excludedBotQueryCount,
+      botExclusionActive: botPromptSet.size > 0,
       fetchedAt: new Date().toISOString(),
     });
   } catch (error) {

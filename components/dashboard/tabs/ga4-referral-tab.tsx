@@ -243,6 +243,32 @@ export function Ga4ReferralTab() {
         </p>
       </div>
 
+      {/* 정직한 성장 트래커 프레이밍 — 지금은 초기 단계, 늘면 증가하는 지표 */}
+      <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft px-4 py-3">
+        <div className="mb-1 text-sm font-semibold text-th-text">
+          이 지표는 &apos;성장 추적&apos; 용도입니다
+        </div>
+        <p className="text-xs leading-relaxed text-th-text-muted">
+          AI 검색에서 우리 사이트로 들어오는 실제 유입은 <strong className="text-th-text-secondary">현재 초기
+          단계</strong>입니다. 지금 수치가 작은 것이 정상이며, AI 답변에 매직바디가 인용·노출되어 사람들이
+          실제로 클릭해 들어오기 시작하면 <strong className="text-th-text-secondary">이 숫자가 늘어납니다.</strong>{" "}
+          아래 일자별 추이를 시간을 두고 지켜보는 것이 핵심입니다 — 한 시점의 절대값보다 추세가 중요합니다.
+        </p>
+      </div>
+
+      {/* 자기 트래픽(본인 테스트 클릭) 제외 안내 */}
+      <div className="rounded-lg border border-th-border bg-th-card-alt px-4 py-3">
+        <div className="mb-1 text-xs font-semibold text-th-text-secondary">
+          본인 테스트 클릭이 포함될 수 있습니다
+        </div>
+        <p className="text-[11px] leading-relaxed text-th-text-muted">
+          ChatGPT 등에서 직접 확인하려고 클릭한 본인 방문도 GA4에는 유입으로 잡힙니다. GA4 Data API는
+          IP로 거를 수 없어 코드에서 자동 제외가 불가능합니다.{" "}
+          <strong className="text-th-text-secondary">테스트용 크롬 프로필에 GA 옵트아웃(Google Analytics
+          Opt-out) 확장을 설치</strong>하면 본인 클릭이 집계에서 빠져 더 정확한 실유입만 남습니다.
+        </p>
+      </div>
+
       {/* 연동 상태 */}
       <div className="rounded-lg border border-th-border bg-th-card p-4">
         <div className="mb-3 flex items-center justify-between">

@@ -57,17 +57,33 @@ function runInBackground(): void {
   void runTick()
     .then((result) => {
       const elapsedMs = runState.startedAt ? Date.now() - runState.startedAt : 0;
+      const failureCount = result.providerFailures.length;
       if (
         result.checkedSchedules > 0 ||
         result.executedRuns > 0 ||
-        result.errors.length > 0
+        result.errors.length > 0 ||
+        failureCount > 0
       ) {
+        const failSummary =
+          failureCount > 0
+            ? ` · provider실패 ${failureCount}(${Object.entries(result.providerFailureCounts)
+                .map(([p, n]) => `${p}:${n}`)
+                .join(", ")})`
+            : "";
         console.log(
-          `[cron/tick] 완료 (${Math.round(elapsedMs / 1000)}s) — 스케줄 ${result.checkedSchedules}개 확인, 실행 ${result.executedRuns}, 스킵 ${result.skippedDuplicates}, 오류 ${result.errors.length}`,
+          `[cron/tick] 완료 (${Math.round(elapsedMs / 1000)}s) — 스케줄 ${result.checkedSchedules}개 확인, 실행 ${result.executedRuns}, 스킵 ${result.skippedDuplicates}, 오류 ${result.errors.length}${failSummary}`,
         );
         if (result.errors.length > 0) {
           for (const e of result.errors) {
             console.error(`[cron/tick]   오류 scheduleId=${e.scheduleId} — ${e.message}`);
+          }
+        }
+        // provider 단위 실패 상세 — 특정 provider(예: chatgpt)만 비는 패턴 추적용(관측성)
+        if (failureCount > 0) {
+          for (const f of result.providerFailures) {
+            console.error(
+              `[cron/tick]   provider실패 provider=${f.provider} prompt="${f.prompt.slice(0, 40)}..." — ${f.reason}`,
+            );
           }
         }
       }

@@ -37,11 +37,29 @@ import type { Schedule, Prompt } from "@/drizzle/schema";
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
 
+/** provider 단위 수집 실패 1건 — 관측성(어떤 provider 가 조용히 누락되는지 추적) */
+export type ProviderFailure = {
+  scheduleId: string;
+  workspaceId: string;
+  provider: string;
+  prompt: string;
+  reason: string;
+};
+
 export type TickResult = {
   checkedSchedules: number;
   executedRuns: number;
   skippedDuplicates: number;
   errors: { scheduleId: string; message: string }[];
+  /**
+   * provider 단위 실패 적재 (관측성).
+   * 기존엔 provider catch 가 console.error 만 했기 때문에 chatgpt 등 특정 provider 가
+   * 조용히 실패해 행이 안 생겨도 TickResult 만 봐선 알 수 없었다.
+   * scraper 실패를 여기에 모아 "특정 provider 만 비는" 패턴을 추적 가능하게 한다.
+   */
+  providerFailures: ProviderFailure[];
+  /** provider 별 실패 카운트 요약 — 빠른 집계용 (예: { chatgpt: 3 }) */
+  providerFailureCounts: Record<string, number>;
   /** 일별 집계가 이번 tick 에서 수행됐는지 (하루 한 번만 실행) */
   dailyRollup?: { date: string; rows: number } | null;
 };
@@ -53,6 +71,8 @@ export async function runTick(): Promise<TickResult> {
     executedRuns: 0,
     skippedDuplicates: 0,
     errors: [],
+    providerFailures: [],
+    providerFailureCounts: {},
     dailyRollup: null,
   };
 
@@ -94,6 +114,12 @@ export async function runTick(): Promise<TickResult> {
       const partial = await executeSchedule(sched, now);
       result.executedRuns += partial.executedRuns;
       result.skippedDuplicates += partial.skippedDuplicates;
+      // provider 단위 실패 적재 (관측성) — 특정 provider 만 비는 패턴 추적
+      for (const f of partial.providerFailures) {
+        result.providerFailures.push(f);
+        result.providerFailureCounts[f.provider] =
+          (result.providerFailureCounts[f.provider] ?? 0) + 1;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[automation] 스케줄 ${sched.id} 실행 실패:`, message);
@@ -109,7 +135,11 @@ export async function runTick(): Promise<TickResult> {
 async function executeSchedule(
   sched: Schedule,
   now: Date,
-): Promise<{ executedRuns: number; skippedDuplicates: number }> {
+): Promise<{
+  executedRuns: number;
+  skippedDuplicates: number;
+  providerFailures: ProviderFailure[];
+}> {
   // interval_slot 포맷: "2026-04-22T00" (KST 해는 서버 timezone 무관 UTC 기준이나 일관성만 유지되면 충분)
   const intervalSlot = formatIntervalSlot(now);
 
@@ -141,7 +171,7 @@ async function executeSchedule(
   if (promptRows.length === 0) {
     // 실행할 프롬프트 없음 — 다음 run 시각만 갱신
     await updateScheduleTiming(sched, now);
-    return { executedRuns: 0, skippedDuplicates: 0 };
+    return { executedRuns: 0, skippedDuplicates: 0, providerFailures: [] };
   }
 
   // 워크스페이스 brand/competitors 로드 — 점수 계산에 필요
@@ -165,6 +195,7 @@ async function executeSchedule(
 
   let executedRuns = 0;
   let skippedDuplicates = 0;
+  const providerFailures: ProviderFailure[] = [];
 
   // 프롬프트 × 프로바이더 전부 — 순차 실행 (Bright Data 안정성)
   // 중복 실행 방지:
@@ -314,10 +345,21 @@ async function executeSchedule(
           skippedDuplicates += 1;
         }
       } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
         console.error(
           `[automation] 스케줄 ${sched.id} prompt="${prompt.text.slice(0, 40)}..." provider=${provider} 실패:`,
-          err instanceof Error ? err.message : err,
+          reason,
         );
+        // 관측성 — provider 단위 실패를 TickResult 로 올려보낸다(H-3).
+        // 이전엔 console.error 만 해서 chatgpt 등 특정 provider 가 조용히 빠져도
+        // 결과 집계만으론 알 수 없었다.
+        providerFailures.push({
+          scheduleId: sched.id,
+          workspaceId: sched.workspaceId,
+          provider,
+          prompt: prompt.text,
+          reason,
+        });
       }
     }
   }
@@ -325,7 +367,7 @@ async function executeSchedule(
   // 스케줄 시각 갱신
   await updateScheduleTiming(sched, now);
 
-  return { executedRuns, skippedDuplicates };
+  return { executedRuns, skippedDuplicates, providerFailures };
 }
 
 /**

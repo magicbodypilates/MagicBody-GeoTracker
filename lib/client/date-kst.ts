@@ -1,0 +1,73 @@
+/**
+ * KST(Asia/Seoul) 표시용 날짜 헬퍼 — 표시층 전용.
+ *
+ * 배경:
+ *   - runs.createdAt 은 UTC(timestamptz) 로 저장된다. 저장 포맷은 절대 건드리지 않는다.
+ *   - 화면에서 `createdAt.slice(0,10)` 으로 일자를 자르면 UTC 일자가 나와,
+ *     KST 새벽(UTC 15:00~23:59) 데이터가 전날로 밀려 표시된다.
+ *   - 예) 2026-06-17T15:30:00Z(UTC) = 2026-06-18 00:30(KST) →
+ *     slice(0,10) 은 "2026-06-17" 이지만 사용자가 기대하는 일자는 "2026-06-18".
+ *
+ * 이 헬퍼로 표시·그룹·축 생성 지점을 단일 KST 변환으로 통일한다.
+ * 서버측 group(`AT TIME ZONE 'Asia/Seoul'`)과 결과가 일치한다.
+ */
+
+// 재사용 — Intl.DateTimeFormat 인스턴스 생성 비용 절감
+const KST_DATE_FORMAT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+/**
+ * ISO 문자열(또는 Date) 을 KST 기준 "YYYY-MM-DD" 일자 키로 변환.
+ * en-CA 로케일은 항상 "YYYY-MM-DD" 형식을 보장한다.
+ *
+ * @param iso  createdAt 같은 ISO 8601 문자열 또는 Date
+ * @returns    "YYYY-MM-DD" (KST). 파싱 불가 시 빈 문자열.
+ */
+export function toKstDateKey(iso: string | Date): string {
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return KST_DATE_FORMAT.format(d);
+}
+
+/**
+ * KST 기준 "오늘로부터 N일 전 ~ 오늘" 일자 키 배열(오래된→최신) 생성.
+ * 차트 X축 등 연속 일자 축을 만들 때 사용한다 (실행 없는 날도 0으로 채우기 위함).
+ *
+ * @param days  포함할 일수 (오늘 포함). 예) 14 → 13일 전 ~ 오늘 = 14개
+ * @returns     ["YYYY-MM-DD", ...] 길이 days, KST 기준
+ */
+export function kstRecentDateKeys(days: number): string[] {
+  const keys: string[] = [];
+  const now = Date.now();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  for (let i = days - 1; i >= 0; i--) {
+    keys.push(toKstDateKey(new Date(now - i * DAY_MS)));
+  }
+  return keys;
+}
+
+/**
+ * "오늘로부터 N일 전" 의 KST 자정에 해당하는 UTC 시각(ISO) 을 반환.
+ * runs 조회 윈도우의 `from` 경계로 사용한다.
+ *
+ * 예) days=30, 지금이 2026-06-18(KST) 이면 → 2026-05-19 00:00(KST) = 2026-05-18T15:00:00Z
+ *     이 시각 이후의 run 을 모두 포함하면 "최근 30일치(오늘 포함)" 가 빠짐없이 담긴다.
+ *
+ * @param days  윈도우 일수 (오늘 포함)
+ * @returns     UTC ISO 문자열
+ */
+export function kstWindowStartUtcIso(days: number): string {
+  // KST 자정을 구하려면: 현재 시각을 KST 일자로 환산 → 그 일자의 00:00(KST) → UTC.
+  // KST 자정(00:00 KST) = 전날 15:00 UTC. 이를 UTC 기준으로 안전하게 계산한다.
+  const todayKstKey = toKstDateKey(new Date()); // "YYYY-MM-DD" (KST 오늘)
+  const [y, m, d] = todayKstKey.split("-").map(Number);
+  // KST 오늘 자정의 UTC 시각 = Date.UTC(y, m-1, d, 0,0,0) - 9h
+  const todayKstMidnightUtcMs =
+    Date.UTC(y, m - 1, d, 0, 0, 0) - 9 * 60 * 60 * 1000;
+  const startMs = todayKstMidnightUtcMs - (days - 1) * 24 * 60 * 60 * 1000;
+  return new Date(startMs).toISOString();
+}

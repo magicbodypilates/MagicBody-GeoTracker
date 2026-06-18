@@ -14,8 +14,10 @@ import {
   recordAudit as serverRecordAudit,
   purgeWorkspace,
   setCachedWorkspaceId,
+  DEFAULT_RUNS_WINDOW_DAYS,
 } from "@/lib/client/server-store";
 import { isBrandedPrompt } from "@/lib/client/branded-prompt";
+import { toKstDateKey } from "@/lib/client/date-kst";
 import { DEMO_STATE } from "@/lib/demo-data";
 import { AeoAuditTab } from "@/components/dashboard/tabs/aeo-audit-tab";
 import { AutomationServerTab } from "@/components/dashboard/tabs/automation-server-tab";
@@ -469,6 +471,12 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const [serverWsId, setServerWsId] = useState<string | null>(null);
 
   /**
+   * runs 조회 윈도우(일) — AI 응답 탭·가시성 분석 탭의 기간 선택(7/30/90)과 연동.
+   * 두 탭 모두 전역 state.runs 를 보므로, 여기서 윈도우를 바꾸면 전역 재로드한다.
+   */
+  const [runsWindowDays, setRunsWindowDays] = useState<number>(DEFAULT_RUNS_WINDOW_DAYS);
+
+  /**
    * 응답 삭제·초기화 등 데이터 변경 시 증가시키는 nonce.
    * HomeServerTab 의 useEffect 의존성에 포함되어, 변경 시 stats API 재조회 트리거.
    * 홈 탭 자체 5분 polling 외에 즉시 반영이 필요한 경우 사용.
@@ -499,8 +507,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         if (cancelled) return;
         setServerWsId(wsId);
 
-        // 2) 서버에서 전체 데이터 로드
-        const serverData = await loadFromServer(wsId);
+        // 2) 서버에서 전체 데이터 로드 (runs 는 선택 기간 윈도우만큼)
+        const serverData = await loadFromServer(wsId, runsWindowDays);
         if (cancelled) return;
 
         // 3) defaultState + 서버 데이터 병합 — 서버에 없는 UI 선호도는 기본값
@@ -542,6 +550,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     () => new Set<TabKey>(["Home", "Responses", "Visibility Analytics", "Citation Opportunities"]),
     [],
   );
+  // activeTab 또는 runsWindowDays(기간 선택) 변경 시 재조회.
+  // 기간 선택 UI 가 AI 응답·가시성 탭 안에 있으므로, 선택 변경 시 이 effect 가
+  // 즉시 새 윈도우로 전역 runs 를 다시 로드한다(두 탭이 같은 state.runs 를 공유).
   useEffect(() => {
     if (demoMode || !serverWsId || !loaded) return;
     if (!dataHeavyTabs.has(activeTab)) return;
@@ -549,7 +560,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     let cancelled = false;
     (async () => {
       try {
-        const fresh = await loadFromServer(wsId);
+        const fresh = await loadFromServer(wsId, runsWindowDays);
         if (cancelled) return;
         setState((prev) => ({
           ...prev,
@@ -563,7 +574,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     return () => {
       cancelled = true;
     };
-  }, [activeTab, serverWsId, loaded, demoMode, dataHeavyTabs]);
+  }, [activeTab, serverWsId, loaded, demoMode, dataHeavyTabs, runsWindowDays]);
 
   /**
    * state.runs 주기적 재동기화 (60초).
@@ -581,7 +592,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     let cancelled = false;
     const refetch = async () => {
       try {
-        const fresh = await loadFromServer(wsId);
+        const fresh = await loadFromServer(wsId, runsWindowDays);
         if (cancelled) return;
         setState((prev) => ({
           ...prev,
@@ -597,7 +608,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       cancelled = true;
       clearInterval(t);
     };
-  }, [serverWsId, loaded, demoMode]);
+  }, [serverWsId, loaded, demoMode, runsWindowDays]);
 
   /**
    * 브랜드 설정 debounced 서버 동기화 (600ms)
@@ -804,7 +815,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const byDay = new Map<string, { total: number; sum: number }>();
 
     state.runs.forEach((run) => {
-      const day = run.createdAt.slice(0, 10);
+      // KST 일자로 그룹 — UTC slice(0,10) 은 KST 새벽 데이터를 전날로 밀어버림
+      const day = toKstDateKey(run.createdAt);
+      if (!day) return;
       const row = byDay.get(day) ?? { total: 0, sum: 0 };
       row.total += 1;
       row.sum += run.visibilityScore ?? 0;
@@ -1364,7 +1377,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
           succeeded += 1;
           setState((prev) => ({
             ...prev,
-            runs: [result.run, ...prev.runs].slice(0, 500),
+            // .slice(0,500) cap 제거 — 30/90일 윈도우가 500행을 넘을 수 있어
+            // cap 을 두면 방금 추가한 수동 응답이 즉시 잘려나간다(M-2).
+            runs: [result.run, ...prev.runs],
           }));
           // 서버 DB 에도 저장 (fire-and-forget)
           if (serverWsId) {
@@ -1446,7 +1461,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
             succeeded += 1;
             setState((prev) => ({
               ...prev,
-              runs: [result.run, ...prev.runs].slice(0, 500),
+              // .slice(0,500) cap 제거 (M-2) — 배치 실행 시에도 윈도우 행수 정합 유지
+              runs: [result.run, ...prev.runs],
             }));
             if (serverWsId) {
               serverAppendRun(serverWsId, result.run).catch((e) =>
@@ -2064,7 +2080,7 @@ ${exampleJson}
     //  서버 삭제 결과가 UI 에 반영되지 않는 경우가 있음)
     if (serverWsId) {
       try {
-        const fresh = await loadFromServer(serverWsId);
+        const fresh = await loadFromServer(serverWsId, runsWindowDays);
         setState((prev) => ({
           ...prev,
           runs: fresh.runs ?? [],
@@ -2343,12 +2359,22 @@ ${exampleJson}
           runDeltas={runDeltas}
           onDeleteRun={auth.kind === "admin" ? deleteRun : undefined}
           onResetManualResponses={handleResetManualResponses}
+          windowDays={runsWindowDays}
+          onWindowDaysChange={setRunsWindowDays}
         />
       );
     }
 
     if (activeTab === "Visibility Analytics") {
-      return <VisibilityAnalyticsTab data={visibilityTrend} runs={state.runs} brandTerms={getBrandTerms()} />;
+      return (
+        <VisibilityAnalyticsTab
+          data={visibilityTrend}
+          runs={state.runs}
+          brandTerms={getBrandTerms()}
+          windowDays={runsWindowDays}
+          onWindowDaysChange={setRunsWindowDays}
+        />
+      );
     }
 
     if (activeTab === "Citations") {

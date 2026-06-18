@@ -28,8 +28,18 @@ import type {
 } from "@/components/dashboard/types";
 
 import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
+import { kstWindowStartUtcIso } from "@/lib/client/date-kst";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
+/** runs 조회 윈도우 기본값(일). AI 응답·가시성 분석 탭이 이 기간만큼 로드. */
+export const DEFAULT_RUNS_WINDOW_DAYS = 30;
+/** runs 조회 윈도우 허용 상한(일). UI 선택(7/30/90) 상한과 일치. */
+export const MAX_RUNS_WINDOW_DAYS = 90;
+/** runs API 한 페이지 최대 행수 (서버 cap 과 동일). */
+const RUNS_PAGE_SIZE = 500;
+/** 페이지네이션 안전 상한 — 무한 루프 방지(최대 RUNS_PAGE_SIZE × 이 값 행). */
+const MAX_RUNS_PAGES = 60;
 
 /* ==========================================================
  * 서버 타입 (DB 스키마와 1:1)
@@ -187,16 +197,64 @@ export async function ensureWorkspace(opts: {
  * ========================================================== */
 
 /**
+ * runs 를 날짜 윈도우(KST 기준 최근 days 일) + 페이지네이션으로 전부 로드.
+ *
+ * 기존엔 `?limit=500` 단일 페이지만 받아 ~104~200행/일 기준 2.5~5일치만 보였다.
+ * AI 응답·가시성 분석 탭이 30일(기본)치를 빠짐없이 보려면 total 까지 반복 fetch 해야 한다.
+ *
+ * 페이지 경계 안정성:
+ *   - 서버가 `createdAt desc, id desc` 안정 정렬을 보장(한 슬롯 4 provider 가 동일초 createdAt).
+ *   - 그래도 폴링 중 신규 insert 로 offset 이 밀릴 수 있어, id 기준 dedup 으로 중복 제거.
+ *
+ * @param wsId  워크스페이스 ID
+ * @param days  조회 윈도우(일). 기본 30, 상한 90.
+ */
+async function fetchRunsWindow(wsId: string, days: number): Promise<ServerRun[]> {
+  const windowDays = Math.min(
+    Math.max(Math.floor(days) || DEFAULT_RUNS_WINDOW_DAYS, 1),
+    MAX_RUNS_WINDOW_DAYS,
+  );
+  const fromIso = kstWindowStartUtcIso(windowDays);
+  const fromParam = encodeURIComponent(fromIso);
+
+  const all: ServerRun[] = [];
+  const seen = new Set<string>();
+  let offset = 0;
+
+  for (let page = 0; page < MAX_RUNS_PAGES; page++) {
+    const { runs, total } = await j<{ runs: ServerRun[]; total: number }>(
+      `${BP}/api/workspaces/${wsId}/runs?limit=${RUNS_PAGE_SIZE}&offset=${offset}&from=${fromParam}`,
+    );
+    for (const r of runs) {
+      if (seen.has(r.id)) continue; // 페이지 경계 중복 제거
+      seen.add(r.id);
+      all.push(r);
+    }
+    offset += RUNS_PAGE_SIZE;
+    // 마지막 페이지 판정: 받은 행이 페이지 크기 미만이거나, 누적이 total 이상.
+    if (runs.length < RUNS_PAGE_SIZE) break;
+    if (typeof total === "number" && all.length >= total) break;
+  }
+  return all;
+}
+
+/**
  * 워크스페이스의 모든 데이터를 병렬 로드 후 AppState 에 병합할 Partial 을 반환.
  * 반환된 값을 기존 defaultState 와 병합(setState)하면 UI 가 서버 기반으로 동작.
+ *
+ * @param wsId  워크스페이스 ID
+ * @param runsWindowDays  runs 조회 윈도우(일). 기본 30. AI 응답·가시성 탭의 기간 선택과 연동.
  */
-export async function loadFromServer(wsId: string): Promise<Partial<AppState>> {
+export async function loadFromServer(
+  wsId: string,
+  runsWindowDays: number = DEFAULT_RUNS_WINDOW_DAYS,
+): Promise<Partial<AppState>> {
   // allSettled 로 변경 — 일부 API 실패해도 나머지 데이터는 복구
   const [wsSet, promptsSet, competitorsSet, runsSet, auditsSet] = await Promise.allSettled([
     j<{ workspaces: ServerWorkspace[] }>(`${BP}/api/workspaces`),
     j<{ prompts: ServerPrompt[] }>(`${BP}/api/workspaces/${wsId}/prompts`),
     j<{ competitors: ServerCompetitor[] }>(`${BP}/api/workspaces/${wsId}/competitors`),
-    j<{ runs: ServerRun[] }>(`${BP}/api/workspaces/${wsId}/runs?limit=500`),
+    fetchRunsWindow(wsId, runsWindowDays).then((runs) => ({ runs })),
     j<{ audits: ServerAudit[] }>(`${BP}/api/workspaces/${wsId}/audits`),
   ]);
 

@@ -65,9 +65,18 @@ export async function GET(
   const prompt = sp.get("prompt");
   const auto = sp.get("auto");
 
+  // from/to 는 ISO 문자열. 유효한 날짜만 필터에 반영(invalid date → 조건 무시).
+  const parseDate = (v: string | null): Date | null => {
+    if (!v) return null;
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  const fromDate = parseDate(from);
+  const toDate = parseDate(to);
+
   const conditions = [eq(schema.runs.workspaceId, id)];
-  if (from) conditions.push(gte(schema.runs.createdAt, new Date(from)));
-  if (to) conditions.push(lte(schema.runs.createdAt, new Date(to)));
+  if (fromDate) conditions.push(gte(schema.runs.createdAt, fromDate));
+  if (toDate) conditions.push(lte(schema.runs.createdAt, toDate));
   if (provider) conditions.push(eq(schema.runs.provider, provider));
   if (prompt) conditions.push(eq(schema.runs.promptText, prompt));
   if (auto === "true") conditions.push(eq(schema.runs.isAuto, true));
@@ -78,7 +87,10 @@ export async function GET(
       .select()
       .from(schema.runs)
       .where(and(...conditions))
-      .orderBy(desc(schema.runs.createdAt))
+      // 안정 정렬 — 한 슬롯의 여러 provider 가 동일초 createdAt 일 때
+      // createdAt 단일 키만으로는 offset 페이지 경계에서 중복/누락이 생긴다.
+      // id 를 2차 키로 추가해 페이지네이션을 결정적으로 만든다.
+      .orderBy(desc(schema.runs.createdAt), desc(schema.runs.id))
       .limit(limit)
       .offset(offset);
 

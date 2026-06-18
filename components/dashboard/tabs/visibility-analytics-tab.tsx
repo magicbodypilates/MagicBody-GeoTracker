@@ -16,6 +16,8 @@ import {
   isUrlMatchingCitedKeys,
 } from "@/components/dashboard/citation-utils";
 import { isBrandedPrompt } from "@/lib/client/branded-prompt";
+import { RangeSelector } from "@/components/dashboard/range-selector";
+import { toKstDateKey, kstRecentDateKeys } from "@/lib/client/date-kst";
 
 const PROVIDER_COLORS: Record<Provider, string> = {
   chatgpt: "#10a37f",
@@ -30,6 +32,10 @@ type VisibilityAnalyticsTabProps = {
   data: Array<{ day: string; visibility: number }>;
   runs: ScrapeRun[];
   brandTerms: string[];
+  /** 조회 기간(일) — 7/30/90. 부모(sovereign-dashboard)가 전역 윈도우로 사용 */
+  windowDays?: number;
+  /** 기간 선택 변경 콜백 — 부모가 전역 runs 를 재로드 */
+  onWindowDaysChange?: (days: number) => void;
 };
 
 const SENTIMENT_LABELS: Record<string, string> = {
@@ -49,7 +55,13 @@ function downloadCsv(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAnalyticsTabProps) {
+export function VisibilityAnalyticsTab({
+  data,
+  runs,
+  brandTerms,
+  windowDays,
+  onWindowDaysChange,
+}: VisibilityAnalyticsTabProps) {
   const [dataTab, setDataTab] = useState<"auto" | "manual">("auto");
   // brand 모드 체크박스 — false (기본) = 일반 검색만 / true = brand 명 검색만
   const [brandedView, setBrandedView] = useState(false);
@@ -99,7 +111,9 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
   const computedTrendData = useMemo(() => {
     const byDay = new Map<string, { total: number; sum: number }>();
     filteredRuns.forEach((run) => {
-      const day = run.createdAt.slice(0, 10);
+      // KST 일자로 그룹 — UTC slice(0,10) 은 KST 새벽 데이터를 전날로 밀어버림
+      const day = toKstDateKey(run.createdAt);
+      if (!day) return;
       const row = byDay.get(day) ?? { total: 0, sum: 0 };
       row.total += 1;
       row.sum += run.visibilityScore ?? 0;
@@ -155,18 +169,23 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
     return { mainMentioned, cited, related };
   }, [filteredRuns, brandTerms]);
 
-  // 모델별 14일 일별 평균 가시성 — filteredRuns 기준
+  // 모델별 일별 평균 가시성 — filteredRuns 기준.
+  // 축 일수는 선택 기간(windowDays)과 정합. 미지정 시 기존 동작(14일) 유지.
+  const chartDays = windowDays ?? 14;
   const providerVisibilitySeries = useMemo(() => {
-    const recentDays = 14;
-    const days: string[] = [];
-    const today = new Date();
-    for (let i = recentDays - 1; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - i);
-      days.push(d.toISOString().slice(0, 10));
+    // KST 기준 연속 일자 축 (실행 없는 날도 0 으로 채움)
+    const days = kstRecentDateKeys(chartDays);
+    // 일자별 KST 키로 사전 그룹화 — O(n) (이전엔 일자마다 전체 filter 로 O(일수×n))
+    const byDay = new Map<string, ScrapeRun[]>();
+    for (const r of filteredRuns) {
+      const key = toKstDateKey(r.createdAt);
+      if (!key) continue;
+      const arr = byDay.get(key);
+      if (arr) arr.push(r);
+      else byDay.set(key, [r]);
     }
     return days.map((day) => {
-      const dayRuns = filteredRuns.filter((r) => r.createdAt.slice(0, 10) === day);
+      const dayRuns = byDay.get(day) ?? [];
       const row: Record<string, string | number> = { day: day.slice(5) };
       for (const p of VISIBLE_PROVIDERS) {
         const pRuns = dayRuns.filter((r) => r.provider === p);
@@ -179,13 +198,18 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       }
       return row;
     });
-  }, [filteredRuns]);
+  }, [filteredRuns, chartDays]);
 
   const total = filteredRuns.length || 1;
   const pct = (n: number) => Math.round((n / total) * 100);
 
   return (
     <div className="space-y-4">
+      {windowDays != null && onWindowDaysChange && (
+        <div className="flex justify-end">
+          <RangeSelector value={windowDays} onChange={onWindowDaysChange} />
+        </div>
+      )}
       {/* 자동/수동 탭 */}
       <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1">
         <button
@@ -325,7 +349,7 @@ export function VisibilityAnalyticsTab({ data, runs, brandTerms }: VisibilityAna
       {/* 모델별 평균 가시성 추이 (14일) — 홈에서 이동된 상세 버전 */}
       <section className="rounded-lg border border-th-border bg-th-card p-4">
         <div className="mb-3">
-          <h3 className="text-sm font-semibold text-th-text">모델별 평균 가시성 추이 (14일)</h3>
+          <h3 className="text-sm font-semibold text-th-text">모델별 평균 가시성 추이 ({chartDays}일)</h3>
           <p className="mt-0.5 text-[11px] text-th-text-muted">
             프로바이더별 일일 평균 visibility score. 실행이 없는 날은 0으로 표시됩니다.
           </p>

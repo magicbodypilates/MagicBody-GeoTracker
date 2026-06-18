@@ -5,6 +5,8 @@ import type { RunDelta } from "@/components/dashboard/types";
 import { splitAnswerSections } from "@/components/dashboard/answer-utils";
 import { isBrandedPrompt } from "@/lib/client/branded-prompt";
 import { isRelatedCitation, isUrlMatchingCitedKeys } from "@/components/dashboard/citation-utils";
+import { RangeSelector } from "@/components/dashboard/range-selector";
+import { toKstDateKey } from "@/lib/client/date-kst";
 
 type ReputationSourcesTabProps = {
   runs: ScrapeRun[];
@@ -13,6 +15,10 @@ type ReputationSourcesTabProps = {
   runDeltas?: RunDelta[];
   onDeleteRun?: (index: number) => void;
   onResetManualResponses?: () => void;
+  /** 조회 기간(일) — 7/30/90. 부모(sovereign-dashboard)가 전역 윈도우로 사용 */
+  windowDays?: number;
+  /** 기간 선택 변경 콜백 — 부모가 전역 runs 를 재로드 */
+  onWindowDaysChange?: (days: number) => void;
 };
 
 function normalizeAnswerForDisplay(answer: string): string {
@@ -293,7 +299,7 @@ function ModelResponseCard({
               </span>
             )}
           </div>
-          <span className="text-xs text-th-text-muted">{run.createdAt.slice(0, 10)}</span>
+          <span className="text-xs text-th-text-muted">{toKstDateKey(run.createdAt)}</span>
         </button>
         {onDelete && (
           <button
@@ -513,6 +519,8 @@ export function ReputationSourcesTab({
   runDeltas = [],
   onDeleteRun,
   onResetManualResponses,
+  windowDays,
+  onWindowDaysChange,
 }: ReputationSourcesTabProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
@@ -615,9 +623,18 @@ export function ReputationSourcesTab({
     return m;
   }, [runDeltas]);
 
+  const rangeSelector =
+    windowDays != null && onWindowDaysChange ? (
+      <div className="flex justify-end">
+        <RangeSelector value={windowDays} onChange={onWindowDaysChange} />
+      </div>
+    ) : null;
+
   if (runs.length === 0) {
     return (
-      <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center">
+      <div className="space-y-4">
+        {rangeSelector}
+        <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center">
         <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-th-accent-soft">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-th-text-accent">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -626,12 +643,14 @@ export function ReputationSourcesTab({
         </div>
         <p className="text-sm font-medium text-th-text">아직 모델 응답이 없습니다</p>
         <p className="mt-1 text-sm text-th-text-secondary">프롬프트를 실행하여 AI 모델 전반의 브랜드 분석을 확인하세요.</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      {rangeSelector}
 
       {/* ── 1단 3분할 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답 ── */}
       <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1">

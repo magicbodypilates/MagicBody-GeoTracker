@@ -51,6 +51,10 @@ export type PaymentSummaryRaw = {
   gmv?: number;
   totalDiscount?: number;
   salesCount?: number;
+  /** 통계에서 제외된 취소 주문 수(안내용). */
+  cancelledCount?: number;
+  /** 통계에서 제외된 취소 주문 금액(안내용). */
+  cancelledAmount?: number;
 };
 
 /** GetPaymentTransactions 행 (라인 레벨, PII: 이름만) */
@@ -111,6 +115,10 @@ export type SummaryNormalized = {
   gmv: number;
   totalDiscount: number;
   salesCount: number;
+  /** 통계에서 제외된 취소 주문 수(안내용). 0 이면 화면 미표시. */
+  cancelledCount: number;
+  /** 통계에서 제외된 취소 주문 금액(안내용). */
+  cancelledAmount: number;
 };
 
 export type TransactionRow = {
@@ -337,6 +345,8 @@ export function normalizeSummary(
     gmv: safeNum(r.gmv),
     totalDiscount: safeNum(r.totalDiscount),
     salesCount: safeInt(r.salesCount),
+    cancelledCount: safeInt(r.cancelledCount),
+    cancelledAmount: safeNum(r.cancelledAmount),
   };
 }
 

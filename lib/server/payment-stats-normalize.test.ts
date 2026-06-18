@@ -296,4 +296,35 @@ describe("normalizeSummary", () => {
     const out = normalizeSummary(null, { start: "2025-01-01", end: "2025-12-31" });
     expect(out).toMatchObject({ netRevenue: 0, gmv: 0, totalDiscount: 0, salesCount: 0 });
   });
+  it("취소 집계(cancelledCount/cancelledAmount) 정상 파싱", () => {
+    const out = normalizeSummary(
+      {
+        netRevenue: 1000000,
+        gmv: 1200000,
+        totalDiscount: 200000,
+        salesCount: 10,
+        cancelledCount: 2,
+        cancelledAmount: 150000,
+      },
+      { start: "2025-01-01", end: "2025-12-31" },
+    );
+    expect(out.cancelledCount).toBe(2);
+    expect(out.cancelledAmount).toBe(150000);
+    // 정수 보정: 소수가 들어와도 count 는 반올림 정수.
+    const out2 = normalizeSummary(
+      { cancelledCount: 3.4, cancelledAmount: 99999.5 },
+      { start: "2025-01-01", end: "2025-12-31" },
+    );
+    expect(out2.cancelledCount).toBe(3);
+    expect(out2.cancelledAmount).toBe(99999.5);
+  });
+  it("취소 집계 누락(undefined) → 0 안전", () => {
+    // cancelled* 필드가 없는 옛 백엔드 응답에서도 0 으로 안전 처리.
+    const out = normalizeSummary(
+      { netRevenue: 500000, gmv: 500000, totalDiscount: 0, salesCount: 5 },
+      { start: "2025-01-01", end: "2025-12-31" },
+    );
+    expect(out.cancelledCount).toBe(0);
+    expect(out.cancelledAmount).toBe(0);
+  });
 });

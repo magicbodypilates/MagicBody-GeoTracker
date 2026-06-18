@@ -79,6 +79,8 @@ type SummaryData = {
   gmv: number;
   totalDiscount: number;
   salesCount: number;
+  cancelledCount: number;
+  cancelledAmount: number;
 };
 
 const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
@@ -438,6 +440,14 @@ export function PaymentStatsTab() {
                 hint="실매출 계산에는 사용하지 않습니다."
               />
             </div>
+          )}
+
+          {/* 취소 안내 — 통계에서 제외된 취소 건수·금액(있을 때만 노출, 클러터 방지). */}
+          {summary && summary.cancelledCount > 0 && (
+            <p className="text-[11px] text-th-text-muted">
+              이 기간 결제 중 취소 {formatCount(summary.cancelledCount)} 제외 (
+              {formatWon(summary.cancelledAmount)})
+            </p>
           )}
 
           {/* 타입 멀티토글 */}

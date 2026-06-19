@@ -34,6 +34,7 @@ import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab"
 import { HomeServerTab } from "@/components/dashboard/tabs/home-server-tab";
 import { PaymentStatsTab } from "@/components/dashboard/tabs/payment-stats-tab";
 import { Ga4MarketingTab } from "@/components/dashboard/tabs/ga4-marketing-tab";
+import { AttributionTab } from "@/components/dashboard/tabs/attribution-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-tab";
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
@@ -97,6 +98,13 @@ const tabIcons: Record<TabKey, ReactNode> = {
       <path d="M3 3v18h18" />
       <path d="M7 13l3-3 3 3 5-6" />
       <circle cx="21" cy="7" r="1.5" />
+    </Icon>
+  ),
+  Attribution: (
+    <Icon>
+      <path d="M12 2a10 10 0 1 0 10 10" />
+      <path d="M12 12 22 4" />
+      <path d="M12 12V2" />
     </Icon>
   ),
   "Project Settings": (
@@ -272,6 +280,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     tooltip: "GA4 전자상거래 기준 채널·랜딩·상품별 구매와 매출을 분석합니다(GA4 기여 추정).",
     details:
       "Google Analytics 4의 전자상거래 이벤트를 기준으로 채널별 ROI, 랜딩페이지·상품(강의)별 구매·매출, 매출 추이, 신규/재방문, 참고용 전환 깔때기를 분석합니다. 구매는 ecommercePurchases, 매출은 purchaseRevenue(KRW) 기준이며 모두 GA4가 추정·기여 집계한 값입니다. 결제통계 탭의 CMS 실결제·정산액과 다를 수 있으므로 두 수치를 직접 더하거나 비교하지 마세요. 종료일은 집계 지연으로 어제까지입니다. 최고관리자 전용.",
+  },
+  Attribution: {
+    title: "유입경로",
+    tooltip: "실제 결제건에 기록된 유입경로를 채널(구글·메타·네이버·직접·미상)별로 분석합니다(확정·결제건 직접).",
+    details:
+      "결제 시 함께 기록된 유입경로(utm·클릭ID 존재 여부)를 기준으로 채널별 결제 건수·매출과 결제별 상세를 봅니다. 이 값은 실제 결제건에서 직접 집계한 확정 데이터로, 기능 배포 이후 결제만 포함됩니다. GA4 '마케팅 성과' 탭은 전체 트래픽 기준 추정·기여 집계라 수치가 다르므로 두 값을 더하거나 직접 비교하지 마세요. 광고 표시가 없는 결제는 '직접·미상'으로 묶이며 여기에는 기능 켜기 이전 결제와 직접 방문이 섞여 있습니다. 정규과정은 과정 목록 확정 후 계약금의 10배(실매출)로 환산되며, 확정 전에는 실결제액 기준입니다. 자체취소·방문결제는 추적 한계로 오차가 있을 수 있습니다. 개인정보(클릭ID 원문·이메일·전화)는 표시하지 않으며 클릭ID는 기록 여부(✓/−)만 노출합니다. 최고관리자 전용.",
   },
   "Project Settings": {
     title: "프로젝트 설정",
@@ -2272,6 +2286,10 @@ ${exampleJson}
 
     if (activeTab === "Marketing Performance") {
       return <Ga4MarketingTab />;
+    }
+
+    if (activeTab === "Attribution") {
+      return <AttributionTab />;
     }
 
     if (activeTab === "Project Settings") {

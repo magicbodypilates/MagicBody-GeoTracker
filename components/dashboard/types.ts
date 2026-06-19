@@ -218,6 +218,7 @@ export const tabs = [
   "Home",
   "Payment Stats",
   "Marketing Performance",
+  "Attribution",
   "Prompt Hub",
   "Responses",
   "Visibility Analytics",
@@ -268,6 +269,7 @@ export type TabKey = (typeof tabs)[number];
 export const REGULAR_ADMIN_HIDDEN_TABS: readonly TabKey[] = [
   "Payment Stats",
   "Marketing Performance",
+  "Attribution",
   "Citation Opportunities",
   "SRO Analysis",
   "NAVER AI",

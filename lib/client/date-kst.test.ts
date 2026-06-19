@@ -3,6 +3,8 @@ import {
   toKstDateKey,
   kstRecentDateKeys,
   kstWindowStartUtcIso,
+  enumerateDateRange,
+  resolveGa4DateToken,
 } from "./date-kst";
 
 describe("toKstDateKey", () => {
@@ -95,5 +97,107 @@ describe("kstWindowStartUtcIso", () => {
     const keys = kstRecentDateKeys(30);
     expect(keys[0]).toBe(startKey);
     expect(keys).toHaveLength(30);
+  });
+});
+
+describe("enumerateDateRange (임의 구간 연속 일자)", () => {
+  it("start~end 양끝 포함, 오래된→최신", () => {
+    expect(enumerateDateRange("2026-06-01", "2026-06-04")).toEqual([
+      "2026-06-01",
+      "2026-06-02",
+      "2026-06-03",
+      "2026-06-04",
+    ]);
+  });
+
+  it("같은 날이면 그 하루만", () => {
+    expect(enumerateDateRange("2026-06-01", "2026-06-01")).toEqual([
+      "2026-06-01",
+    ]);
+  });
+
+  it("월말 경계를 넘는다", () => {
+    expect(enumerateDateRange("2026-06-29", "2026-07-02")).toEqual([
+      "2026-06-29",
+      "2026-06-30",
+      "2026-07-01",
+      "2026-07-02",
+    ]);
+  });
+
+  it("인접 키는 정확히 하루 차이 (구간 길어도 끊김 없음)", () => {
+    const keys = enumerateDateRange("2026-05-19", "2026-06-17");
+    expect(keys).toHaveLength(30);
+    for (let i = 1; i < keys.length; i++) {
+      const prev = Date.parse(keys[i - 1] + "T00:00:00Z");
+      const cur = Date.parse(keys[i] + "T00:00:00Z");
+      expect(cur - prev).toBe(24 * 60 * 60 * 1000);
+    }
+  });
+
+  it("start>end 또는 형식 오류는 빈 배열", () => {
+    expect(enumerateDateRange("2026-06-04", "2026-06-01")).toEqual([]);
+    expect(enumerateDateRange("not-a-date", "2026-06-01")).toEqual([]);
+    expect(enumerateDateRange("2026-06-01", "")).toEqual([]);
+  });
+});
+
+describe("resolveGa4DateToken (GA4 상대 토큰 → KST 절대 일자)", () => {
+  // 기준 시각: 2026-06-18T03:00:00Z = 2026-06-18 12:00 KST (낮 시간대 — 날짜 경계 영향 없음)
+  const now = new Date("2026-06-18T03:00:00Z");
+
+  it("이미 절대 일자면 그대로 반환", () => {
+    expect(resolveGa4DateToken("2026-06-01", now)).toBe("2026-06-01");
+  });
+
+  it('"today" → KST 오늘', () => {
+    expect(resolveGa4DateToken("today", now)).toBe("2026-06-18");
+  });
+
+  it('"yesterday" → KST 어제', () => {
+    expect(resolveGa4DateToken("yesterday", now)).toBe("2026-06-17");
+  });
+
+  it('"0daysAgo" → KST 오늘 (오늘 포함)', () => {
+    expect(resolveGa4DateToken("0daysAgo", now)).toBe("2026-06-18");
+  });
+
+  it('"28daysAgo" (route 기본값) → 28일 전 KST 일자', () => {
+    // 2026-06-18 - 28일 = 2026-05-21
+    expect(resolveGa4DateToken("28daysAgo", now)).toBe("2026-05-21");
+  });
+
+  it("대소문자·공백 무시", () => {
+    expect(resolveGa4DateToken("  TODAY  ", now)).toBe("2026-06-18");
+    expect(resolveGa4DateToken("28DaysAgo", now)).toBe("2026-05-21");
+  });
+
+  it("KST 날짜 경계 — UTC 16:00은 이미 KST 다음날 01:00이라 today가 다음 일자", () => {
+    // 2026-06-18T16:00:00Z = 2026-06-19 01:00 KST
+    const lateNow = new Date("2026-06-18T16:00:00Z");
+    expect(resolveGa4DateToken("today", lateNow)).toBe("2026-06-19");
+    expect(resolveGa4DateToken("yesterday", lateNow)).toBe("2026-06-18");
+  });
+
+  it("월 경계를 넘는 NdaysAgo", () => {
+    // 2026-06-18 - 30일 = 2026-05-19
+    expect(resolveGa4DateToken("30daysAgo", now)).toBe("2026-05-19");
+  });
+
+  it("인식 불가 토큰은 빈 문자열", () => {
+    expect(resolveGa4DateToken("lastWeek", now)).toBe("");
+    expect(resolveGa4DateToken("", now)).toBe("");
+    expect(resolveGa4DateToken("daysago", now)).toBe("");
+  });
+
+  it("MED-2 통합 — route 기본값을 enumerateDateRange에 넣으면 연속 일자가 채워진다", () => {
+    // 정규화 전: enumerateDateRange("28daysAgo","today") = [] (0 채움 무력화)
+    // 정규화 후: 29일 연속 일자 (28일 전 ~ 오늘, 양끝 포함)
+    const start = resolveGa4DateToken("28daysAgo", now);
+    const end = resolveGa4DateToken("today", now);
+    const days = enumerateDateRange(start, end);
+    expect(days).toHaveLength(29);
+    expect(days[0]).toBe("2026-05-21");
+    expect(days[days.length - 1]).toBe("2026-06-18");
   });
 });

@@ -33,6 +33,7 @@ import { VisibilityAnalyticsTab } from "@/components/dashboard/tabs/visibility-a
 import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab";
 import { HomeServerTab } from "@/components/dashboard/tabs/home-server-tab";
 import { PaymentStatsTab } from "@/components/dashboard/tabs/payment-stats-tab";
+import { Ga4MarketingTab } from "@/components/dashboard/tabs/ga4-marketing-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-tab";
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
@@ -89,6 +90,13 @@ const tabIcons: Record<TabKey, ReactNode> = {
     <Icon>
       <line x1="12" y1="1" x2="12" y2="23" />
       <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </Icon>
+  ),
+  "Marketing Performance": (
+    <Icon>
+      <path d="M3 3v18h18" />
+      <path d="M7 13l3-3 3 3 5-6" />
+      <circle cx="21" cy="7" r="1.5" />
     </Icon>
   ),
   "Project Settings": (
@@ -258,6 +266,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     tooltip: "클래스타입별·강의별 실매출(쿠폰·포인트·할인 차감 후)과 판매 건수를 기간별로 봅니다.",
     details:
       "CMS 결제 데이터를 클래스타입별 시계열과 강의별 순위로 분석합니다. 그래프·테이블 금액은 실매출(쿠폰·포인트·추가 할인 차감 후 실제 결제·입금된 금액) 기준입니다. 취소(환불)건은 제외됩니다. 정가 합(GMV)·총 할인액은 별도 KPI 로 참고용 제공하며 실매출 계산에는 사용하지 않습니다. 최고관리자 전용.",
+  },
+  "Marketing Performance": {
+    title: "마케팅 성과",
+    tooltip: "GA4 전자상거래 기준 채널·랜딩·상품별 구매와 매출을 분석합니다(GA4 기여 추정).",
+    details:
+      "Google Analytics 4의 전자상거래 이벤트를 기준으로 채널별 ROI, 랜딩페이지·상품(강의)별 구매·매출, 매출 추이, 신규/재방문, 참고용 전환 깔때기를 분석합니다. 구매는 ecommercePurchases, 매출은 purchaseRevenue(KRW) 기준이며 모두 GA4가 추정·기여 집계한 값입니다. 결제통계 탭의 CMS 실결제·정산액과 다를 수 있으므로 두 수치를 직접 더하거나 비교하지 마세요. 종료일은 집계 지연으로 어제까지입니다. 최고관리자 전용.",
   },
   "Project Settings": {
     title: "프로젝트 설정",
@@ -2254,6 +2268,10 @@ ${exampleJson}
 
     if (activeTab === "Payment Stats") {
       return <PaymentStatsTab />;
+    }
+
+    if (activeTab === "Marketing Performance") {
+      return <Ga4MarketingTab />;
     }
 
     if (activeTab === "Project Settings") {

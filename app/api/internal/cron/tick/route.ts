@@ -8,8 +8,10 @@
  * 응답: { ok, mode: "background", message }
  *
  * 처리 모델 (fire-and-forget):
- *   - runTick() 은 13개 프롬프트 × 4개 provider = 52건을 직렬로 Bright Data 에
- *     호출해 완료까지 10~20분까지 걸림.
+ *   - runTick() 은 13개 프롬프트를 직렬로, 각 프롬프트의 provider 들을 병렬로 Bright Data 에
+ *     호출한다. 느린 provider(gemini/perplexity)의 폴링 윈도우를 ~15분으로 늘렸기 때문에
+ *     한 프롬프트 소요 = 가장 느린 provider 1건(worst case ≈ 15분)이고, 13 프롬프트 직렬이면
+ *     worst case ≈ 3.25시간까지 걸릴 수 있다(12시간 주기 안에는 안전).
  *   - 워커의 fetch 는 undici 기본 headersTimeout = 300000ms(5분)에 끊어져
  *     tick 이 중첩되고 새 tick 이 `where next_run_at <= now` 로 또 동일 스케줄을
  *     잡아와 중복 처리가 벌어짐.

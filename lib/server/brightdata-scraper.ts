@@ -369,18 +369,65 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
 }
 
 /**
+ * 폴링 전략 상수 (provider 별).
+ *
+ * - ChatGPT: 3초 고정. 대부분 10~30초 내 완료 — 지수 백오프가 오히려 완료 감지를 늦춤.
+ *   3초 × 90회 = 최대 ~270s.
+ * - 그 외(gemini/perplexity/google_ai/copilot/grok): 2→4→8→10초 지수 백오프.
+ *   Bright Data 의 gemini/perplexity 스냅샷 준비가 8~12분을 넘는 사례가 많아
+ *   과거 maxAttempts=60(최대 ~520s/8.7분)에서는 다수가 타임아웃 → throw → 조용히 누락됐다.
+ *   maxAttempts 를 늘려 폴링 윈도우를 ~15분(900s)까지 확대해 느린 provider 수집률을 높인다.
+ *   대기 총시간 폭증은 호출부(executeSchedule)의 provider 병렬 처리로 억제한다
+ *   (한 prompt 의 4 provider 를 동시에 폴링하므로 prompt 당 소요 = 가장 느린 provider 1건 ≈ 900s).
+ *
+ * 무한 대기 방지: maxAttempts 로 상한이 명확하다.
+ */
+const CHATGPT_FIXED_DELAY_MS = 3000;
+const CHATGPT_MAX_ATTEMPTS = 90; // 3초 × 90 = ~270s
+const SLOW_BASE_DELAY_MS = 2000;
+const SLOW_MAX_DELAY_MS = 10000;
+/**
+ * 느린 provider 의 최대 폴링 횟수.
+ * 백오프: 2,2,2,2,2, 4,4,4,4,4, 8,8,8,8,8, 10,10,... (5회마다 2배, 상한 10초)
+ * 처음 15회 = 2×5 + 4×5 + 8×5 = 70s, 이후 10초 고정.
+ * 약 15분(900s) 윈도우 = 70s + (n-15)×10s ≥ 830s → n-15 ≥ 83 → n ≈ 98.
+ * 안전하게 100회로 설정 (≈ 70 + 85×10 = 920s ≈ 15.3분).
+ */
+const SLOW_MAX_ATTEMPTS = 100;
+
+/**
+ * 지수 백오프 지연 시간(ms) 계산 — 순수 함수(테스트 용이).
+ * 5회 시도마다 2배씩 증가하고 SLOW_MAX_DELAY_MS 에서 상한.
+ */
+export function computeBackoffDelayMs(attempt: number): number {
+  return Math.min(
+    SLOW_BASE_DELAY_MS * Math.pow(2, Math.floor(attempt / 5)),
+    SLOW_MAX_DELAY_MS,
+  );
+}
+
+/**
+ * provider 의 폴링 윈도우 상한(ms) 추정 — 관측·테스트 용도.
+ * 실제 throw 전까지 누적되는 대기 시간의 합.
+ */
+export function estimatePollingWindowMs(provider?: Provider): number {
+  if (provider === "chatgpt") {
+    return CHATGPT_FIXED_DELAY_MS * CHATGPT_MAX_ATTEMPTS;
+  }
+  let total = 0;
+  for (let attempt = 0; attempt < SLOW_MAX_ATTEMPTS; attempt += 1) {
+    total += computeBackoffDelayMs(attempt);
+  }
+  return total;
+}
+
+/**
  * Bright Data snapshot 이 ready 될 때까지 폴링.
- * 프로바이더별로 최적 전략이 다름 — ChatGPT 는 응답 속도가 다른 프로바이더 대비 느리지만
- * 대부분 10~30초 내에 완료되므로 **고정 짧은 간격**이 지수 백오프보다 감지 시간이 짧음.
+ * 프로바이더별로 최적 전략이 다름 (위 상수 주석 참조).
  */
 async function monitorUntilReady(snapshotId: string, provider?: Provider) {
-  // ChatGPT 는 3초 고정 (지수 백오프가 오히려 완료 감지를 늦춤)
-  // 나머지는 2→4→8→10초 지수 백오프 유지
   const isChatGPT = provider === "chatgpt";
-  const maxAttempts = isChatGPT ? 90 : 60; // 3초 × 90 = 최대 4.5분 / 지수 = 최대 8분
-  const FIXED_DELAY_CHATGPT = 3000;
-  const BASE_DELAY = 2000;
-  const MAX_DELAY = 10000;
+  const maxAttempts = isChatGPT ? CHATGPT_MAX_ATTEMPTS : SLOW_MAX_ATTEMPTS;
   let elapsed = 0;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -409,8 +456,8 @@ async function monitorUntilReady(snapshotId: string, provider?: Provider) {
     }
 
     const delay = isChatGPT
-      ? FIXED_DELAY_CHATGPT
-      : Math.min(BASE_DELAY * Math.pow(2, Math.floor(attempt / 5)), MAX_DELAY);
+      ? CHATGPT_FIXED_DELAY_MS
+      : computeBackoffDelayMs(attempt);
     elapsed += delay;
     await new Promise((resolve) => setTimeout(resolve, delay));
   }

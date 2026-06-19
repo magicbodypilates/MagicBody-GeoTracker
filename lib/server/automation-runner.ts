@@ -197,170 +197,43 @@ async function executeSchedule(
   let skippedDuplicates = 0;
   const providerFailures: ProviderFailure[] = [];
 
-  // 프롬프트 × 프로바이더 전부 — 순차 실행 (Bright Data 안정성)
-  // 중복 실행 방지:
+  // 프롬프트는 직렬, 한 프롬프트의 provider 들은 병렬 처리.
+  //
+  // 변경 이유 (느린 provider 누락 수정):
+  //   gemini/perplexity 는 Bright Data 스냅샷 준비가 느려 폴링 윈도우를 ~15분으로 늘렸다.
+  //   provider 까지 직렬로 두면 한 프롬프트가 (느린 provider 합) 만큼 누적돼 tick 총시간이
+  //   12시간 주기를 위협한다. provider 를 병렬로 돌리면 한 프롬프트 소요 = 가장 느린 provider 1건
+  //   (≈ 900s worst case) 으로 억제된다. 13 prompt × 900s ≈ 3.25h 로 12h 주기 안에 안전하게 들어온다.
+  //   prompt 단위는 직렬을 유지해 Bright Data 동시 부하를 한 프롬프트의 provider 수 이하로 제한한다.
+  //
+  // 중복 실행 방지(기존 유지):
   //   1) DB unique index (uq_runs_auto_slot) — 실제 무결성 보증
   //   2) 사전 SELECT — Bright Data 비용 낭비 방지 (pre-check)
   //   3) INSERT 시 onConflictDoNothing — 경쟁 상황에서 조용히 스킵
+  //
+  // 카운터 race 방지: 각 provider 작업은 부분 결과를 반환하고, 여기서 순차 합산한다
+  //   (공유 변수를 동시에 ++ 하지 않음).
   for (const prompt of promptRows) {
-    for (const provider of sched.providers) {
-      try {
-        // pre-check: 이미 이 슬롯 + prompt + provider 조합이 있으면 스킵 (API 호출 절약)
-        const [existing] = await db
-          .select({ id: schema.runs.id })
-          .from(schema.runs)
-          .where(
-            and(
-              eq(schema.runs.workspaceId, sched.workspaceId),
-              eq(schema.runs.intervalSlot, intervalSlot),
-              eq(schema.runs.promptText, prompt.text),
-              eq(schema.runs.provider, provider),
-            ),
-          )
-          .limit(1);
-        if (existing) {
-          skippedDuplicates += 1;
-          continue;
-        }
-
-        const started = Date.now();
-        const result = await runAiScraper({
-          provider: provider as "chatgpt" | "perplexity" | "copilot" | "gemini" | "google_ai" | "grok",
-          prompt: prompt.text,
-          country: sched.geolocation ?? "KR",
-        });
-
-        const executionDurationMs = Date.now() - started;
-        const citations = Array.isArray(result.citations) ? (result.citations as Citation[]) : [];
-        const answerText = result.answer ?? "";
-
-        // 본문 기준 언급 계산 (첨부 영역 분리 없이 간단 버전 — 필요 시 splitAnswerSections 도입)
-        const brandMentions = findMentions(answerText, brandTerms);
-        const competitorMentions = findMentions(answerText, competitorTerms);
-        const citedBrandDomains = matchCitationDomains(citations, brandWebsites);
-        const citedCompetitorDomains = matchCitationDomains(citations, competitorWebsites);
-
-        // Sentiment + ranking signals: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 즉시 결정.
-        // 언급이 있을 때 LLM 에 sentiment + isTopRanked + isStronglyRecommended 한꺼번에 분류 요청.
-        let sentiment: "positive" | "neutral" | "negative" | "not-mentioned" = detectSentiment(
-          answerText,
-          brandTerms,
-        );
-        let isTopRanked = false;
-        let isStronglyRecommended = false;
-        if (sentiment !== "not-mentioned") {
-          const llm = await classifySentiment({
-            answerText,
-            brandName: brandTerms[0] ?? "",
-            brandAliases: brandTerms.slice(1),
-          });
-          if (llm) {
-            // 후처리 가드 — 약한 positive(=1위 명시 없고 적극 추천 없음)인데 비교 나열 응답이면 neutral 로 강제
-            sentiment = guardSentiment(answerText, brandTerms, llm);
-            isTopRanked = llm.isTopRanked;
-            isStronglyRecommended = llm.isStronglyRecommended;
-          }
-        }
-        // brand 명 검색 여부 — prompt 텍스트에 brand 별칭 중 하나라도 포함되면 branded query
-        const promptLower = prompt.text.toLowerCase();
-        const isBrandedQuery = brandTerms.some(
-          (t) => t && promptLower.includes(t.toLowerCase()),
-        );
-        // 본문 내 자사 URL 등장 여부 판정.
-        // 일반 도메인은 호스트 문자열 포함 여부로 매칭. 소셜 플랫폼(youtube.com, instagram.com 등)은
-        // 호스트만으로 매칭하면 다른 채널 URL 도 매칭되는 false positive 발생 → 핸들(seg)까지
-        // 본문에 등장해야 매칭으로 인정.
-        const brandTargets = brandWebsites
-          .map((url) => normalizeTargetKey(url))
-          .filter((k): k is { host: string; seg: string } => k !== null);
-        const answerLower = answerText.toLowerCase();
-        const hasBodyUrl = brandTargets.some((t) => {
-          if (SOCIAL_PLATFORM_DOMAINS.has(t.host)) {
-            // 소셜: 호스트 + 핸들 둘 다 본문에 있어야 매치 (핸들 없으면 매칭 불가)
-            if (!t.seg) return false;
-            return answerLower.includes(t.host) && answerLower.includes(t.seg);
-          }
-          // 일반 도메인: 호스트 문자열 포함만으로 매치
-          return answerLower.includes(t.host);
-        });
-        // 참고자료에만 등장 (본문엔 없음)
-        const hasCitationOnly = !hasBodyUrl && citedBrandDomains.length > 0;
-
-        const visibilityScore = calcVisibility(
-          answerText,
-          brandTerms,
-          hasBodyUrl,
-          hasCitationOnly,
-          sentiment,
-          isTopRanked,
-          isStronglyRecommended,
-          isBrandedQuery,
-        );
-
-        const inserted = await db
-          .insert(schema.runs)
-          .values({
-            workspaceId: sched.workspaceId,
-            scheduleId: sched.id,
-            promptText: prompt.text,
-            provider,
-            answer: answerText,
-            sources: result.sources ?? [],
-            citations: citations as never,
-            visibilityScore,
-            // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
-            scoreVersion: 8,
-            sentiment,
-            brandMentions,
-            competitorMentions,
-            citedBrandDomains,
-            citedCompetitorDomains,
-            attachedBrandMentions: [],
-            attachedCompetitorMentions: [],
-            geolocation: sched.geolocation ?? null,
-            isAuto: true,
-            intervalSlot,
-            parseQuality:
-              answerText.length > 100 ? "high" : answerText.length > 20 ? "medium" : "low",
-            isCachedResponse: Boolean(result.cached),
-            responseLength: answerText.length,
-            executionDurationMs,
-          })
-          .onConflictDoNothing()
-          .returning({ id: schema.runs.id });
-
-        if (inserted.length > 0) {
-          executedRuns += 1;
-          // 드리프트 감지 — 같은 (workspace, prompt, provider) 의 이전 runs 와 비교
-          await detectAndRecordDrift(
-            sched.workspaceId,
-            prompt.text,
-            provider,
-            visibilityScore,
-          ).catch((e) =>
-            console.error("[automation] 드리프트 감지 실패:", e instanceof Error ? e.message : e),
-          );
-        } else {
-          // 동시에 다른 워커/틱이 먼저 INSERT 한 경우 — unique constraint 로 스킵됨
-          skippedDuplicates += 1;
-        }
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[automation] 스케줄 ${sched.id} prompt="${prompt.text.slice(0, 40)}..." provider=${provider} 실패:`,
-          reason,
-        );
-        // 관측성 — provider 단위 실패를 TickResult 로 올려보낸다(H-3).
-        // 이전엔 console.error 만 해서 chatgpt 등 특정 provider 가 조용히 빠져도
-        // 결과 집계만으론 알 수 없었다.
-        providerFailures.push({
-          scheduleId: sched.id,
-          workspaceId: sched.workspaceId,
+    const providerResults = await Promise.all(
+      sched.providers.map((provider) =>
+        runOneProviderForPrompt({
+          sched,
+          prompt,
           provider,
-          prompt: prompt.text,
-          reason,
-        });
-      }
+          intervalSlot,
+          brandTerms,
+          competitorTerms,
+          brandWebsites,
+          competitorWebsites,
+          now,
+        }),
+      ),
+    );
+
+    for (const r of providerResults) {
+      executedRuns += r.executedRuns;
+      skippedDuplicates += r.skippedDuplicates;
+      if (r.failure) providerFailures.push(r.failure);
     }
   }
 
@@ -368,6 +241,202 @@ async function executeSchedule(
   await updateScheduleTiming(sched, now);
 
   return { executedRuns, skippedDuplicates, providerFailures };
+}
+
+/** 단일 (prompt, provider) 조합 1건 실행 결과 — 카운터를 공유 변수 없이 합산하기 위한 부분 결과 */
+type ProviderRunOutcome = {
+  executedRuns: number;
+  skippedDuplicates: number;
+  failure: ProviderFailure | null;
+};
+
+/**
+ * 한 프롬프트의 단일 provider 1건을 실행한다 (pre-check → scrape → 점수 → INSERT → drift).
+ * executeSchedule 의 provider 병렬 처리를 위해 분리. 예외는 내부에서 잡아
+ * ProviderFailure 로 정형화해 반환하므로 Promise.all 이 reject 되지 않는다
+ * (한 provider 실패가 같은 프롬프트의 다른 provider 결과를 버리지 않게).
+ */
+async function runOneProviderForPrompt(args: {
+  sched: Schedule;
+  prompt: Prompt;
+  provider: string;
+  intervalSlot: string;
+  brandTerms: string[];
+  competitorTerms: string[];
+  brandWebsites: string[];
+  competitorWebsites: string[];
+  now: Date;
+}): Promise<ProviderRunOutcome> {
+  const {
+    sched,
+    prompt,
+    provider,
+    intervalSlot,
+    brandTerms,
+    competitorTerms,
+    brandWebsites,
+    competitorWebsites,
+  } = args;
+
+  try {
+    // pre-check: 이미 이 슬롯 + prompt + provider 조합이 있으면 스킵 (API 호출 절약)
+    const [existing] = await db
+      .select({ id: schema.runs.id })
+      .from(schema.runs)
+      .where(
+        and(
+          eq(schema.runs.workspaceId, sched.workspaceId),
+          eq(schema.runs.intervalSlot, intervalSlot),
+          eq(schema.runs.promptText, prompt.text),
+          eq(schema.runs.provider, provider),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      return { executedRuns: 0, skippedDuplicates: 1, failure: null };
+    }
+
+    const started = Date.now();
+    const result = await runAiScraper({
+      provider: provider as "chatgpt" | "perplexity" | "copilot" | "gemini" | "google_ai" | "grok",
+      prompt: prompt.text,
+      country: sched.geolocation ?? "KR",
+    });
+
+    const executionDurationMs = Date.now() - started;
+    const citations = Array.isArray(result.citations) ? (result.citations as Citation[]) : [];
+    const answerText = result.answer ?? "";
+
+    // 본문 기준 언급 계산 (첨부 영역 분리 없이 간단 버전 — 필요 시 splitAnswerSections 도입)
+    const brandMentions = findMentions(answerText, brandTerms);
+    const competitorMentions = findMentions(answerText, competitorTerms);
+    const citedBrandDomains = matchCitationDomains(citations, brandWebsites);
+    const citedCompetitorDomains = matchCitationDomains(citations, competitorWebsites);
+
+    // Sentiment + ranking signals: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 즉시 결정.
+    // 언급이 있을 때 LLM 에 sentiment + isTopRanked + isStronglyRecommended 한꺼번에 분류 요청.
+    let sentiment: "positive" | "neutral" | "negative" | "not-mentioned" = detectSentiment(
+      answerText,
+      brandTerms,
+    );
+    let isTopRanked = false;
+    let isStronglyRecommended = false;
+    if (sentiment !== "not-mentioned") {
+      const llm = await classifySentiment({
+        answerText,
+        brandName: brandTerms[0] ?? "",
+        brandAliases: brandTerms.slice(1),
+      });
+      if (llm) {
+        // 후처리 가드 — 약한 positive(=1위 명시 없고 적극 추천 없음)인데 비교 나열 응답이면 neutral 로 강제
+        sentiment = guardSentiment(answerText, brandTerms, llm);
+        isTopRanked = llm.isTopRanked;
+        isStronglyRecommended = llm.isStronglyRecommended;
+      }
+    }
+    // brand 명 검색 여부 — prompt 텍스트에 brand 별칭 중 하나라도 포함되면 branded query
+    const promptLower = prompt.text.toLowerCase();
+    const isBrandedQuery = brandTerms.some(
+      (t) => t && promptLower.includes(t.toLowerCase()),
+    );
+    // 본문 내 자사 URL 등장 여부 판정.
+    // 일반 도메인은 호스트 문자열 포함 여부로 매칭. 소셜 플랫폼(youtube.com, instagram.com 등)은
+    // 호스트만으로 매칭하면 다른 채널 URL 도 매칭되는 false positive 발생 → 핸들(seg)까지
+    // 본문에 등장해야 매칭으로 인정.
+    const brandTargets = brandWebsites
+      .map((url) => normalizeTargetKey(url))
+      .filter((k): k is { host: string; seg: string } => k !== null);
+    const answerLower = answerText.toLowerCase();
+    const hasBodyUrl = brandTargets.some((t) => {
+      if (SOCIAL_PLATFORM_DOMAINS.has(t.host)) {
+        // 소셜: 호스트 + 핸들 둘 다 본문에 있어야 매치 (핸들 없으면 매칭 불가)
+        if (!t.seg) return false;
+        return answerLower.includes(t.host) && answerLower.includes(t.seg);
+      }
+      // 일반 도메인: 호스트 문자열 포함만으로 매치
+      return answerLower.includes(t.host);
+    });
+    // 참고자료에만 등장 (본문엔 없음)
+    const hasCitationOnly = !hasBodyUrl && citedBrandDomains.length > 0;
+
+    const visibilityScore = calcVisibility(
+      answerText,
+      brandTerms,
+      hasBodyUrl,
+      hasCitationOnly,
+      sentiment,
+      isTopRanked,
+      isStronglyRecommended,
+      isBrandedQuery,
+    );
+
+    const inserted = await db
+      .insert(schema.runs)
+      .values({
+        workspaceId: sched.workspaceId,
+        scheduleId: sched.id,
+        promptText: prompt.text,
+        provider,
+        answer: answerText,
+        sources: result.sources ?? [],
+        citations: citations as never,
+        visibilityScore,
+        // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
+        scoreVersion: 8,
+        sentiment,
+        brandMentions,
+        competitorMentions,
+        citedBrandDomains,
+        citedCompetitorDomains,
+        attachedBrandMentions: [],
+        attachedCompetitorMentions: [],
+        geolocation: sched.geolocation ?? null,
+        isAuto: true,
+        intervalSlot,
+        parseQuality:
+          answerText.length > 100 ? "high" : answerText.length > 20 ? "medium" : "low",
+        isCachedResponse: Boolean(result.cached),
+        responseLength: answerText.length,
+        executionDurationMs,
+      })
+      .onConflictDoNothing()
+      .returning({ id: schema.runs.id });
+
+    if (inserted.length > 0) {
+      // 드리프트 감지 — 같은 (workspace, prompt, provider) 의 이전 runs 와 비교
+      await detectAndRecordDrift(
+        sched.workspaceId,
+        prompt.text,
+        provider,
+        visibilityScore,
+      ).catch((e) =>
+        console.error("[automation] 드리프트 감지 실패:", e instanceof Error ? e.message : e),
+      );
+      return { executedRuns: 1, skippedDuplicates: 0, failure: null };
+    }
+    // 동시에 다른 워커/틱이 먼저 INSERT 한 경우 — unique constraint 로 스킵됨
+    return { executedRuns: 0, skippedDuplicates: 1, failure: null };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[automation] 스케줄 ${sched.id} prompt="${prompt.text.slice(0, 40)}..." provider=${provider} 실패:`,
+      reason,
+    );
+    // 관측성 — provider 단위 실패를 TickResult 로 올려보낸다(H-3).
+    // 이전엔 console.error 만 해서 chatgpt 등 특정 provider 가 조용히 빠져도
+    // 결과 집계만으론 알 수 없었다.
+    return {
+      executedRuns: 0,
+      skippedDuplicates: 0,
+      failure: {
+        scheduleId: sched.id,
+        workspaceId: sched.workspaceId,
+        provider,
+        prompt: prompt.text,
+        reason,
+      },
+    };
+  }
 }
 
 /**

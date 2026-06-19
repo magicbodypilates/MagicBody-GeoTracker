@@ -43,6 +43,11 @@ server-err.txt
 server-log.txt
 server-*.txt
 
+# 내부 접근/정리 문서 (인프라 정보 포함 — GitHub 미게시, 로컬 보관)
+#   향후 내부 문서는 파일명을 *-LOCAL.md 로 두면 자동 제외됨
+MARKETING-DATA-ACCESS-GUIDE.md
+*-LOCAL.md
+
 # vercel
 .vercel
 

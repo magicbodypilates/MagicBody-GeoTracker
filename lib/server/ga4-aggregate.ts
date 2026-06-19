@@ -165,6 +165,52 @@ export interface DateActiveUsersRow {
 }
 
 /**
+ * 데이터가 있는 일자만 들어온 시계열을, 조회 구간 전체 일자(allDates)로 채워
+ * "빠짐없는 연속 타임라인"으로 만든다. 데이터 없는 날은 fill(기본 0)로 메운다.
+ *
+ * 배경: GA4 byDate/byDateConversions는 세션·구매가 발생한 날만 행을 준다. 그대로 차트에
+ * 넘기면 데이터 없는 날이 빠져 "22일만 나옴"처럼 X축이 끊긴다. allDates(조회 구간 전체
+ * 일자)로 left-join하듯 채워 추세 차트가 연속되게 한다.
+ *
+ * - allDates는 호출부가 KST 헬퍼(enumerateDateRange)로 만든 오래된→최신 일자 배열.
+ *   결과는 allDates 순서를 그대로 따른다(이미 정렬돼 있으면 추가 정렬 불필요).
+ * - rows에만 있고 allDates에 없는 일자(이론상 GA4가 구간 밖 일자를 줄 때)는 누락 없이
+ *   뒤에 이어 붙인다(데이터 손실 방지). 단 이 경우 정렬을 다시 보장한다.
+ * - 같은 일자가 rows에 중복으로 오면 마지막 값으로 덮어쓴다(전용 dedup 쿼리라 보통 유일).
+ *
+ * 제네릭 T는 date 외 임의 숫자 필드를 가질 수 있는 시계열 포인트. emptyFields로 데이터
+ * 없는 날에 채울 0 필드 집합을 받아 byDate(sessions·activeUsers)·byDateConversions
+ * (purchases·revenue) 양쪽에 재사용한다. 순수함수: 입력만으로 결정.
+ *
+ * @param rows       데이터가 있는 일자만 담긴 시계열 (각 원소는 date 필드 보유)
+ * @param allDates   조회 구간 전체 일자 "YYYY-MM-DD"[] (오래된→최신)
+ * @param emptyFields 데이터 없는 날에 채울 필드값(보통 모두 0)
+ */
+export function fillDateSeries<T extends { date: string }>(
+  rows: ReadonlyArray<T>,
+  allDates: ReadonlyArray<string>,
+  emptyFields: Omit<T, "date">,
+): T[] {
+  const byDate = new Map<string, T>();
+  for (const r of rows) {
+    byDate.set(r.date, r);
+  }
+
+  const usedDates = new Set<string>();
+  const filled: T[] = allDates.map((date) => {
+    usedDates.add(date);
+    const existing = byDate.get(date);
+    if (existing) return existing;
+    return { date, ...emptyFields } as T;
+  });
+
+  // allDates에 없는 일자(구간 밖 GA4 행)는 누락 없이 합치고 전체 재정렬해 보존한다.
+  const extras = [...byDate.values()].filter((r) => !usedDates.has(r.date));
+  if (extras.length === 0) return filled;
+  return [...filled, ...extras].sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+/**
  * 일자별 activeUsers 전용 쿼리 결과 → `Map<date, activeUsers>`.
  * date 디멘션만 단독 조회하면 GA4가 하루 단위로 dedup하므로 "그 날의 고유 사용자"라는
  * 올바른 의미가 된다(일자별 dedup은 정확 — cross-source 한계 없음).

@@ -51,6 +51,84 @@ export function kstRecentDateKeys(days: number): string[] {
 }
 
 /**
+ * 시작·종료 일자(둘 다 포함) 사이의 연속 "YYYY-MM-DD" 일자 키 배열(오래된→최신) 생성.
+ *
+ * `kstRecentDateKeys`(오늘 기준 N일)와 달리, 임의의 조회 구간(예: 30일 전 ~ 어제)을
+ * 빠짐없이 채울 때 쓴다. GA4 date 디멘션은 속성 타임존(Asia/Seoul) 기준 YYYYMMDD를
+ * 주므로, 그 일자와 startDate/endDate(YYYY-MM-DD)는 같은 타임존 기준이라 추가 변환 없이
+ * 문자열 일자 열거만으로 연속 축을 만들 수 있다(데이터 없는 날 0 채우기용).
+ *
+ * 일자 산술은 UTC 자정 기준으로 +1일씩 진행해 DST·로컬 타임존 영향을 받지 않는다.
+ * (한국은 DST가 없지만, 실행 환경 로컬 타임존에 흔들리지 않도록 UTC로 계산.)
+ *
+ * @param start  시작 일자 "YYYY-MM-DD" (포함)
+ * @param end    종료 일자 "YYYY-MM-DD" (포함)
+ * @returns      ["YYYY-MM-DD", ...] 오래된→최신. start>end 또는 형식 오류면 빈 배열.
+ */
+export function enumerateDateRange(start: string, end: string): string[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+    return [];
+  }
+  const startMs = Date.parse(start + "T00:00:00Z");
+  const endMs = Date.parse(end + "T00:00:00Z");
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs > endMs) {
+    return [];
+  }
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const keys: string[] = [];
+  for (let ms = startMs; ms <= endMs; ms += DAY_MS) {
+    keys.push(new Date(ms).toISOString().slice(0, 10));
+  }
+  return keys;
+}
+
+/**
+ * GA4 상대 날짜 토큰을 KST 기준 절대 일자("YYYY-MM-DD")로 정규화.
+ *
+ * 배경(MED-2):
+ *   - GA4 Data API 는 "28daysAgo"·"today"·"yesterday" 같은 상대 토큰을 그대로 이해하지만,
+ *     0 채움용 `enumerateDateRange` 는 "YYYY-MM-DD" 만 처리해 상대 토큰을 빈 배열로 떨군다.
+ *   - 그 결과 route 기본값(startDate="28daysAgo"/endDate="today")이 오면 0 채움이 무력화돼
+ *     "데이터 있는 날만" 끊기는 추이로 되돌아간다(계약 불일치).
+ *   - GA4 집계 일자는 속성 타임존(Asia/Seoul) 기준이므로, 상대 토큰도 KST 기준으로 환산해야
+ *     enumerate 일자와 GA4 date 디멘션 일자가 일치한다.
+ *
+ * 처리 토큰(대소문자·공백 무시):
+ *   - "today"            → KST 오늘
+ *   - "yesterday"        → KST 어제
+ *   - "Ndaysago"         → KST 오늘로부터 N일 전 (N>=0)
+ *   - 이미 "YYYY-MM-DD"  → 그대로 반환
+ *
+ * @param token  GA4 날짜 토큰 또는 절대 일자
+ * @param now    기준 시각(테스트 주입용). 기본 현재 시각.
+ * @returns      "YYYY-MM-DD" (KST). 인식 불가 토큰은 빈 문자열.
+ */
+export function resolveGa4DateToken(
+  token: string,
+  now: Date = new Date(),
+): string {
+  const t = token.trim().toLowerCase();
+
+  // 이미 절대 일자
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+
+  if (t === "today") return toKstDateKey(now);
+  if (t === "yesterday") {
+    return toKstDateKey(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+  }
+
+  // "Ndaysago" (N>=0)
+  const m = /^(\d+)daysago$/.exec(t);
+  if (m) {
+    const n = Number(m[1]);
+    return toKstDateKey(new Date(now.getTime() - n * 24 * 60 * 60 * 1000));
+  }
+
+  // 인식 불가 — 빈 문자열(호출부에서 enumerate 빈 배열로 안전 처리)
+  return "";
+}
+
+/**
  * "오늘로부터 N일 전" 의 KST 자정에 해당하는 UTC 시각(ISO) 을 반환.
  * runs 조회 윈도우의 `from` 경계로 사용한다.
  *

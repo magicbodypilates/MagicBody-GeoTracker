@@ -1,11 +1,20 @@
 import { google } from "googleapis";
+import type { analyticsdata_v1beta } from "googleapis";
 import { getAuthedClient } from "./gsc-client";
 import {
   aggregateAiReferralTiers,
   aggregateEngagementByPlatform,
   mergeActiveUsersByPlatform,
   mergeActiveUsersByDate,
+  fillDateSeries,
 } from "./ga4-aggregate";
+import {
+  rowValue,
+  rowMetric,
+  formatDate,
+  runWithConcurrency,
+} from "./ga4-report-utils";
+import { enumerateDateRange, resolveGa4DateToken } from "../client/date-kst";
 
 /** AI 플랫폼 referrer 도메인 목록. GA4 sessionSource 디멘션 값과 매칭. */
 export const AI_REFERRER_DOMAINS = [
@@ -164,6 +173,13 @@ export interface Ga4ReferralSnapshot {
     screenPageViews: number;
   }>;
   byDate: Array<{ date: string; sessions: number; activeUsers: number }>;
+  /**
+   * 일자별 AI 전환(결제) 추이 — AI 유입 세션에서 발생한 구매 건수·매출.
+   * byDate와 동일하게 조회 구간 전체 일자를 KST 기준으로 채워(데이터 없는 날 0) 연속 타임라인.
+   * 지표 정본: purchases=ecommercePurchases(GA4가 purchases는 거부), revenue=purchaseRevenue(KRW).
+   * ⚠️ GA4 기여 추정값 — 결제통계 정산액과 다를 수 있음(집계 지연·환불 반영 차이).
+   */
+  byDateConversions: Array<{ date: string; purchases: number; revenue: number }>;
   topLandingPages: Array<{
     platform: string;
     landingPage: string;
@@ -205,27 +221,6 @@ export interface Ga4ReferralSnapshot {
   }>;
   rows: Ga4ReferralRow[];
   fetchedAt: string;
-}
-
-type RunReportRow = {
-  dimensionValues?: Array<{ value?: string | null }>;
-  metricValues?: Array<{ value?: string | null }>;
-};
-
-function rowValue(row: RunReportRow, idx: number): string {
-  return row.dimensionValues?.[idx]?.value ?? "";
-}
-
-function rowMetric(row: RunReportRow, idx: number): number {
-  const raw = row.metricValues?.[idx]?.value ?? "0";
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : 0;
-}
-
-/** YYYYMMDD → YYYY-MM-DD */
-function formatDate(ymd: string): string {
-  if (ymd.length !== 8) return ymd;
-  return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
 }
 
 /**
@@ -274,16 +269,30 @@ export async function fetchAiReferralReport(params: {
   const auth = await getAuthedClient();
   const analytics = google.analyticsdata({ version: "v1beta", auth });
 
+  // runReport 응답 타입 — runWithConcurrency가 작업 배열을 union으로 추론(GaxiosResponse|null)
+  //   하지 않게 구조분해 시 명시 캐스팅에 사용한다(핵심 쿼리의 .data 직접 접근 보존).
+  //   호출부는 .data.rows 만 쓰므로 .data 를 가진 최소 형태로 캡처한다.
+  type RunReportResp = {
+    data: analyticsdata_v1beta.Schema$RunReportResponse;
+  };
+
   const property = `properties/${params.propertyId}`;
   const dateRange = { startDate: params.startDate, endDate: params.endDate };
 
   // 2신호 합집합 필터 (모든 서브쿼리 공통)
   const sourceFilter = AI_REFERRAL_FILTER;
 
-  // 1) 원본 일자 × 소스 × 랜딩페이지 rows + 추가 분석 쿼리 병렬 실행
+  // 1) 원본 일자 × 소스 × 랜딩페이지 rows + 추가 분석 쿼리 실행.
   //   activeUsers는 비가산(고유 사용자) 지표라 detail rows 합산이 중복 카운트를 일으킨다.
   //   표시 레벨(전체/일자/플랫폼)별 전용 쿼리로 GA4가 직접 dedup한 값을 받는다(MED 정정).
   //   detail·activeUsers 전용 3쿼리는 핵심 수치라 .catch()로 0 폴백하지 않는다(거짓 0 방지).
+  //   동시 호출 제한(MED-1): 10개 쿼리를 Promise.all로 한꺼번에 발사하면 GA4 concurrent 한도
+  //   (실측 10)에 정확히 도달해, 마케팅 탭 조회와 겹치면 429 위험. 마케팅 탭과 동일하게
+  //   runWithConcurrency(.., 4)로 동시성을 4로 제한한다. 입력 순서 = 결과 순서가 보존되므로
+  //   아래 구조분해 인덱스 의존은 그대로 유효하다.
+  //   보조 쿼리의 .catch(()=>null) 폴백은 각 작업 함수 안에 유지 — runWithConcurrency는 reject를
+  //   그대로 전파하므로, 핵심 쿼리는 폴백 없이(거짓 0 방지) 에러를 전파하고 보조 쿼리만 함수
+  //   내부에서 null로 폴백한다.
   const [
     detailResp,
     engagementResp,
@@ -294,141 +303,181 @@ export async function fetchAiReferralReport(params: {
     totalsActiveUsersResp,
     dateActiveUsersResp,
     platformActiveUsersResp,
-  ] = await Promise.all([
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [
-          { name: "date" },
-          { name: "sessionSource" },
-          { name: "landingPagePlusQueryString" },
-          { name: "sessionDefaultChannelGroup" },
-        ],
-        metrics: [
-          { name: "sessions" },
-          { name: "activeUsers" },
-          { name: "screenPageViews" },
-          { name: "averageSessionDuration" },
-          { name: "engagementRate" },
-        ],
-        dimensionFilter: sourceFilter,
-        orderBys: [
-          { dimension: { dimensionName: "date" }, desc: true },
-          { metric: { metricName: "sessions" }, desc: true },
-        ],
-        limit: "1000",
-      },
-    }),
+    dateConversionsResp,
+  ] = (await runWithConcurrency([
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [
+            { name: "date" },
+            { name: "sessionSource" },
+            { name: "landingPagePlusQueryString" },
+            { name: "sessionDefaultChannelGroup" },
+          ],
+          metrics: [
+            { name: "sessions" },
+            { name: "activeUsers" },
+            { name: "screenPageViews" },
+            { name: "averageSessionDuration" },
+            { name: "engagementRate" },
+          ],
+          dimensionFilter: sourceFilter,
+          orderBys: [
+            { dimension: { dimensionName: "date" }, desc: true },
+            { metric: { metricName: "sessions" }, desc: true },
+          ],
+          limit: "1000",
+        },
+      }),
     // 2) 플랫폼별 engagement (채널그룹 디멘션 동반 — 채널그룹만 AI인 행 라벨 정확화)
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [
-          { name: "sessionSource" },
-          { name: "sessionDefaultChannelGroup" },
-        ],
-        metrics: [
-          { name: "sessions" },
-          { name: "averageSessionDuration" },
-          { name: "screenPageViewsPerSession" },
-          { name: "engagementRate" },
-        ],
-        dimensionFilter: sourceFilter,
-        orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
-        limit: "50",
-      },
-    }).catch(() => null),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [
+            { name: "sessionSource" },
+            { name: "sessionDefaultChannelGroup" },
+          ],
+          metrics: [
+            { name: "sessions" },
+            { name: "averageSessionDuration" },
+            { name: "screenPageViewsPerSession" },
+            { name: "engagementRate" },
+          ],
+          dimensionFilter: sourceFilter,
+          orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+          limit: "50",
+        },
+      }).catch(() => null),
     // 3) 시간대 히트맵
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [{ name: "dayOfWeek" }, { name: "hour" }],
-        metrics: [{ name: "sessions" }],
-        dimensionFilter: sourceFilter,
-        limit: "200",
-      },
-    }).catch(() => null),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [{ name: "dayOfWeek" }, { name: "hour" }],
+          metrics: [{ name: "sessions" }],
+          dimensionFilter: sourceFilter,
+          limit: "200",
+        },
+      }).catch(() => null),
     // 4) 신규 vs 재방문
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [{ name: "newVsReturning" }],
-        metrics: [{ name: "sessions" }, { name: "activeUsers" }],
-        dimensionFilter: sourceFilter,
-        limit: "10",
-      },
-    }).catch(() => null),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [{ name: "newVsReturning" }],
+          metrics: [{ name: "sessions" }, { name: "activeUsers" }],
+          dimensionFilter: sourceFilter,
+          limit: "10",
+        },
+      }).catch(() => null),
     // 5) 주요 이벤트 Top
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [{ name: "eventName" }],
-        metrics: [{ name: "eventCount" }, { name: "sessions" }],
-        dimensionFilter: sourceFilter,
-        orderBys: [{ metric: { metricName: "eventCount" }, desc: true }],
-        limit: "20",
-      },
-    }).catch(() => null),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [{ name: "eventName" }],
+          metrics: [{ name: "eventCount" }, { name: "sessions" }],
+          dimensionFilter: sourceFilter,
+          orderBys: [{ metric: { metricName: "eventCount" }, desc: true }],
+          limit: "20",
+        },
+      }).catch(() => null),
     // 6) 전체 페이지 Top (pagePath, 랜딩 여부 무관)
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [{ name: "pagePath" }],
-        metrics: [
-          { name: "sessions" },
-          { name: "activeUsers" },
-          { name: "screenPageViews" },
-        ],
-        dimensionFilter: sourceFilter,
-        orderBys: [{ metric: { metricName: "screenPageViews" }, desc: true }],
-        limit: "10",
-      },
-    }).catch(() => null),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [{ name: "pagePath" }],
+          metrics: [
+            { name: "sessions" },
+            { name: "activeUsers" },
+            { name: "screenPageViews" },
+          ],
+          dimensionFilter: sourceFilter,
+          orderBys: [{ metric: { metricName: "screenPageViews" }, desc: true }],
+          limit: "10",
+        },
+      }).catch(() => null),
     // 7) totals.activeUsers — 디멘션 없이 단일 조회 → 기간 전체 고유 사용자 (완전 dedup)
     //    하위 행 합산이 아니라 GA4가 직접 dedup한 진짜 고유 사용자 수.
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        metrics: [{ name: "activeUsers" }],
-        dimensionFilter: sourceFilter,
-        limit: "1",
-      },
-    }),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          metrics: [{ name: "activeUsers" }],
+          dimensionFilter: sourceFilter,
+          limit: "1",
+        },
+      }),
     // 8) byDate.activeUsers — date 디멘션만 → 일자별 고유 사용자 (하루 단위 dedup은 정확)
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [{ name: "date" }],
-        metrics: [{ name: "activeUsers" }],
-        dimensionFilter: sourceFilter,
-        limit: "1000",
-      },
-    }),
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [{ name: "date" }],
+          metrics: [{ name: "activeUsers" }],
+          dimensionFilter: sourceFilter,
+          limit: "1000",
+        },
+      }),
     // 9) byPlatform.activeUsers — source + channelGroup만 → 플랫폼별 고유 사용자.
     //    engagement 쿼리와 동일 디멘션으로 platformOfRow 라벨을 일치시킨다. 같은 플랫폼이
     //    여러 source면 합산(mergeActiveUsersByPlatform) — cross-source 중복 한계는 함수 주석 참조.
-    analytics.properties.runReport({
-      property,
-      requestBody: {
-        dateRanges: [dateRange],
-        dimensions: [
-          { name: "sessionSource" },
-          { name: "sessionDefaultChannelGroup" },
-        ],
-        metrics: [{ name: "activeUsers" }],
-        dimensionFilter: sourceFilter,
-        limit: "100",
-      },
-    }),
-  ]);
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [
+            { name: "sessionSource" },
+            { name: "sessionDefaultChannelGroup" },
+          ],
+          metrics: [{ name: "activeUsers" }],
+          dimensionFilter: sourceFilter,
+          limit: "100",
+        },
+      }),
+    // 10) byDateConversions — date 디멘션 + AI 필터, 일자별 AI 전환(결제).
+    //    구매 지표 정본명은 ecommercePurchases (GA4가 purchases는 INVALID로 거부 — 마케팅 탭 실측).
+    //    purchases·revenue는 가산 지표라 date 단일 디멘션 일자별 합산이 정상(activeUsers 비가산 한계 없음).
+    //    보조 분석이라 실패해도 전체 조회를 막지 않게 .catch(()=>null)로 폴백(거짓 0 대신 빈 시계열).
+    () =>
+      analytics.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [dateRange],
+          dimensions: [{ name: "date" }],
+          metrics: [
+            { name: "ecommercePurchases" },
+            { name: "purchaseRevenue" },
+          ],
+          dimensionFilter: sourceFilter,
+          orderBys: [{ dimension: { dimensionName: "date" }, desc: false }],
+          limit: "1000",
+        },
+      }).catch(() => null),
+  ], 4)) as [
+    RunReportResp,
+    RunReportResp | null,
+    RunReportResp | null,
+    RunReportResp | null,
+    RunReportResp | null,
+    RunReportResp | null,
+    RunReportResp,
+    RunReportResp,
+    RunReportResp,
+    RunReportResp | null,
+  ];
 
   const rows: Ga4ReferralRow[] = (detailResp.data.rows ?? []).map((r) => {
     const source = rowValue(r, 1);
@@ -486,20 +535,51 @@ export async function fetchAiReferralReport(params: {
     }))
     .sort((a, b) => b.sessions - a.sessions);
 
+  // 조회 구간 전체 일자(KST 기준, 오래된→최신) — byDate·byDateConversions 연속 축 공통 사용.
+  //   GA4 date 디멘션과 startDate/endDate는 같은 속성 타임존(Asia/Seoul) 기준이라 추가 변환 없음.
+  //   데이터 없는 날을 0으로 채워 "데이터 있는 날만 나옴"으로 끊기던 추이를 연속 타임라인으로.
+  //   MED-2: startDate/endDate가 상대 토큰("28daysAgo"·"today" 등)이면 enumerateDateRange가
+  //   빈 배열로 떨궈 0 채움이 무력화된다. GA4 호출엔 원래 토큰을 그대로 넘기되(상대날짜 GA4가
+  //   이해), enumerate에는 KST 기준 절대 일자로 정규화해서 넘긴다. GA4 집계 일자(KST)와
+  //   enumerate 일자가 동일 타임존이라 정합.
+  const allDates = enumerateDateRange(
+    resolveGa4DateToken(params.startDate),
+    resolveGa4DateToken(params.endDate),
+  );
+
   // 3) 일자별 — sessions는 detail rows 합산(가산), activeUsers는 일자별 전용 쿼리 dedup 값.
+  //    데이터 있는 날만 먼저 만들고, 전체 일자(allDates)로 0 채워 빠짐없는 연속 축으로 변환.
   const dateMap = new Map<string, { sessions: number }>();
   for (const row of rows) {
     const d = dateMap.get(row.date) ?? { sessions: 0 };
     d.sessions += row.sessions;
     dateMap.set(row.date, d);
   }
-  const byDate = [...dateMap.entries()]
+  const byDatePresent = [...dateMap.entries()]
     .map(([date, v]) => ({
       date,
       sessions: v.sessions,
       activeUsers: dateActiveUsers.get(date) ?? 0,
     }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
+  const byDate = fillDateSeries(byDatePresent, allDates, {
+    sessions: 0,
+    activeUsers: 0,
+  });
+
+  // 3-b) 일자별 AI 전환(결제) — purchases·revenue는 가산 지표라 date 단일 디멘션 합산이 정상.
+  //    byDate와 동일하게 전체 일자로 0 채워 연속. 보조 쿼리 실패(null) 시 전 구간 0 시계열.
+  const conversionsPresent = (dateConversionsResp?.data.rows ?? [])
+    .map((r) => ({
+      date: formatDate(rowValue(r, 0)),
+      purchases: rowMetric(r, 0),
+      revenue: rowMetric(r, 1),
+    }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  const byDateConversions = fillDateSeries(conversionsPresent, allDates, {
+    purchases: 0,
+    revenue: 0,
+  });
 
   // 4) 상위 랜딩페이지 (상위 30) — sessions 기준 정렬·표시.
   //    sessions는 가산이라 정확. activeUsers는 (platform×landingPage) 단위로 detail rows를
@@ -600,6 +680,7 @@ export async function fetchAiReferralReport(params: {
     tiers,
     byPlatform,
     byDate,
+    byDateConversions,
     topLandingPages,
     byPlatformEngagement: platformEngagement,
     hourlyHeatmap,

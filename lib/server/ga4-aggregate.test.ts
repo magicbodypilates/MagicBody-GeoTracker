@@ -19,6 +19,7 @@ import {
   aggregateEngagementByPlatform,
   mergeActiveUsersByPlatform,
   mergeActiveUsersByDate,
+  fillDateSeries,
   INSEPARABLE_NOTE,
   type AiReferralTierRow,
   type PlatformEngagementRow,
@@ -222,5 +223,86 @@ describe("mergeActiveUsersByDate (일자별 dedup activeUsers)", () => {
       { date: "2026-06-01", activeUsers: 1 },
     ]);
     expect(m.get("2026-06-01")).toBe(4);
+  });
+});
+
+describe("fillDateSeries (데이터 없는 날 0 채워 연속 타임라인)", () => {
+  type DatePoint = { date: string; sessions: number; activeUsers: number };
+
+  it("빈 rows → allDates 전체를 0으로 채운 시계열", () => {
+    const out = fillDateSeries<DatePoint>(
+      [],
+      ["2026-06-01", "2026-06-02", "2026-06-03"],
+      { sessions: 0, activeUsers: 0 },
+    );
+    expect(out).toEqual([
+      { date: "2026-06-01", sessions: 0, activeUsers: 0 },
+      { date: "2026-06-02", sessions: 0, activeUsers: 0 },
+      { date: "2026-06-03", sessions: 0, activeUsers: 0 },
+    ]);
+  });
+
+  it("중간에 데이터 없는 날을 0으로 메우고 있는 날 값은 보존 (끊김 해소)", () => {
+    const rows: DatePoint[] = [
+      { date: "2026-06-01", sessions: 5, activeUsers: 3 },
+      { date: "2026-06-03", sessions: 2, activeUsers: 1 },
+    ];
+    const out = fillDateSeries(
+      rows,
+      ["2026-06-01", "2026-06-02", "2026-06-03"],
+      { sessions: 0, activeUsers: 0 },
+    );
+    expect(out).toEqual([
+      { date: "2026-06-01", sessions: 5, activeUsers: 3 },
+      { date: "2026-06-02", sessions: 0, activeUsers: 0 },
+      { date: "2026-06-03", sessions: 2, activeUsers: 1 },
+    ]);
+  });
+
+  it("결과 길이는 항상 allDates 길이와 같다 (구간 내 데이터만일 때)", () => {
+    const out = fillDateSeries(
+      [{ date: "2026-06-02", sessions: 9, activeUsers: 4 }],
+      ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04"],
+      { sessions: 0, activeUsers: 0 },
+    );
+    expect(out).toHaveLength(4);
+    expect(out.map((r) => r.date)).toEqual([
+      "2026-06-01",
+      "2026-06-02",
+      "2026-06-03",
+      "2026-06-04",
+    ]);
+  });
+
+  it("allDates 밖의 일자(구간 밖 GA4 행)도 누락 없이 합치고 재정렬 (데이터 손실 방지)", () => {
+    const rows: DatePoint[] = [
+      { date: "2026-06-02", sessions: 1, activeUsers: 1 },
+      { date: "2026-06-09", sessions: 7, activeUsers: 2 }, // allDates 밖
+    ];
+    const out = fillDateSeries(rows, ["2026-06-01", "2026-06-02"], {
+      sessions: 0,
+      activeUsers: 0,
+    });
+    // 정렬 보존 + 구간 밖 일자도 살아있음
+    expect(out.map((r) => r.date)).toEqual([
+      "2026-06-01",
+      "2026-06-02",
+      "2026-06-09",
+    ]);
+    expect(out.find((r) => r.date === "2026-06-09")?.sessions).toBe(7);
+  });
+
+  it("전환 시계열(purchases·revenue)에도 동일하게 재사용된다", () => {
+    type ConvPoint = { date: string; purchases: number; revenue: number };
+    const out = fillDateSeries<ConvPoint>(
+      [{ date: "2026-06-02", purchases: 1, revenue: 230000 }],
+      ["2026-06-01", "2026-06-02", "2026-06-03"],
+      { purchases: 0, revenue: 0 },
+    );
+    expect(out).toEqual([
+      { date: "2026-06-01", purchases: 0, revenue: 0 },
+      { date: "2026-06-02", purchases: 1, revenue: 230000 },
+      { date: "2026-06-03", purchases: 0, revenue: 0 },
+    ]);
   });
 });

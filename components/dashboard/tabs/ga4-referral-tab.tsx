@@ -59,6 +59,7 @@ type Ga4ReferralSnapshot = {
     screenPageViews: number;
   }>;
   byDate: Array<{ date: string; sessions: number; activeUsers: number }>;
+  byDateConversions?: Array<{ date: string; purchases: number; revenue: number }>;
   topLandingPages: Array<{
     platform: string;
     landingPage: string;
@@ -105,6 +106,15 @@ function isoDaysAgo(days: number): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
+}
+
+/** 매출(KRW) 축·툴팁 표기 — 1만원 미만은 '원', 이상은 '만원' 단위(마케팅 탭 패턴 정합). */
+function fmtWon(n: number): string {
+  return `${Math.round(n).toLocaleString("ko-KR")}원`;
+}
+function fmtManwon(n: number): string {
+  if (Math.abs(n) < 10000) return fmtWon(n);
+  return `${(n / 10000).toLocaleString("ko-KR", { maximumFractionDigits: 1 })}만`;
 }
 
 const PLATFORM_COLORS: Record<string, string> = {
@@ -752,6 +762,87 @@ export function Ga4ReferralTab() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
+            </div>
+          )}
+
+          {/* AI 전환(결제) 추이 — 구매 건수 + 매출(GA4 기여 추정) */}
+          {(snapshot.byDateConversions?.length ?? 0) > 0 && (
+            <div className="rounded-lg border border-th-border bg-th-card p-4">
+              <div className="mb-2 flex items-center justify-between gap-2 flex-wrap">
+                <div className="text-sm font-semibold text-th-text">
+                  AI 전환(결제) 추이 ({snapshot.byDateConversions!.length}일)
+                </div>
+                <span className="inline-flex items-center gap-1 rounded-full border border-th-accent/30 bg-th-accent-soft px-2.5 py-0.5 text-xs font-semibold text-th-accent">
+                  GA4 기여 추정 기준
+                </span>
+              </div>
+              <p className="mb-3 text-xs leading-relaxed text-th-text-muted">
+                AI 플랫폼을 거쳐 들어온 세션에서 발생한 <strong className="text-th-text-secondary">결제(구매)</strong>를
+                일자별로 보여줍니다. 어느 시점에 AI 전환이 일어났는지 추세로 확인하세요 — 한 시점의 절대값보다
+                흐름이 중요합니다.
+              </p>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={snapshot.byDateConversions}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--th-border)" />
+                    <XAxis
+                      dataKey="date"
+                      stroke="var(--th-text-muted)"
+                      fontSize={11}
+                      tickFormatter={(v: string) => v.slice(5)}
+                    />
+                    <YAxis
+                      yAxisId="left"
+                      allowDecimals={false}
+                      stroke="var(--th-text-muted)"
+                      fontSize={11}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      stroke="var(--th-text-muted)"
+                      fontSize={11}
+                      tickFormatter={(v: number) => fmtManwon(v)}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: "var(--th-card)",
+                        border: "1px solid var(--th-border)",
+                        fontSize: 12,
+                      }}
+                      formatter={(v: number | undefined, name: string | undefined) =>
+                        name === "매출(GA4)"
+                          ? [fmtWon(v ?? 0), "매출(GA4)"]
+                          : [`${(v ?? 0).toLocaleString()}건`, "구매 건수"]
+                      }
+                    />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Line
+                      yAxisId="left"
+                      type="monotone"
+                      dataKey="purchases"
+                      name="구매 건수"
+                      stroke="#1a73e8"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                    <Line
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey="revenue"
+                      name="매출(GA4)"
+                      stroke="#10a37f"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="mt-2 text-[11px] leading-relaxed text-th-text-muted">
+                <strong className="text-th-text-secondary">GA4 기여 추정값</strong>입니다 — 결제통계(CMS 실결제·정산액)와
+                다를 수 있습니다. 통화는 KRW(원)이며, 집계 지연(24~48시간)으로 종료일 부근 수치는 더 늘 수 있고
+                환불·취소 반영 방식도 정산과 다릅니다. 정산 기준 매출은 결제통계 탭을 사용하세요.
+              </p>
             </div>
           )}
 

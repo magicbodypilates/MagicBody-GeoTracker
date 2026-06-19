@@ -60,6 +60,17 @@ describe("normalizeByChannel", () => {
     expect(out.rows[0]).toEqual({ channel: "direct", salesCount: 0, revenue: 0, rawRevenue: 0 });
   });
 
+  it("환산 ON 인데 revenue=rawRevenue 여도 valueConverted=true 정확 표시 (명시 boolean 신뢰)", () => {
+    // 2026-06-19: default contentsid 로 환산이 ON 이지만, 해당 기간/채널에 정규과정 0건이면
+    //   revenue==rawRevenue 가 된다. 옛 추정(revenue!=rawRevenue→true)이면 false 로 오표시됨 —
+    //   .NET 명시 boolean 을 route 가 그대로 넘기므로 정규화도 그 값을 보존해야 한다.
+    const rows: AttributionChannelRaw[] = [
+      { channel: "naver", salesCount: 2, revenue: 600_000, rawRevenue: 600_000 },
+    ];
+    const out = normalizeByChannel(rows, { ...RANGE, valueConverted: true });
+    expect(out.valueConverted).toBe(true);
+  });
+
   it("식별자 비노출 — 출력 행에 화이트리스트 4개 키만 존재(스프레드 금지 가드)", () => {
     // raw 에 식별자 키를 억지로 주입해도 정규화가 무시해야 함.
     const polluted = {

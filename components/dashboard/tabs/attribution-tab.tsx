@@ -309,17 +309,19 @@ export function AttributionTab() {
           있습니다. 광고 표시(utm·클릭ID)가 없는 결제는 출처를 단정할 수 없습니다.
         </p>
         <p>
-          자체취소(월 3~4건)·방문결제(월 4~5건)는 추적 한계로 누락·오차가 있을 수 있습니다.
+          취소된 결제는 매출·건수에서 제외됩니다. 다만 자체취소(월 3~4건)·방문결제(월 4~5건)는 추적 한계로
+          누락·오차가 있을 수 있습니다.
         </p>
         <p>
           {valueConverted ? (
             <>
-              정규과정은 <strong className="text-th-text">계약금의 10배(실매출)로 환산</strong> 되어 표시됩니다.
-              실결제액은 표의 &lsquo;실결제액&rsquo; 열에서 확인하세요.
+              정규과정은 <strong className="text-th-text">계약금 결제를 10배(실매출 195만원)로 환산</strong> 해
+              표시합니다. <strong className="text-th-text">오프라인 잔금 결제는 매출에서 제외</strong> 됩니다(계약금에서
+              이미 잡혀 중복 방지). 실결제액은 표의 &lsquo;실결제액&rsquo; 열에서 확인하세요.
             </>
           ) : (
             <>
-              정규과정 <strong className="text-th-text">×10 환산은 과정 목록 확정 후 적용</strong> 됩니다 — 현재는
+              정규과정 <strong className="text-th-text">×10 환산이 적용되지 않은 상태</strong> 입니다 — 현재는
               실결제액 기준으로 표시 중입니다.
             </>
           )}

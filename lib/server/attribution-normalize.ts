@@ -40,11 +40,13 @@ export type AttributionTxRaw = {
   hasMetaClickId?: boolean;
 };
 
-/** GetAttributionTransactions 응답 봉투(datas) — Controller 가 truncated 와 함께 래핑. */
+/** GetAttributionTransactions 응답 봉투(datas) — Controller 가 truncated·valueConverted 와 함께 래핑. */
 export type AttributionTxsRaw = {
   items?: AttributionTxRaw[];
   truncated?: boolean;
   limit?: number;
+  /** 정규과정 ×10 환산 적용 여부(.NET 명시 boolean). 봉투에 없으면 route 가 false 폴백. */
+  valueConverted?: boolean;
 };
 
 export type ChannelRow = {

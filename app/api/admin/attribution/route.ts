@@ -13,8 +13,9 @@
  *   view=byTransactions  &start=YYYY-MM-DD&end=YYYY-MM-DD
  *                        &channel=(빈값=전체|google|meta|naver|direct|unknown)&limit=1~2000(기본 500)
  *
- * value 환산: 정규과정(REGULARCLASS_CONTENTIDS, .NET AppConfig SoT) 포함 주문은 ×10. 미설정 시 실결제액 그대로.
- *   환산 적용 여부는 응답에 revenue!=rawRevenue 가 관측되면 true(데이터 기반) — UI 배너 안내용.
+ * value 환산: 정규과정(REGULARCLASS_CONTENTIDS, .NET AppConfig SoT — default "be34274b-cca4-4" 박혀 env 미설정이어도 ON).
+ *   계약금 결제 = ×10(195만 환산). 오프라인 잔금("결제 링크" 패턴)은 매출에서 제외(중복 방지). 취소건 제외(.NET 모집단).
+ *   환산 적용 여부 valueConverted 는 .NET Controller 응답의 명시 boolean 을 그대로 사용(revenue≠rawRevenue 추정 폐기).
  * 계획: ~/.claude/state/plans/magicbody-attribution-admin-view-v1.md
  *
  * 실패(payment-stats 와 동일 매핑): zod 실패→400 / config→500 / timeout→504 / 5xx·네트워크→502 / 파싱→502.
@@ -93,11 +94,19 @@ export async function GET(req: NextRequest) {
         edate: end,
       });
       if (!res.ok) return errorToResponse(res.error, correlationId);
-      const rows = Array.isArray(res.data) ? (res.data as AttributionChannelRaw[]) : [];
-      // 환산 적용 여부 = revenue 와 rawRevenue 가 다른 행이 관측되면 true(데이터 기반 신호).
-      const valueConverted = rows.some(
-        (r) => Number(r?.revenue) !== Number(r?.rawRevenue),
-      );
+      // datas 봉투 = { items, valueConverted }. (구버전 배열 응답도 안전 폴백.)
+      //   valueConverted 는 .NET 명시 boolean — env 미설정이어도 default contentsid 로 환산 ON 이라
+      //   revenue=rawRevenue(예: 채널에 정규과정 0건)인 기간에도 "환산 적용 중"을 정확히 표시.
+      const env =
+        res.data && typeof res.data === "object" && !Array.isArray(res.data)
+          ? (res.data as { items?: AttributionChannelRaw[]; valueConverted?: boolean })
+          : {};
+      const rows = Array.isArray(env.items)
+        ? env.items
+        : Array.isArray(res.data)
+          ? (res.data as AttributionChannelRaw[])
+          : [];
+      const valueConverted = env.valueConverted === true;
       return NextResponse.json(normalizeByChannel(rows, { start, end, valueConverted }));
     }
 
@@ -109,10 +118,10 @@ export async function GET(req: NextRequest) {
       limit,
     });
     if (!res.ok) return errorToResponse(res.error, correlationId);
-    // datas 봉투 = { items, truncated, limit }. 비객체면 빈 봉투로 안전 처리.
+    // datas 봉투 = { items, truncated, limit, valueConverted }. 비객체면 빈 봉투로 안전 처리.
     const env = res.data && typeof res.data === "object" ? (res.data as AttributionTxsRaw) : {};
-    const items = Array.isArray(env.items) ? env.items : [];
-    const valueConverted = items.some((r) => Number(r?.amount) !== Number(r?.rawAmount));
+    // valueConverted = .NET 명시 boolean(추정 폐기). 봉투에 없으면 false 안전 기본.
+    const valueConverted = (env as { valueConverted?: boolean }).valueConverted === true;
     return NextResponse.json(
       normalizeByTransactions(env, { start, end, channelFilter: channel, valueConverted }),
     );

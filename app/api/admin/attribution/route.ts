@@ -11,7 +11,8 @@
  * 쿼리:
  *   view=byChannel       &start=YYYY-MM-DD&end=YYYY-MM-DD
  *   view=byTransactions  &start=YYYY-MM-DD&end=YYYY-MM-DD
- *                        &channel=(빈값=전체|google|meta|naver|direct|unknown)&limit=1~2000(기본 500)
+ *                        &channel=(빈값=전체 | ATTRIBUTION_CHANNELS 화이트리스트)&limit=1~2000(기본 500)
+ *                        화이트리스트: google·youtube·meta·naver·naver_blog·naver_cafe·kakao·direct·unknown
  *
  * value 환산: 정규과정(REGULARCLASS_CONTENTIDS, .NET AppConfig SoT — default "be34274b-cca4-4" 박혀 env 미설정이어도 ON).
  *   계약금 결제 = ×10(195만 환산). 오프라인 잔금("결제 링크" 패턴)은 매출에서 제외(중복 방지). 취소건 제외(.NET 모집단).
@@ -28,6 +29,7 @@ import { postCmsPayment, type CmsPostError } from "@/lib/server/cms-api";
 import {
   normalizeByChannel,
   normalizeByTransactions,
+  ATTRIBUTION_CHANNELS,
   type AttributionChannelRaw,
   type AttributionTxsRaw,
 } from "@/lib/server/attribution-normalize";
@@ -36,13 +38,17 @@ export const dynamic = "force-dynamic";
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
+// 채널 필터 화이트리스트 — 빈 문자열(전체) + ATTRIBUTION_CHANNELS(.NET CASE 어휘 SoT).
+//   ATTRIBUTION_CHANNELS 에 채널이 추가되면 자동 반영(불일치 차단). z.enum 은 비어있지 않은 튜플 필요.
+const CHANNEL_ENUM = ["", ...ATTRIBUTION_CHANNELS] as [string, ...string[]];
+
 const QuerySchema = z
   .object({
     view: z.enum(["byChannel", "byTransactions"]),
     start: z.string().regex(YMD, "start must be YYYY-MM-DD"),
     end: z.string().regex(YMD, "end must be YYYY-MM-DD"),
     // 빈 문자열 = 전체 채널. 화이트리스트로 제한(임의 값 차단).
-    channel: z.enum(["", "google", "meta", "naver", "direct", "unknown"]).default(""),
+    channel: z.enum(CHANNEL_ENUM).default(""),
     // 상세 목록 상한 1~2000(기본 500). 숫자 문자열만 허용.
     limit: z.coerce.number().int().min(1).max(2000).default(500),
   })

@@ -14,8 +14,22 @@
  * 계획: ~/.claude/state/plans/magicbody-attribution-admin-view-v1.md
  */
 
-/** 채널 표준 순서 — unknown 은 항상 마지막. */
-export const ATTRIBUTION_CHANNELS = ["google", "meta", "naver", "direct", "unknown"] as const;
+/**
+ * 채널 표준 순서 — unknown 은 항상 마지막. .NET AttributionChannelCase() 산출 어휘와 1:1 일치(SoT).
+ * 순서: 구글 → 유튜브 → 인스타/메타 → 네이버 → 네이버 블로그 → 네이버 카페 → 카카오 → 직접 → 미상.
+ * 미지정(화이트리스트 외) 채널 값은 safeChannel 이 unknown 으로 폴백한다.
+ */
+export const ATTRIBUTION_CHANNELS = [
+  "google",
+  "youtube",
+  "meta",
+  "naver",
+  "naver_blog",
+  "naver_cafe",
+  "kakao",
+  "direct",
+  "unknown",
+] as const;
 export type AttributionChannel = (typeof ATTRIBUTION_CHANNELS)[number];
 
 /** GetAttributionByChannel 행 (raw, .NET) */

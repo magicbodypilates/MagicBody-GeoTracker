@@ -49,6 +49,43 @@ describe("normalizeByChannel", () => {
     }
   });
 
+  it("확장 채널(youtube·naver_blog·naver_cafe·kakao)은 그대로 통과", () => {
+    // .NET SQL CASE 가 산출하는 신규 채널 어휘가 화이트리스트를 통과해야 함(폴백 X).
+    const rows: AttributionChannelRaw[] = [
+      { channel: "youtube", salesCount: 1, revenue: 10, rawRevenue: 10 },
+      { channel: "naver_blog", salesCount: 1, revenue: 9, rawRevenue: 9 },
+      { channel: "naver_cafe", salesCount: 1, revenue: 8, rawRevenue: 8 },
+      { channel: "kakao", salesCount: 1, revenue: 7, rawRevenue: 7 },
+      // 대소문자·공백 흔들림도 정규화되어 통과해야 함.
+      { channel: "  NAVER_BLOG ", salesCount: 1, revenue: 6, rawRevenue: 6 },
+    ];
+    const out = normalizeByChannel(rows, { ...RANGE, valueConverted: false });
+    const channels = out.rows.map((r) => r.channel);
+    expect(channels).toEqual(
+      expect.arrayContaining(["youtube", "naver_blog", "naver_cafe", "kakao"]),
+    );
+    // 어떤 행도 unknown 으로 잘못 폴백되지 않아야 함.
+    expect(channels).not.toContain("unknown");
+    // 모든 산출 채널이 화이트리스트 안에 있어야 함.
+    for (const c of channels) {
+      expect(ATTRIBUTION_CHANNELS).toContain(c as (typeof ATTRIBUTION_CHANNELS)[number]);
+    }
+  });
+
+  it("naver_blog/naver_cafe 는 generic naver 로 뭉뚱그려지지 않음(정규화 단계 보존)", () => {
+    // 정규화는 .NET CASE 결과를 재분류하지 않는다 — naver_blog 가 naver 로 접히면 안 됨.
+    const rows: AttributionChannelRaw[] = [
+      { channel: "naver", salesCount: 1, revenue: 3, rawRevenue: 3 },
+      { channel: "naver_blog", salesCount: 1, revenue: 2, rawRevenue: 2 },
+      { channel: "naver_cafe", salesCount: 1, revenue: 1, rawRevenue: 1 },
+    ];
+    const out = normalizeByChannel(rows, { ...RANGE, valueConverted: false });
+    const channels = out.rows.map((r) => r.channel);
+    expect(channels).toContain("naver");
+    expect(channels).toContain("naver_blog");
+    expect(channels).toContain("naver_cafe");
+  });
+
   it("빈/널 입력은 빈 rows 로 안전 처리", () => {
     expect(normalizeByChannel(null, { ...RANGE, valueConverted: false }).rows).toEqual([]);
     expect(normalizeByChannel(undefined, { ...RANGE, valueConverted: false }).rows).toEqual([]);

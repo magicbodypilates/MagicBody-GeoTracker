@@ -15,9 +15,12 @@ import { describe, it, expect } from "vitest";
 import {
   normalizeByChannel,
   normalizeByTransactions,
+  normalizeByMonth,
   ATTRIBUTION_CHANNELS,
   type AttributionChannelRaw,
   type AttributionTxsRaw,
+  type AttributionMonthRaw,
+  type MonthRow,
 } from "@/lib/server/attribution-normalize";
 
 const RANGE = { start: "2026-06-01", end: "2026-06-30" };
@@ -247,5 +250,155 @@ describe("normalizeByTransactions", () => {
     expect(out.channelFilter).toBe("meta");
     expect(out.valueConverted).toBe(false);
     expect(out.view).toBe("byTransactions");
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────
+ * normalizeByMonth (월별 추이) — plan v2 단계 6a
+ * ───────────────────────────────────────────────────────────────── */
+const MONTH_OPTS = { start: "2026-01-01", end: "2026-03-31", groupBy: "channel", valueConverted: true };
+
+describe("normalizeByMonth — 기본 정규화", () => {
+  it("series + total 행을 보존하고 rowType·메타를 정규화", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-01", dim: "google", rowType: "series", salesCount: 3, revenue: 300, rawRevenue: 30 },
+      { bucket: "2026-01", dim: "naver", rowType: "series", salesCount: 2, revenue: 200, rawRevenue: 20 },
+      { bucket: "2026-01", dim: "", rowType: "total", salesCount: 5, revenue: 500, rawRevenue: 50 },
+    ];
+    const out = normalizeByMonth(rows, MONTH_OPTS);
+    expect(out.view).toBe("byMonth");
+    expect(out.timezone).toBe("Asia/Seoul");
+    expect(out.groupBy).toBe("channel");
+    expect(out.rows).toHaveLength(3);
+    const total = out.rows.find((r) => r.rowType === "total")!;
+    expect(total.dim).toBe("");
+    expect(total.revenue).toBe(500);
+  });
+
+  it("total 행 매출 = 그 달 series 합과 일치(합계 정합)", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-02", dim: "google", rowType: "series", revenue: 1000 },
+      { bucket: "2026-02", dim: "meta", rowType: "series", revenue: 2000 },
+      { bucket: "2026-02", dim: "", rowType: "total", revenue: 3000 },
+    ];
+    const out = normalizeByMonth(rows, MONTH_OPTS);
+    const seriesSum = out.rows
+      .filter((r) => r.rowType === "series" && r.bucket === "2026-02")
+      .reduce((s, r) => s + r.revenue, 0);
+    const total = out.rows.find((r) => r.rowType === "total" && r.bucket === "2026-02")!;
+    expect(total.revenue).toBe(seriesSum);
+  });
+});
+
+describe("normalizeByMonth — 가드/엣지", () => {
+  it("bucket 형식 불량 행 제외('YYYY-MM' 만 허용)", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-01", dim: "google", rowType: "series", revenue: 100 },
+      { bucket: "2026-1", dim: "naver", rowType: "series", revenue: 200 },
+      { bucket: "bad", dim: "meta", rowType: "series", revenue: 300 },
+      { bucket: "", dim: "kakao", rowType: "series", revenue: 400 },
+      { bucket: "2026-13-99", dim: "kakao", rowType: "series", revenue: 500 },
+    ];
+    const out = normalizeByMonth(rows, MONTH_OPTS);
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0].bucket).toBe("2026-01");
+  });
+
+  it("revenue 음수·NaN → 0 클램프", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-01", dim: "google", rowType: "series", revenue: -50, rawRevenue: Number.NaN },
+    ];
+    const out = normalizeByMonth(rows, MONTH_OPTS);
+    expect(out.rows[0].revenue).toBe(0);
+    expect(out.rows[0].rawRevenue).toBe(0);
+  });
+
+  it("빈 배열·null·undefined → 빈 rows", () => {
+    expect(normalizeByMonth([], MONTH_OPTS).rows).toHaveLength(0);
+    expect(normalizeByMonth(null, MONTH_OPTS).rows).toHaveLength(0);
+    expect(normalizeByMonth(undefined, MONTH_OPTS).rows).toHaveLength(0);
+  });
+
+  it("rowType 이 'total' 외이면 series 로 정규화(누락 포함)", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-01", dim: "google", rowType: "weird", revenue: 10 },
+      { bucket: "2026-01", dim: "naver", revenue: 10 },
+    ];
+    const out = normalizeByMonth(rows, MONTH_OPTS);
+    expect(out.rows.every((r) => r.rowType === "series")).toBe(true);
+  });
+
+  it("groupBy 화이트리스트 밖 값 → channel 폴백", () => {
+    expect(normalizeByMonth([], { ...MONTH_OPTS, groupBy: "bogus" }).groupBy).toBe("channel");
+    expect(normalizeByMonth([], { ...MONTH_OPTS, groupBy: "class" }).groupBy).toBe("class");
+  });
+});
+
+describe("normalizeByMonth — channel 차원", () => {
+  it("알 수 없는 채널 dim → unknown(channel 모드)", () => {
+    const rows: AttributionMonthRaw[] = [{ bucket: "2026-01", dim: "tiktok", rowType: "series", revenue: 10 }];
+    expect(normalizeByMonth(rows, { ...MONTH_OPTS, groupBy: "channel" }).rows[0].dim).toBe("unknown");
+  });
+
+  it("total 행 dim 은 항상 빈 문자열(센티넬 'all' 충돌 방어)", () => {
+    const rows: AttributionMonthRaw[] = [{ bucket: "2026-01", dim: "all", rowType: "total", revenue: 10 }];
+    expect(normalizeByMonth(rows, { ...MONTH_OPTS, groupBy: "channel" }).rows[0].dim).toBe("");
+  });
+});
+
+describe("normalizeByMonth — class 차원 ProductName 보존", () => {
+  it("class 모드는 상품명 원문(trim) 보존, 빈값은 빈 문자열(라벨링은 UI)", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-01", dim: "  필라테스 강사과정  ", rowType: "series", revenue: 10 },
+      { bucket: "2026-01", dim: "", rowType: "series", revenue: 5 },
+    ];
+    const out = normalizeByMonth(rows, { ...MONTH_OPTS, groupBy: "class" });
+    expect(out.rows[0].dim).toBe("필라테스 강사과정");
+    expect(out.rows[1].dim).toBe("");
+  });
+});
+
+describe("normalizeByMonth — 식별자 누출 0(보안)", () => {
+  it("출력 키 집합이 정확히 화이트리스트(스프레드 금지)·직렬화에 식별자 흔적 0", () => {
+    const dirty = {
+      bucket: "2026-01",
+      dim: "google",
+      rowType: "series",
+      salesCount: 1,
+      revenue: 10,
+      rawRevenue: 1,
+      gclid: "LEAK_GCLID",
+      fbclid: "LEAK_FBCLID",
+      fbp: "LEAK_FBP",
+      fbc: "LEAK_FBC",
+      ip: "1.2.3.4",
+      email: "leak@example.com",
+      tel: "010-0000-0000",
+      source: "google",
+    } as unknown as AttributionMonthRaw;
+    const out = normalizeByMonth([dirty], MONTH_OPTS);
+    const allowed = new Set(["bucket", "dim", "rowType", "salesCount", "revenue", "rawRevenue"]);
+    for (const row of out.rows) {
+      expect(new Set(Object.keys(row as MonthRow))).toEqual(allowed);
+    }
+    const json = JSON.stringify(out);
+    for (const leak of ["LEAK_GCLID", "LEAK_FBCLID", "LEAK_FBP", "LEAK_FBC", "leak@example.com", "010-0000-0000"]) {
+      expect(json.includes(leak)).toBe(false);
+    }
+  });
+});
+
+describe("normalizeByMonth — 정렬", () => {
+  it("bucket 오름차순 정렬", () => {
+    const rows: AttributionMonthRaw[] = [
+      { bucket: "2026-03", dim: "google", rowType: "series", revenue: 1 },
+      { bucket: "2026-01", dim: "google", rowType: "series", revenue: 1 },
+      { bucket: "2026-02", dim: "google", rowType: "series", revenue: 1 },
+    ];
+    expect(normalizeByMonth(rows, MONTH_OPTS).rows.map((r) => r.bucket)).toEqual([
+      "2026-01",
+      "2026-02",
+      "2026-03",
+    ]);
   });
 });

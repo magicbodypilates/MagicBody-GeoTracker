@@ -49,3 +49,59 @@ export const CHANNEL_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "전체 채널" },
   ...CHANNEL_ORDER.map((c) => ({ value: c, label: CHANNEL_META[c].label })),
 ];
+
+/* ───────────────────────────────────────────────────────────────────
+ * 월별 추이 — 클래스(상품)별 누적 막대용 색·라벨
+ *
+ * 채널과 달리 클래스(ProductName)는 동적·다수라 고정 메타를 둘 수 없다.
+ * "기간을 6→12→24 로 바꿔도 같은 상품 = 같은 색"(C9)을 위해 seriesKey(상품명) 기반
+ *   결정적(deterministic) 색 매핑을 쓴다. 표시 순서(top-N)와 무관하게 색이 흔들리지 않는다.
+ * ─────────────────────────────────────────────────────────────────── */
+
+/** 클래스(상품)별 막대 팔레트 8색 — 채널 색과 시각적으로 구분되는 톤. 9번째부터 순환. */
+export const CLASS_PALETTE = [
+  "#2563eb", // blue
+  "#db2777", // pink
+  "#16a34a", // green
+  "#d97706", // amber
+  "#7c3aed", // violet
+  "#0891b2", // cyan
+  "#dc2626", // red
+  "#65a30d", // lime
+] as const;
+
+/** "기타"(top-N 외 나머지 합산) 색·라벨. 채널 unknown 과 동일 회색 톤. */
+export const OTHER_COLOR = "#9ca3af";
+export const OTHER_LABEL = "기타";
+
+/** 상품명 빈값 라벨 — .NET·normalize 는 빈 문자열("")로 두고, 표시만 이 라벨로(SQL 한국어 리터럴 0, C8). */
+export const NO_NAME_LABEL = "(상품명 없음)";
+
+/**
+ * seriesKey(상품명) → CLASS_PALETTE 인덱스 안정 매핑(결정적 해시).
+ *   같은 상품명은 항상 같은 색. 충돌(같은 색 다른 상품)은 시각적 약점일 뿐 데이터 오류 아님.
+ *   "기타"·빈 키는 호출부에서 OTHER_COLOR 로 분기(여기서 처리하지 않음).
+ */
+export function classColor(seriesKey: string): string {
+  let h = 0;
+  for (let i = 0; i < seriesKey.length; i++) {
+    // 간단·결정적 문자열 해시(djb2 변형). 부호 제거 후 팔레트 길이로 모듈로.
+    h = (h * 31 + seriesKey.charCodeAt(i)) | 0;
+  }
+  const idx = Math.abs(h) % CLASS_PALETTE.length;
+  return CLASS_PALETTE[idx];
+}
+
+/**
+ * 클래스 차원 라벨 — 빈 키는 "(상품명 없음)".
+ * 결제 상품명은 주문 제목이라 끝에 "외 N건"이 붙는다(N=다른 라인 수). 단일 상품 주문의 "외 0건"은
+ * 노이즈라 라벨에서만 제거하고, 실제 묶음 주문("외 N건", N≥1)은 정보라 유지한다.
+ * 색·집계는 원문 seriesKey 로 하므로(여기선 표시 라벨만 다듬음) 색 안정성·합계 정합에 영향 없음.
+ */
+export function classLabel(seriesKey: string): string {
+  if (seriesKey.length === 0) return NO_NAME_LABEL;
+  return seriesKey
+    .replace(/\s*외\s*0\s*건\s*$/, "") // "외 0건"(단일 상품) 꼬리표만 제거
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}

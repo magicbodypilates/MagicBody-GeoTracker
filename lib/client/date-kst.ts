@@ -138,6 +138,55 @@ export function resolveGa4DateToken(
  * @param days  윈도우 일수 (오늘 포함)
  * @returns     UTC ISO 문자열
  */
+/**
+ * KST 기준 "최근 N개월 추이" 조회 구간을 YMD 로 환산.
+ *   start = (KST 오늘이 속한 달 기준 N-1개월 전 그 달의 1일) "YYYY-MM-01"
+ *   end   = KST 오늘 "YYYY-MM-DD" (이번 달은 부분월 — 막대 "진행 중" 마킹은 UI 책임)
+ *
+ * 브라우저 로컬 타임존과 무관하게 항상 KST(toKstDateKey) 기준으로 계산한다(C12).
+ * .NET 계약(sdate/edate, YMD)을 그대로 쓰므로 계약을 2벌 만들지 않는다.
+ *
+ * @param months 포함할 개월 수(이번 달 포함). 예) 12 → 11개월 전 1일 ~ 오늘 = 12개 월 버킷
+ * @returns      { start: "YYYY-MM-01", end: "YYYY-MM-DD" }. months<1 이면 1 로 보정.
+ */
+export function kstMonthRange(months: number): { start: string; end: string } {
+  const m = Number.isFinite(months) && months >= 1 ? Math.floor(months) : 1;
+  const todayKstKey = toKstDateKey(new Date()); // "YYYY-MM-DD" (KST 오늘)
+  const [y, mo] = todayKstKey.split("-").map(Number);
+  // 이번 달(1-based)에서 (m-1)개월 뒤로 이동 → 시작 달. 연도 경계는 0-based 산술로 안전 처리.
+  const startMonthIndex0 = (y * 12 + (mo - 1)) - (m - 1);
+  const sy = Math.floor(startMonthIndex0 / 12);
+  const sm = (startMonthIndex0 % 12) + 1; // 1-based
+  const start = `${sy}-${String(sm).padStart(2, "0")}-01`;
+  return { start, end: todayKstKey };
+}
+
+/**
+ * 시작·종료 일자(YMD) 가 걸치는 모든 "YYYY-MM" 월 버킷을 오름차순으로 열거.
+ * 데이터 없는 달도 0 으로 채우기 위한 연속 월 축 생성에 쓴다(부분월 포함).
+ *
+ * 월 산술은 0-based 인덱스로 진행해 로컬 타임존·DST 영향을 받지 않는다.
+ *
+ * @param start "YYYY-MM-DD" 또는 "YYYY-MM" (포함)
+ * @param end   "YYYY-MM-DD" 또는 "YYYY-MM" (포함)
+ * @returns     ["YYYY-MM", ...] 오래된→최신. 형식 오류 또는 start>end 면 빈 배열.
+ */
+export function enumerateMonthRange(start: string, end: string): string[] {
+  const sm = /^(\d{4})-(\d{2})/.exec(start);
+  const em = /^(\d{4})-(\d{2})/.exec(end);
+  if (!sm || !em) return [];
+  const startIdx = Number(sm[1]) * 12 + (Number(sm[2]) - 1);
+  const endIdx = Number(em[1]) * 12 + (Number(em[2]) - 1);
+  if (startIdx > endIdx) return [];
+  const keys: string[] = [];
+  for (let i = startIdx; i <= endIdx; i++) {
+    const yy = Math.floor(i / 12);
+    const mm = (i % 12) + 1;
+    keys.push(`${yy}-${String(mm).padStart(2, "0")}`);
+  }
+  return keys;
+}
+
 export function kstWindowStartUtcIso(days: number): string {
   // KST 자정을 구하려면: 현재 시각을 KST 일자로 환산 → 그 일자의 00:00(KST) → UTC.
   // KST 자정(00:00 KST) = 전날 15:00 UTC. 이를 UTC 기준으로 안전하게 계산한다.

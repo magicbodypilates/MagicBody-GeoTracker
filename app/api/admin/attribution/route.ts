@@ -29,9 +29,12 @@ import { postCmsPayment, type CmsPostError } from "@/lib/server/cms-api";
 import {
   normalizeByChannel,
   normalizeByTransactions,
+  normalizeByMonth,
   ATTRIBUTION_CHANNELS,
+  ATTRIBUTION_GROUP_BYS,
   type AttributionChannelRaw,
   type AttributionTxsRaw,
+  type AttributionMonthRaw,
 } from "@/lib/server/attribution-normalize";
 
 export const dynamic = "force-dynamic";
@@ -41,16 +44,20 @@ const YMD = /^\d{4}-\d{2}-\d{2}$/;
 // 채널 필터 화이트리스트 — 빈 문자열(전체) + ATTRIBUTION_CHANNELS(.NET CASE 어휘 SoT).
 //   ATTRIBUTION_CHANNELS 에 채널이 추가되면 자동 반영(불일치 차단). z.enum 은 비어있지 않은 튜플 필요.
 const CHANNEL_ENUM = ["", ...ATTRIBUTION_CHANNELS] as [string, ...string[]];
+// 분해 차원 화이트리스트(byMonth 전용) — channel|class. ATTRIBUTION_GROUP_BYS 가 SoT(불일치 차단).
+const GROUP_BY_ENUM = [...ATTRIBUTION_GROUP_BYS] as [string, ...string[]];
 
 const QuerySchema = z
   .object({
-    view: z.enum(["byChannel", "byTransactions"]),
+    view: z.enum(["byChannel", "byTransactions", "byMonth"]),
     start: z.string().regex(YMD, "start must be YYYY-MM-DD"),
     end: z.string().regex(YMD, "end must be YYYY-MM-DD"),
     // 빈 문자열 = 전체 채널. 화이트리스트로 제한(임의 값 차단).
     channel: z.enum(CHANNEL_ENUM).default(""),
     // 상세 목록 상한 1~2000(기본 500). 숫자 문자열만 허용.
     limit: z.coerce.number().int().min(1).max(2000).default(500),
+    // 월별 추이 분해 차원(byMonth 전용). 그 외 view 에서는 무시.
+    groupBy: z.enum(GROUP_BY_ENUM).default("channel"),
   })
   .refine((q) => q.start <= q.end, { message: "start must be <= end", path: ["start"] });
 
@@ -84,6 +91,7 @@ export async function GET(req: NextRequest) {
     end: sp.get("end") ?? undefined,
     channel: sp.get("channel") ?? undefined,
     limit: sp.get("limit") ?? undefined,
+    groupBy: sp.get("groupBy") ?? undefined,
   });
   if (!parsed.success) {
     return NextResponse.json(
@@ -91,9 +99,35 @@ export async function GET(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { view, start, end, channel, limit } = parsed.data;
+  const { view, start, end, channel, limit, groupBy } = parsed.data;
 
   try {
+    if (view === "byMonth") {
+      // 월별 추이 — start/end(YMD) 계약 재사용(months selector 는 프런트가 date-kst 로 환산해 전송).
+      const res = await postCmsPayment("/api/Payment/GetAttributionByMonth/", {
+        sdate: start,
+        edate: end,
+        groupBy,
+      });
+      if (!res.ok) return errorToResponse(res.error, correlationId);
+      // datas 봉투 = { items, valueConverted, groupBy }. 비객체/구버전 배열도 안전 폴백.
+      const env =
+        res.data && typeof res.data === "object" && !Array.isArray(res.data)
+          ? (res.data as { items?: AttributionMonthRaw[]; valueConverted?: boolean; groupBy?: string })
+          : {};
+      const rows = Array.isArray(env.items)
+        ? env.items
+        : Array.isArray(res.data)
+          ? (res.data as AttributionMonthRaw[])
+          : [];
+      const valueConverted = env.valueConverted === true;
+      // groupBy 는 .NET 응답 메아리를 우선, 없으면 요청값(normalize 가 재검증·폴백).
+      const effectiveGroupBy = typeof env.groupBy === "string" ? env.groupBy : groupBy;
+      return NextResponse.json(
+        normalizeByMonth(rows, { start, end, groupBy: effectiveGroupBy, valueConverted }),
+      );
+    }
+
     if (view === "byChannel") {
       const res = await postCmsPayment("/api/Payment/GetAttributionByChannel/", {
         sdate: start,

@@ -105,6 +105,48 @@ export type ByTransactionsNormalized = {
   rows: TxRow[];
 };
 
+/** GetAttributionByMonth 행 (raw, .NET) — 원시 식별자 없음. rowType 으로 total/series 구분(dim='all' 센티넬 폐기). */
+export type AttributionMonthRaw = {
+  bucket?: string | null;
+  dim?: string | null;
+  rowType?: string | null;
+  salesCount?: number;
+  revenue?: number;
+  rawRevenue?: number;
+};
+
+/** GetAttributionByMonth 응답 봉투(datas). */
+export type AttributionMonthsRaw = {
+  items?: AttributionMonthRaw[];
+  valueConverted?: boolean;
+  groupBy?: string;
+};
+
+/** 분해 차원 — channel(채널별) | class(상품별). route·UI 와 동일 어휘. */
+export const ATTRIBUTION_GROUP_BYS = ["channel", "class"] as const;
+export type AttributionGroupBy = (typeof ATTRIBUTION_GROUP_BYS)[number];
+
+export type MonthRow = {
+  /** 월 버킷 "YYYY-MM". */
+  bucket: string;
+  /** 차원값. channel 이면 채널 어휘, class 이면 ProductName(빈값이면 ""). total 행이면 "". */
+  dim: string;
+  /** "total"(그 달 전체 합계) | "series"(월 × 차원). */
+  rowType: "total" | "series";
+  salesCount: number;
+  revenue: number;
+  rawRevenue: number;
+};
+
+export type ByMonthNormalized = {
+  view: "byMonth";
+  timezone: "Asia/Seoul";
+  range: { start: string; end: string };
+  groupBy: AttributionGroupBy;
+  valueConverted: boolean;
+  rows: MonthRow[];
+};
+
 function safeNum(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -200,5 +242,67 @@ export function normalizeByTransactions(
     truncated: env.truncated === true,
     limit: safeInt(env.limit) || rows.length,
     rows,
+  };
+}
+
+/** "YYYY-MM" 월 버킷 형식 가드 — 형식 불량 행은 정규화에서 제외(차트 축 오염 방지). */
+const MONTH_BUCKET = /^\d{4}-\d{2}$/;
+
+/** groupBy 화이트리스트 정규화 — 알 수 없는 값은 "channel" 폴백. .NET·route 와 동일 어휘. */
+function safeGroupBy(v: unknown): AttributionGroupBy {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return (ATTRIBUTION_GROUP_BYS as readonly string[]).includes(s)
+    ? (s as AttributionGroupBy)
+    : "channel";
+}
+
+/**
+ * byMonth 정규화 (월별 추이).
+ *  - 입력 raw 배열: 각 행은 (bucket, dim, rowType, salesCount, revenue, rawRevenue). 비배열은 빈 배열.
+ *  - **명시 필드만 픽**(스프레드 금지). 원시 식별자는 .NET DTO 에도 없지만 여기서도 화이트리스트만 매핑(이중 차단).
+ *  - bucket 형식("YYYY-MM") 불량 행은 제외(축 오염 방지). rowType 은 "total" 외 모두 "series" 로 정규화.
+ *  - channel 차원은 화이트리스트(safeChannel), class 차원은 ProductName 원문 보존(라벨링은 UI — "(상품명 없음)").
+ *  - total 행 식별은 **rowType==="total"** (dim==='all' 판정 폐기 — 상품명·미래 채널 'all' 충돌 방어).
+ *  - 정렬: bucket ASC. (동일 bucket 내 순서는 .NET ORDER BY 보존 — total 먼저, 그 뒤 series.)
+ */
+export function normalizeByMonth(
+  rows: AttributionMonthRaw[] | null | undefined,
+  opts: { start: string; end: string; groupBy: string; valueConverted: boolean },
+): ByMonthNormalized {
+  const groupBy = safeGroupBy(opts.groupBy);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const normalized: MonthRow[] = [];
+
+  for (const r of safeRows) {
+    const bucket = typeof r.bucket === "string" ? r.bucket.trim() : "";
+    if (!MONTH_BUCKET.test(bucket)) continue; // 형식 불량 행 제외
+
+    const isTotal = typeof r.rowType === "string" && r.rowType.trim().toLowerCase() === "total";
+    // class 차원은 ProductName 원문(trim) 보존, channel 차원은 화이트리스트 정규화. total 행은 dim="".
+    const rawDim = typeof r.dim === "string" ? r.dim.trim() : "";
+    const dim = isTotal ? "" : groupBy === "channel" ? safeChannel(rawDim) : rawDim;
+
+    const revenue = safeNum(r.revenue);
+    const rawRevenue = safeNum(r.rawRevenue);
+    normalized.push({
+      bucket,
+      dim,
+      rowType: isTotal ? "total" : "series",
+      salesCount: safeInt(r.salesCount),
+      revenue: revenue < 0 ? 0 : revenue,
+      rawRevenue: rawRevenue < 0 ? 0 : rawRevenue,
+    });
+  }
+
+  // bucket 오름차순(안정 정렬). 동일 bucket 내부 순서는 .NET ORDER BY(total DESC, dim) 보존.
+  normalized.sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
+
+  return {
+    view: "byMonth",
+    timezone: "Asia/Seoul",
+    range: { start: opts.start, end: opts.end },
+    groupBy,
+    valueConverted: opts.valueConverted === true,
+    rows: normalized,
   };
 }

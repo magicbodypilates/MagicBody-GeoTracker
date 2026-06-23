@@ -5,6 +5,8 @@ import {
   kstWindowStartUtcIso,
   enumerateDateRange,
   resolveGa4DateToken,
+  kstMonthRange,
+  enumerateMonthRange,
 } from "./date-kst";
 
 describe("toKstDateKey", () => {
@@ -199,5 +201,71 @@ describe("resolveGa4DateToken (GA4 상대 토큰 → KST 절대 일자)", () => 
     expect(days).toHaveLength(29);
     expect(days[0]).toBe("2026-05-21");
     expect(days[days.length - 1]).toBe("2026-06-18");
+  });
+});
+
+describe("kstMonthRange (최근 N개월 → start/end YMD)", () => {
+  it("start 는 시작 달 1일, end 는 KST 오늘", () => {
+    const todayKey = toKstDateKey(new Date());
+    const r = kstMonthRange(12);
+    expect(r.end).toBe(todayKey);
+    expect(r.start).toMatch(/^\d{4}-\d{2}-01$/);
+  });
+
+  it("months=1 이면 이번 달 1일 ~ 오늘(부분월)", () => {
+    const todayKey = toKstDateKey(new Date());
+    const thisMonth = todayKey.slice(0, 7);
+    const r = kstMonthRange(1);
+    expect(r.start).toBe(`${thisMonth}-01`);
+    expect(r.end).toBe(todayKey);
+  });
+
+  it("start~end 가 정확히 N개 월 버킷을 커버", () => {
+    const r = kstMonthRange(12);
+    expect(enumerateMonthRange(r.start, r.end)).toHaveLength(12);
+    const r6 = kstMonthRange(6);
+    expect(enumerateMonthRange(r6.start, r6.end)).toHaveLength(6);
+    const r24 = kstMonthRange(24);
+    expect(enumerateMonthRange(r24.start, r24.end)).toHaveLength(24);
+  });
+
+  it("months<1 은 1 로 보정", () => {
+    const r0 = kstMonthRange(0);
+    const r1 = kstMonthRange(1);
+    expect(r0).toEqual(r1);
+  });
+});
+
+describe("enumerateMonthRange (연속 월 버킷)", () => {
+  it("양끝 포함, 오래된→최신", () => {
+    expect(enumerateMonthRange("2026-01-01", "2026-04-15")).toEqual([
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+    ]);
+  });
+
+  it("'YYYY-MM' 입력도 받는다", () => {
+    expect(enumerateMonthRange("2026-11", "2027-02")).toEqual([
+      "2026-11",
+      "2026-12",
+      "2027-01",
+      "2027-02",
+    ]);
+  });
+
+  it("같은 달이면 그 한 달만", () => {
+    expect(enumerateMonthRange("2026-06-01", "2026-06-30")).toEqual(["2026-06"]);
+  });
+
+  it("연말 경계를 넘는다", () => {
+    expect(enumerateMonthRange("2025-12", "2026-01")).toEqual(["2025-12", "2026-01"]);
+  });
+
+  it("start>end 또는 형식 오류는 빈 배열", () => {
+    expect(enumerateMonthRange("2026-05", "2026-01")).toEqual([]);
+    expect(enumerateMonthRange("bad", "2026-01")).toEqual([]);
+    expect(enumerateMonthRange("", "2026-01")).toEqual([]);
   });
 });

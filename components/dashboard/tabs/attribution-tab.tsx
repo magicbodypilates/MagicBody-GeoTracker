@@ -5,6 +5,8 @@
  *   ① 채널별: 구글/유튜브/인스타·메타/네이버/네이버 블로그/네이버 카페/카카오/직접/미상별
  *             결제 건수 + 매출(정규과정 ×10 환산) — 막대 + 표
  *   ② 결제별: 결제일·상품명·금액·채널·source/medium/campaign·클릭ID 존재여부(✓/−)
+ *   ③ 월별 추이: 월 버킷별 매출(정규과정 ×10 환산) 추이 — 누적 막대(차원별 분해) + 표.
+ *             분해 차원 groupBy=channel(채널별) | class(상품별, top-N + "기타"). 합계는 .NET total 행이 SoT.
  *
  * 채널 분류는 .NET SQL CASE(AttributionChannelCase) 가 SoT — 화면은 라벨/순서/색만(재분류 X).
  * 채널 라벨·색·순서는 attribution-meta.ts(CHANNEL_META/CHANNEL_ORDER) 단일 출처. 미지정 채널은 미상 처리.
@@ -13,7 +15,8 @@
  *   상품명·결제일·클릭ID "존재 여부"만 렌더. 클릭ID 원문·fbp/fbc/IP·이메일·전화·해시는 데이터에 없음.
  *
  * GA4 '마케팅 성과' 탭과 구분(확정·결제건 직접 vs GA4 추정·전체 트래픽) — 안내 배너로 명시.
- * 데이터: /api/admin/attribution?view=byChannel|byTransactions (서버가 .NET 프록시, 키 숨김).
+ * 데이터: /api/admin/attribution?view=byChannel|byTransactions|byMonth(byMonth 는 groupBy=channel|class)
+ *         (서버가 .NET 프록시, 키 숨김).
  * 권한: 미들웨어 /api/admin/** 1차 + route requireAdmin 2차 + 탭 숨김 3차.
  * 계획: ~/.claude/state/plans/magicbody-attribution-admin-view-v1.md
  */
@@ -38,11 +41,43 @@ import {
   CHANNEL_FILTER_OPTIONS,
   channelLabel,
   channelColor,
+  classColor,
+  classLabel,
+  OTHER_COLOR,
+  OTHER_LABEL,
 } from "@/components/dashboard/attribution-meta";
+import { kstMonthRange, enumerateMonthRange, toKstDateKey } from "@/lib/client/date-kst";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
-type Segment = "byChannel" | "byTransactions";
+type Segment = "byChannel" | "byTransactions" | "byMonth";
+
+type GroupBy = "channel" | "class";
+
+/** 월별 추이 기간 옵션(개월). 기본 12. */
+const MONTH_RANGES: { months: number; label: string }[] = [
+  { months: 6, label: "최근 6개월" },
+  { months: 12, label: "최근 12개월" },
+  { months: 24, label: "최근 24개월" },
+];
+
+/** 클래스(상품) 차원 누적 막대에 개별 표시할 최대 series 수(나머지는 "기타" 합산). */
+const CLASS_TOP_N = 8;
+
+type MonthRow = {
+  bucket: string;
+  dim: string;
+  rowType: "total" | "series";
+  salesCount: number;
+  revenue: number;
+  rawRevenue: number;
+};
+type ByMonthData = {
+  rows: MonthRow[];
+  groupBy: GroupBy;
+  valueConverted: boolean;
+  range: { start: string; end: string };
+};
 
 type ChannelRow = {
   channel: string;
@@ -141,18 +176,31 @@ export function AttributionTab() {
 
   const [byChannel, setByChannel] = useState<ByChannelData | null>(null);
   const [byTransactions, setByTransactions] = useState<ByTransactionsData | null>(null);
+  const [byMonth, setByMonth] = useState<ByMonthData | null>(null);
+
+  // 월별 추이 전용 컨트롤(이 보기에서만 노출).
+  const [monthsRange, setMonthsRange] = useState(12);
+  const [groupBy, setGroupBy] = useState<GroupBy>("channel");
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
 
   const fetchAll = useCallback(async () => {
-    if (start > end) {
-      setError("invalid_input");
-      return;
-    }
     setBusy(true);
     setError("");
     try {
+      if (segment === "byMonth") {
+        // 월별 추이는 기간 selector(개월)를 KST 기준으로 환산(C12 — date-kst 유틸 강제).
+        const { start: mStart, end: mEnd } = kstMonthRange(monthsRange);
+        const res = await fetchView("byMonth", { start: mStart, end: mEnd, groupBy });
+        if (res.ok) setByMonth(res.data as ByMonthData);
+        else setError(res.code);
+        return;
+      }
+      if (start > end) {
+        setError("invalid_input");
+        return;
+      }
       if (segment === "byChannel") {
         const res = await fetchView("byChannel", { start, end });
         if (res.ok) setByChannel(res.data as ByChannelData);
@@ -170,7 +218,7 @@ export function AttributionTab() {
     } finally {
       setBusy(false);
     }
-  }, [segment, start, end, channelFilter, txLimit]);
+  }, [segment, start, end, channelFilter, txLimit, monthsRange, groupBy]);
 
   useEffect(() => {
     void fetchAll();
@@ -215,7 +263,104 @@ export function AttributionTab() {
   const valueConverted =
     segment === "byChannel"
       ? byChannel?.valueConverted ?? false
-      : byTransactions?.valueConverted ?? false;
+      : segment === "byTransactions"
+        ? byTransactions?.valueConverted ?? false
+        : byMonth?.valueConverted ?? false;
+
+  /* ── 월별 추이: long(행) → recharts wide pivot + series 목록 + 월합계 ── */
+  const monthChart = useMemo(() => {
+    if (!byMonth) {
+      return { data: [], series: [] as { key: string; label: string; color: string }[], hasData: false, currentMonth: "" };
+    }
+    const mGroupBy = byMonth.groupBy;
+    const seriesRows = byMonth.rows.filter((r) => r.rowType === "series");
+    const totalRows = byMonth.rows.filter((r) => r.rowType === "total");
+
+    // 연속 월 축(데이터 없는 달 0 채움) — date-kst 로 KST 기준 생성(C6).
+    const months = enumerateMonthRange(byMonth.range.start, byMonth.range.end);
+    // 데이터가 범위를 벗어난 경우 방어 — series/total 의 bucket 도 축에 합집합으로 포함.
+    const bucketSet = new Set<string>(months);
+    for (const r of byMonth.rows) bucketSet.add(r.bucket);
+    const axis = months.length > 0 ? months : Array.from(bucketSet).sort();
+
+    // series key 선정: channel 은 CHANNEL_ORDER, class 는 기간 전체 매출 합 내림차순 top-N + 기타.
+    let seriesKeys: string[];
+    let isOther = false;
+    if (mGroupBy === "channel") {
+      const present = new Set(seriesRows.map((r) => r.dim));
+      seriesKeys = CHANNEL_ORDER.filter((c) => present.has(c));
+      // 화이트리스트 밖(이론상 없음, normalize 가 unknown 폴백)도 안전 포함.
+      for (const r of seriesRows) if (!seriesKeys.includes(r.dim)) seriesKeys.push(r.dim);
+    } else {
+      const sumByDim = new Map<string, number>();
+      for (const r of seriesRows) sumByDim.set(r.dim, (sumByDim.get(r.dim) ?? 0) + r.revenue);
+      const ranked = [...sumByDim.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+      seriesKeys = ranked.slice(0, CLASS_TOP_N);
+      isOther = ranked.length > CLASS_TOP_N;
+    }
+
+    // (월×dim) revenue 인덱스.
+    const cell = new Map<string, number>(); // `${bucket}|${dim}`
+    for (const r of seriesRows) {
+      const k = `${r.bucket}|${r.dim}`;
+      cell.set(k, (cell.get(k) ?? 0) + r.revenue);
+    }
+    // 월 합계는 total 행을 SoT 로(C2) — 스택 총높이/툴팁 합계.
+    const totalByMonth = new Map<string, number>();
+    for (const r of totalRows) totalByMonth.set(r.bucket, (totalByMonth.get(r.bucket) ?? 0) + r.revenue);
+
+    const topSet = new Set(seriesKeys);
+    const data = axis.map((bucket) => {
+      const row: Record<string, number | string> = { bucket };
+      let stackedSum = 0;
+      for (const key of seriesKeys) {
+        const v = cell.get(`${bucket}|${key}`) ?? 0;
+        row[key] = v;
+        stackedSum += v;
+      }
+      if (mGroupBy === "class" && isOther) {
+        // 기타 = 그 달 모든 series 합 − top-N 합. (total 행이 SoT 이므로 total 기반으로 산출해 합계 정합.)
+        const monthTotal = totalByMonth.get(bucket);
+        if (monthTotal != null) {
+          const other = monthTotal - stackedSum;
+          // 정상 데이터에선 양수. 음수면 series 합 > total(데이터 이상) → 화면은 0 clamp 유지하되
+          // 개발 중 데이터 정합 점검을 위해 콘솔 경고만(운영·사용자 화면 영향 0).
+          if (process.env.NODE_ENV !== "production" && other < 0) {
+            console.warn(
+              `[attribution] byMonth 기타 음수(데이터 이상): bucket=${bucket} total=${monthTotal} stackedSum=${stackedSum} other=${other} → 0 으로 clamp`,
+            );
+          }
+          row[OTHER_LABEL] = other > 0 ? other : 0;
+        } else {
+          // total 행이 없으면 series 합으로 폴백.
+          let allSeries = 0;
+          for (const r of seriesRows) if (r.bucket === bucket && !topSet.has(r.dim)) allSeries += r.revenue;
+          row[OTHER_LABEL] = allSeries > 0 ? allSeries : 0;
+        }
+      }
+      // 라벨/툴팁 합계 = total 행 우선, 없으면 스택 합.
+      row.__total = totalByMonth.get(bucket) ?? stackedSum + (typeof row[OTHER_LABEL] === "number" ? (row[OTHER_LABEL] as number) : 0);
+      return row;
+    });
+
+    // recharts dataKey 목록(+ 기타). channel 은 채널 라벨·색, class 는 상품 라벨·안정 색.
+    const series: { key: string; label: string; color: string }[] =
+      mGroupBy === "channel"
+        ? seriesKeys.map((k) => ({ key: k, label: channelLabel(k), color: channelColor(k) }))
+        : seriesKeys.map((k) => ({ key: k, label: classLabel(k), color: classColor(k) }));
+    if (mGroupBy === "class" && isOther) {
+      series.push({ key: OTHER_LABEL, label: OTHER_LABEL, color: OTHER_COLOR });
+    }
+
+    const hasData = data.some((d) => Number(d.__total) > 0);
+    const currentMonth = toKstDateKey(new Date()).slice(0, 7); // "YYYY-MM" (이번 달 = 부분월)
+    return { data, series, hasData, currentMonth };
+  }, [byMonth]);
+
+  const monthGrandTotal = useMemo(() => {
+    if (!byMonth) return 0;
+    return byMonth.rows.filter((r) => r.rowType === "total").reduce((s, r) => s + r.revenue, 0);
+  }, [byMonth]);
 
   return (
     <div className="space-y-5">
@@ -223,7 +368,7 @@ export function AttributionTab() {
       <div className="flex flex-wrap items-center gap-2">
         {/* 세그먼트 토글 */}
         <div className="flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
-          {(["byChannel", "byTransactions"] as Segment[]).map((s) => (
+          {(["byChannel", "byTransactions", "byMonth"] as Segment[]).map((s) => (
             <button
               key={s}
               onClick={() => setSegment(s)}
@@ -233,10 +378,46 @@ export function AttributionTab() {
                   : "text-th-text-secondary hover:bg-th-card-hover"
               }`}
             >
-              {s === "byChannel" ? "채널별" : "결제별 상세"}
+              {s === "byChannel" ? "채널별" : s === "byTransactions" ? "결제별 상세" : "월별 추이"}
             </button>
           ))}
         </div>
+
+        {/* 월별 추이 전용 컨트롤 — 기간(개월) + 분해 차원 토글 */}
+        {segment === "byMonth" && (
+          <>
+            <div className="flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
+              {MONTH_RANGES.map((m) => (
+                <button
+                  key={m.months}
+                  onClick={() => setMonthsRange(m.months)}
+                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    monthsRange === m.months
+                      ? "bg-th-accent text-th-text-inverse"
+                      : "text-th-text-secondary hover:bg-th-card-hover"
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
+              {(["channel", "class"] as GroupBy[]).map((g) => (
+                <button
+                  key={g}
+                  onClick={() => setGroupBy(g)}
+                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    groupBy === g
+                      ? "bg-th-accent text-th-text-inverse"
+                      : "text-th-text-secondary hover:bg-th-card-hover"
+                  }`}
+                >
+                  {g === "channel" ? "채널별" : "클래스별"}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
 
         {/* 채널 필터 (결제별에서만) */}
         {segment === "byTransactions" && (
@@ -253,43 +434,46 @@ export function AttributionTab() {
           </select>
         )}
 
-        {/* 빠른 기간 버튼 */}
-        <div className="flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
-          {QUICK_RANGES.map((q) => {
-            const r = rangeForDays(q.days);
-            const active = start === r.start && end === r.end;
-            return (
-              <button
-                key={q.days}
-                onClick={() => applyQuickRange(q.days)}
-                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                  active
-                    ? "bg-th-accent text-th-text-inverse"
-                    : "text-th-text-secondary hover:bg-th-card-hover"
-                }`}
-              >
-                {q.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* 빠른 기간 버튼 + 일자 선택 — 채널별/결제별에서만(월별 추이는 개월 selector 사용) */}
+        {segment !== "byMonth" && (
+          <>
+            <div className="flex gap-0.5 rounded-md border border-th-border bg-th-card-alt p-0.5">
+              {QUICK_RANGES.map((q) => {
+                const r = rangeForDays(q.days);
+                const active = start === r.start && end === r.end;
+                return (
+                  <button
+                    key={q.days}
+                    onClick={() => applyQuickRange(q.days)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                      active
+                        ? "bg-th-accent text-th-text-inverse"
+                        : "text-th-text-secondary hover:bg-th-card-hover"
+                    }`}
+                  >
+                    {q.label}
+                  </button>
+                );
+              })}
+            </div>
 
-        {/* 기간 */}
-        <div className="flex items-center gap-1">
-          <input
-            type="date"
-            value={start}
-            onChange={(e) => setStart(e.target.value)}
-            className="rounded-md border border-th-border bg-th-card px-2 py-1 text-xs text-th-text"
-          />
-          <span className="text-xs text-th-text-muted">~</span>
-          <input
-            type="date"
-            value={end}
-            onChange={(e) => setEnd(e.target.value)}
-            className="rounded-md border border-th-border bg-th-card px-2 py-1 text-xs text-th-text"
-          />
-        </div>
+            <div className="flex items-center gap-1">
+              <input
+                type="date"
+                value={start}
+                onChange={(e) => setStart(e.target.value)}
+                className="rounded-md border border-th-border bg-th-card px-2 py-1 text-xs text-th-text"
+              />
+              <span className="text-xs text-th-text-muted">~</span>
+              <input
+                type="date"
+                value={end}
+                onChange={(e) => setEnd(e.target.value)}
+                className="rounded-md border border-th-border bg-th-card px-2 py-1 text-xs text-th-text"
+              />
+            </div>
+          </>
+        )}
 
         <button
           onClick={() => void fetchAll()}
@@ -504,6 +688,99 @@ export function AttributionTab() {
             </div>
           )}
         </div>
+      )}
+
+      {/* ── 세그먼트 ③ 월별 추이 ── */}
+      {segment === "byMonth" && (
+        <>
+          {/* 기간 합계 KPI */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <KpiCard
+              title={valueConverted ? "기간 합계 매출 (정규과정 ×10 환산)" : "기간 합계 매출 (실결제액)"}
+              value={formatWon(monthGrandTotal)}
+            />
+            <KpiCard
+              title="기간"
+              value={byMonth ? `${byMonth.range.start.slice(0, 7)} ~ ${byMonth.range.end.slice(0, 7)}` : "—"}
+              muted
+              hint="이번 달은 진행 중(부분월)이라 막대가 낮을 수 있습니다."
+            />
+          </div>
+
+          {/* 월별 누적 막대 */}
+          <div className="rounded-lg border border-th-border bg-th-card p-4">
+            <h3 className="mb-1 text-base font-semibold text-th-text">
+              월별 매출 추이 — {groupBy === "channel" ? "채널별" : "클래스(상품)별"}{" "}
+              {valueConverted ? "(정규과정 ×10 환산)" : "(실결제액)"}
+            </h3>
+            <p className="mb-3 text-[11px] text-th-text-muted">
+              {groupBy === "class"
+                ? `매출 상위 ${CLASS_TOP_N}개 상품 + 나머지는 ‘기타’로 합산. 같은 상품은 기간을 바꿔도 같은 색입니다.`
+                : "채널별 누적 막대. 막대 총높이 = 그 달 전체 매출(합계행 기준)."}
+            </p>
+            {!byMonth ? (
+              <EmptyBox text="불러오는 중입니다..." />
+            ) : !monthChart.hasData ? (
+              <EmptyBox text="해당 기간에 유입경로가 기록된 결제가 없습니다." />
+            ) : (
+              <div style={{ height: 360 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={monthChart.data} margin={{ left: 0, right: 12, top: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
+                    <XAxis dataKey="bucket" tick={{ fontSize: 10 }} interval={0} angle={-30} textAnchor="end" height={50} />
+                    <YAxis tick={{ fontSize: 10 }} tickFormatter={(v: number) => formatManwon(v)} />
+                    <Tooltip
+                      formatter={(v: unknown, name: unknown) => [formatWon(Number(v)), String(name)]}
+                      labelFormatter={(label: unknown) => {
+                        const b = String(label);
+                        return b === monthChart.currentMonth ? `${b} (이번 달·진행 중)` : b;
+                      }}
+                    />
+                    {monthChart.series.map((s, idx) => (
+                      <Bar key={s.key} dataKey={s.key} name={s.label} stackId="m" fill={s.color}>
+                        {/* 마지막 series 막대 위에 그 달 합계 라벨(total 행 기준). */}
+                        {idx === monthChart.series.length - 1 && (
+                          <LabelList
+                            dataKey="__total"
+                            position="top"
+                            formatter={(v: unknown) => formatManwon(Number(v))}
+                            style={{ fontSize: 9, fill: "var(--th-text-muted)" }}
+                          />
+                        )}
+                        {/* 이번 달(부분월) 막대는 반투명 처리로 "진행 중" 시각 구분. */}
+                        {monthChart.data.map((d) => (
+                          <Cell
+                            key={`${s.key}-${d.bucket}`}
+                            fill={s.color}
+                            fillOpacity={d.bucket === monthChart.currentMonth ? 0.45 : 1}
+                          />
+                        ))}
+                      </Bar>
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-th-text-muted">
+              <span>축 단위: 만원 · 툴팁: 원화.</span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-2.5 w-2.5 rounded-sm bg-th-text-muted opacity-45" />
+                연하게 표시된 막대 = 이번 달(진행 중·부분월)
+              </span>
+            </div>
+            {/* 범례 */}
+            {monthChart.hasData && (
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-th-text-secondary">
+                {monthChart.series.map((s) => (
+                  <span key={s.key} className="inline-flex items-center gap-1">
+                    <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: s.color }} />
+                    {s.label}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

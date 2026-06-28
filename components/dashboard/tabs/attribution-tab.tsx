@@ -362,6 +362,53 @@ export function AttributionTab() {
     return byMonth.rows.filter((r) => r.rowType === "total").reduce((s, r) => s + r.revenue, 0);
   }, [byMonth]);
 
+  /* ── 월별 추이 CSV(엑셀) 다운로드 — 숫자만(한글 라벨 제외), 월별 매출 평균 산출용 ──
+   *  컬럼: month(YYYY-MM) · total(월 총매출, 정수) · count(건수) · <dim 원본코드>별 매출.
+   *  채널 모드 dim 은 영문 코드(google·naver_blog 등) → 전부 숫자/영문. UTF-8 BOM 으로 Excel 한글깨짐 방지. */
+  const downloadMonthlyCsv = useCallback(() => {
+    if (!byMonth) return;
+    const totalRows = byMonth.rows.filter((r) => r.rowType === "total");
+    const seriesRows = byMonth.rows.filter((r) => r.rowType === "series");
+    const totalRev = new Map<string, number>();
+    const totalCnt = new Map<string, number>();
+    for (const r of totalRows) {
+      totalRev.set(r.bucket, (totalRev.get(r.bucket) ?? 0) + r.revenue);
+      totalCnt.set(r.bucket, (totalCnt.get(r.bucket) ?? 0) + r.salesCount);
+    }
+    const dims = Array.from(new Set(seriesRows.map((r) => r.dim))).sort();
+    const cell = new Map<string, number>();
+    for (const r of seriesRows) {
+      const k = `${r.bucket}__${r.dim}`;
+      cell.set(k, (cell.get(k) ?? 0) + r.revenue);
+    }
+    const enumerated = enumerateMonthRange(byMonth.range.start, byMonth.range.end);
+    const axis =
+      enumerated.length > 0
+        ? enumerated
+        : Array.from(new Set(byMonth.rows.map((r) => r.bucket))).sort();
+    const header = ["month", "total", "count", ...dims];
+    const lines = [header.join(",")];
+    for (const m of axis) {
+      const cols = [
+        m,
+        String(Math.round(totalRev.get(m) ?? 0)),
+        String(totalCnt.get(m) ?? 0),
+        ...dims.map((d) => String(Math.round(cell.get(`${m}__${d}`) ?? 0))),
+      ];
+      lines.push(cols.join(","));
+    }
+    const csv = "﻿" + lines.join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `attribution-monthly-${monthsRange}m-${toKstDateKey(new Date())}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [byMonth, monthsRange]);
+
   return (
     <div className="space-y-5">
       {/* 컨트롤 바 */}
@@ -416,6 +463,14 @@ export function AttributionTab() {
                 </button>
               ))}
             </div>
+            <button
+              onClick={downloadMonthlyCsv}
+              disabled={!monthChart.hasData}
+              title="현재 조회한 월별 매출을 CSV(엑셀)로 — 숫자만"
+              className="rounded-md border border-th-border bg-th-card px-2.5 py-1 text-xs font-medium text-th-text-secondary transition-colors hover:bg-th-card-hover disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              엑셀 다운로드
+            </button>
           </>
         )}
 

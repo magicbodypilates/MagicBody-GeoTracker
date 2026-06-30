@@ -310,6 +310,95 @@ function extractSourcesFromAnswer(answer: string) {
   return [...found];
 }
 
+/**
+ * not-ready placeholder 감지 — 순수 함수(테스트 용이).
+ *
+ * Bright Data 가 데이터 미준비 상태에서 돌려주는 placeholder
+ * (예: `{ message: "Dataset is not ready yet, try again in 30s" }`)를
+ * 정상 답변과 구별한다. 이 placeholder 를 정상 답변으로 저장하면
+ * findMentions/calcVisibility 가 가짜 결과를 산출하므로 runAiScraper 에서
+ * 감지 즉시 throw 해 가짜 INSERT 를 차단한다(plan-v2 결정 1·2).
+ *
+ * 오탐 방지가 최우선(R2) — 아래 두 조건을 **동시 충족(AND)** 할 때만 true.
+ *   조건1: 유효 답변 필드가 전무 (string·object·array 어느 형태로도 답변 없음)
+ *   조건2: 상태성 필드 중 하나가 not-ready 패턴에 매칭
+ * 진짜 답변이 본문에 "try again"·"not ready" 를 포함해도(조건1 위배) false.
+ *
+ * 단일 record 계약(H1): runAiScraper 의 다운스트림 전체가 first record 만 쓰므로
+ * 배열이면 첫 요소만 본다. 자동 수집은 1 input → 1 record 계약.
+ */
+
+// 답변 후보 키 — normalizeAnswer 의 answerCandidates 와 의도적으로 중복(duplication 허용, 테스트로 고정).
+// 공유 리팩터 시 두 곳이 다른 의미로 결합될 위험이 있어 detector 는 자체 배열을 유지한다(plan-v2 L2).
+const NOT_READY_ANSWER_KEYS = [
+  "answer_text",
+  "answer_text_markdown",
+  "answer",
+  "response_raw",
+  "response",
+  "output",
+  "result",
+  "text",
+  "content",
+] as const;
+
+// 상태성 키 — placeholder 가 not-ready 안내 문구를 담는 필드.
+const NOT_READY_STATUS_KEYS = [
+  "message",
+  "warning",
+  "status",
+  "error",
+  "detail",
+  "note",
+] as const;
+
+// not-ready 안내 문구 패턴. 단순 교대(alternation)라 ReDoS 위험 낮음.
+const NOT_READY_PATTERN =
+  /not\s*ready|not\s+completed|try\s*again|still\s+(building|running)|in\s+progress|dataset\s+is\s+empty|snapshot\s+not\s+ready|^\s*(building|running|collecting|pending|queued|processing)\s*$/i;
+
+export function isNotReadyPayload(record: unknown): boolean {
+  // 단일 record 계약 — 배열이면 첫 요소만 평가(H1: 다운스트림과 일치).
+  const target = Array.isArray(record) ? record[0] : record;
+  if (!target || typeof target !== "object") {
+    // 빈 객체·빈 배열·null 등은 not-ready 아님 — "파싱 실패" 별도 경로가 처리.
+    return false;
+  }
+  const obj = target as Record<string, unknown>;
+
+  // 조건1: 유효 답변 필드 부재.
+  // 답변이 (a) trim 후 비어있지 않은 string, (b) 비어있지 않은 object,
+  // (c) 실질 요소가 1개 이상인 array 어느 형태로든 존재하면 not-ready 아님(M1 — 타입 확장).
+  // array 는 length>0 만으로는 부족하다: Bright Data 가 `{output:[""]}` 처럼 빈 문자열만
+  // 담은 placeholder 를 돌려주면 답변으로 오인돼 not-ready 를 놓친다(M2 false-negative 보강).
+  // string 단일 후보가 trim 후 비어있어야 '답변 없음'으로 보는 기존 동작과 일관되게,
+  // array 도 "비어있지 않은 요소(string 이면 trim 후 비어있지 않은, 또는 비-string 의미값)가
+  // 1개 이상"일 때만 답변으로 인정한다. object 후보는 plan-v2 의도대로 보수적 유지(변경 X).
+  const hasAnswer = NOT_READY_ANSWER_KEYS.some((key) => {
+    const value = obj[key];
+    if (typeof value === "string") {
+      return value.trim().length > 0;
+    }
+    if (Array.isArray(value)) {
+      return value.some((entry) =>
+        typeof entry === "string" ? entry.trim().length > 0 : entry != null,
+      );
+    }
+    if (value && typeof value === "object") {
+      return Object.keys(value as Record<string, unknown>).length > 0;
+    }
+    return false;
+  });
+  if (hasAnswer) {
+    return false;
+  }
+
+  // 조건2: 상태성 필드가 not-ready 패턴에 매칭.
+  return NOT_READY_STATUS_KEYS.some((key) => {
+    const value = obj[key];
+    return typeof value === "string" && NOT_READY_PATTERN.test(value);
+  });
+}
+
 function normalizeAnswer(rawRecord: Record<string, unknown>) {
   const answerCandidates = [
     rawRecord.answer_text,           // Bright Data primary field
@@ -341,8 +430,11 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
     }
     if (obj && typeof obj === "object") {
       const record = obj as Record<string, unknown>;
-      // Check common text field names
-      for (const key of ["answer_text", "answer_text_markdown", "answer", "response_raw", "response", "output", "result", "text", "content", "message", "body", "summary", "description"]) {
+      // Check common text field names.
+      // `message` 는 Bright Data not-ready 상태 안내가 담기는 필드라 답변 후보에서 제외.
+      // body/summary/description 은 정상 답변 deep fallback 가능성이 있어 유지 —
+      // 주 방어선은 isNotReadyPayload detector 다(plan-v2 결정 3, 회귀 위험 최소화).
+      for (const key of ["answer_text", "answer_text_markdown", "answer", "response_raw", "response", "output", "result", "text", "content", "body", "summary", "description"]) {
         if (typeof record[key] === "string" && (record[key] as string).trim().length > 20) {
           return (record[key] as string).trim();
         }
@@ -538,6 +630,17 @@ export async function runAiScraper(
     ? (payload as Record<string, unknown>[])[0]
     : (payload as Record<string, unknown>);
   const rawRecord = (rawFirst ?? {}) as Record<string, unknown>;
+
+  // not-ready placeholder 감지 — normalizeAnswer 호출 전, 캐시 set(아래) 전에 차단.
+  // Bright Data 가 아직 데이터 미준비(placeholder)를 돌려주면 가짜 답변 저장을 막기 위해
+  // 즉시 throw 한다. 재시도하지 않는다: 재-POST 가 202 를 받으면 monitorUntilReady(~900s)에
+  // 재진입해 tick wall-clock(12h 주기)을 위협하기 때문(plan-v2 결정 2).
+  // 다음 tick 에서 자연 회수된다. throw 가 cache.set 보다 먼저 빠지므로 partial 미기록(M4).
+  // [NOT_READY] prefix 로 automation-runner 의 ProviderFailure.reason 에 기록되어
+  // network 실패와 집계상 구분 가능(R9/M5).
+  if (isNotReadyPayload(rawRecord)) {
+    throw new Error(`[NOT_READY] Bright Data placeholder (provider=${parsed})`);
+  }
 
   const sanitizedPayload = stripAnswerHtml(payload);
   const sanitizedFirst = Array.isArray(sanitizedPayload)

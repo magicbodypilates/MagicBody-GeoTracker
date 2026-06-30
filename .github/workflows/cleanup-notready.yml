@@ -1,0 +1,43 @@
+name: Cleanup not-ready runs (manual)
+
+# 수동 트리거 전용 — Bright Data "not ready" placeholder 가 답변으로 잘못 저장된 runs 정리.
+# 실행 대상은 이미 배포된 운영 Azure VM 의 앱 컨테이너 (POSTGRES_URL 주입됨).
+# confirm="yes" 가 아니면 dry-run(건수·샘플만 출력, 삭제 X).
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '실제 삭제하려면 "yes". 그 외에는 dry-run(건수만 확인).'
+        required: true
+        default: 'no'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH to Azure VM and run cleanup
+        uses: appleboy/ssh-action@master
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 5m
+          envs: CONFIRM_INPUT
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            if [ "$CONFIRM_INPUT" = "yes" ]; then
+              echo "== 실제 삭제 모드 =="
+              docker compose exec -T -e CLEANUP_CONFIRM=yes mbd-geo-tracker node scripts/cleanup-notready.mjs
+            else
+              echo "== DRY-RUN (건수·샘플만) =="
+              docker compose exec -T mbd-geo-tracker node scripts/cleanup-notready.mjs
+            fi
+            echo "Cleanup step complete."

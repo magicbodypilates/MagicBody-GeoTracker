@@ -2397,7 +2397,6 @@ ${exampleJson}
           onResetManualResponses={handleResetManualResponses}
           windowDays={runsWindowDays}
           onWindowDaysChange={setRunsWindowDays}
-          workspaceId={serverWsId ?? undefined}
         />
       );
     }
@@ -2415,7 +2414,7 @@ ${exampleJson}
     }
 
     if (activeTab === "Citations") {
-      return <PartnerDiscoveryTab partnerLeaderboard={partnerLeaderboard} brandWebsites={state.brand.websites} />;
+      return <PartnerDiscoveryTab partnerLeaderboard={partnerLeaderboard} brandWebsites={state.brand.websites} workspaceId={serverWsId ?? undefined} />;
     }
 
     if (activeTab === "Citation Opportunities") {

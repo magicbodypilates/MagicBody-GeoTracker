@@ -4,10 +4,13 @@ import {
   isUrlMatchingCitedKeys,
   SOCIAL_PLATFORM_DOMAINS,
 } from "@/components/dashboard/citation-utils";
+import { BrandCitationUrls } from "@/components/dashboard/brand-citation-urls";
 
 type PartnerDiscoveryTabProps = {
   partnerLeaderboard: Array<{ url: string; count: number; prompts: string[] }>;
   brandWebsites?: string[];
+  /** 서버 워크스페이스 id — 있으면 "내 사이트 인용 URL" 전수 섹션 활성화(lazy fetch) */
+  workspaceId?: string;
 };
 
 function extractDomain(url: string): string {
@@ -29,7 +32,7 @@ function extractPath(url: string): string {
 
 type SortKey = "citations" | "pages" | "prompts" | "domain";
 
-export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: PartnerDiscoveryTabProps) {
+export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [], workspaceId }: PartnerDiscoveryTabProps) {
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"domain" | "url">("domain");
   const [expandedDomains, setExpandedDomains] = useState<Record<string, boolean>>({});
@@ -154,23 +157,31 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [] }: 
 
   if (partnerLeaderboard.length === 0) {
     return (
-      <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center">
-        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-th-accent-soft">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-th-text-accent">
-            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-          </svg>
+      <div className="space-y-3">
+        {/* ── 내 사이트 인용 URL 전수 섹션 (서버 전체 기간 누적 — 현재 기간 요약이 비어도 노출) ── */}
+        {workspaceId && <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" />}
+
+        <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-th-accent-soft">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-th-text-accent">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </svg>
+          </div>
+          <p className="text-sm font-medium text-th-text">아직 수집된 인용이 없습니다</p>
+          <p className="mt-1 text-sm text-th-text-secondary">
+            AI 모델에 프롬프트를 실행하여 어떤 출처가 인용되는지 확인하세요.
+          </p>
         </div>
-        <p className="text-sm font-medium text-th-text">아직 수집된 인용이 없습니다</p>
-        <p className="mt-1 text-sm text-th-text-secondary">
-          AI 모델에 프롬프트를 실행하여 어떤 출처가 인용되는지 확인하세요.
-        </p>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
+      {/* ── 내 사이트 인용 URL 전수 섹션 (전체 기간 누적 · 서버 lazy fetch · 기본 접힘) ── */}
+      {workspaceId && <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" />}
+
       {/* ── Header row: stats + controls ── */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="flex items-center gap-5">

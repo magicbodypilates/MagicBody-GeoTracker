@@ -80,6 +80,11 @@ jobs:
         env:
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
+          ENV_FILE: "/datadrive/apps/geo-tracker/.env"
+          # 최고관리자 인증 시크릿 — 값은 GitHub Secrets 에서만 (평문 커밋 금지).
+          # 미설정(빈 값)이면 기존 .env 값을 보존한다(부분 롤아웃 안전).
+          ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
         with:
           host: ${{ secrets.AZURE_PROD_HOST }}
           port: ${{ secrets.AZURE_PROD_PORT }}
@@ -87,9 +92,32 @@ jobs:
           key: ${{ secrets.AZURE_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 20m
-          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC
+          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET
           script: |
+            set -eu
             DEPLOY_TAG="prod-${{ github.sha }}"
+
+            # ── 최고관리자 시크릿을 기존 .env 에 idempotent upsert ──────────────────────
+            # docker-compose 의 env_file(/datadrive/apps/geo-tracker/.env)에 이미 다른 변수가 많으므로
+            # 전체 덮어쓰기 금지 — 해당 키 라인만 교체/추가한다. 값이 비면 건너뛰어 기존 값 보존.
+            upsert_env() {
+              # $1=키 $2=값. 값은 작은따옴표로 감싸 $ 등 셸 확장·bcrypt '$2b$..' 손상을 막는다.
+              key="$1"; val="$2"
+              [ -z "${val}" ] && return 0
+              touch "${ENV_FILE}"; chmod 600 "${ENV_FILE}"
+              # 기존 동일 키 라인 제거 후 새 라인 추가(주석 '#key=' 는 보존).
+              tmp="$(mktemp)"
+              grep -v "^${key}=" "${ENV_FILE}" > "${tmp}" || true
+              # 값 안의 작은따옴표를 이스케이프('\'') 하여 안전하게 감싼다.
+              esc=$(printf '%s' "${val}" | sed "s/'/'\\\\''/g")
+              printf "%s='%s'\n" "${key}" "${esc}" >> "${tmp}"
+              mv "${tmp}" "${ENV_FILE}"
+              chmod 600 "${ENV_FILE}"
+            }
+            upsert_env "ADMIN_PASSWORD_HASH" "${ADMIN_PASSWORD_HASH}"
+            upsert_env "SESSION_SECRET" "${SESSION_SECRET}"
+            # ───────────────────────────────────────────────────────────────────────────
+
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
             docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
@@ -142,6 +170,11 @@ jobs:
         env:
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
+          ENV_FILE: "/datadrive/apps/geo-tracker/.env"
+          # 최고관리자 인증 시크릿 — 값은 GitHub Secrets 에서만 (평문 커밋 금지).
+          # 미설정(빈 값)이면 기존 .env 값을 보존한다(부분 롤아웃 안전).
+          ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
         with:
           host: ${{ secrets.AZURE_PROD_HOST }}
           port: ${{ secrets.AZURE_PROD_PORT }}
@@ -149,9 +182,32 @@ jobs:
           key: ${{ secrets.AZURE_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 20m
-          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC
+          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET
           script: |
+            set -eu
             DEPLOY_TAG="prod-${{ github.sha }}"
+
+            # ── 최고관리자 시크릿을 기존 .env 에 idempotent upsert ──────────────────────
+            # docker-compose 의 env_file(/datadrive/apps/geo-tracker/.env)에 이미 다른 변수가 많으므로
+            # 전체 덮어쓰기 금지 — 해당 키 라인만 교체/추가한다. 값이 비면 건너뛰어 기존 값 보존.
+            upsert_env() {
+              # $1=키 $2=값. 값은 작은따옴표로 감싸 $ 등 셸 확장·bcrypt '$2b$..' 손상을 막는다.
+              key="$1"; val="$2"
+              [ -z "${val}" ] && return 0
+              touch "${ENV_FILE}"; chmod 600 "${ENV_FILE}"
+              # 기존 동일 키 라인 제거 후 새 라인 추가(주석 '#key=' 는 보존).
+              tmp="$(mktemp)"
+              grep -v "^${key}=" "${ENV_FILE}" > "${tmp}" || true
+              # 값 안의 작은따옴표를 이스케이프('\'') 하여 안전하게 감싼다.
+              esc=$(printf '%s' "${val}" | sed "s/'/'\\\\''/g")
+              printf "%s='%s'\n" "${key}" "${esc}" >> "${tmp}"
+              mv "${tmp}" "${ENV_FILE}"
+              chmod 600 "${ENV_FILE}"
+            }
+            upsert_env "ADMIN_PASSWORD_HASH" "${ADMIN_PASSWORD_HASH}"
+            upsert_env "SESSION_SECRET" "${SESSION_SECRET}"
+            # ───────────────────────────────────────────────────────────────────────────
+
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
             docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}

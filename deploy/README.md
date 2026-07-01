@@ -182,16 +182,34 @@ curl -I http://localhost:8040/geo-tracker
 - 기존 CMS 로그인이 도메인 `cms.magicbodypilates.co.kr` 에서 이미 동작 중이면 Authorized domains 추가 작업도 불필요
 
 ### 최고관리자 비밀번호 변경
+
+#### 방법 A — GitHub Secrets 자동 주입 (권장 · 서버 접속 불필요)
+
+운영(prod) 배포는 GitHub Secrets `ADMIN_PASSWORD_HASH`·`SESSION_SECRET` 을 배포 시 VM 의
+`/datadrive/apps/geo-tracker/.env` 에 자동 upsert 한다(해당 두 줄만 교체, 나머지 변수는 보존).
+새 비밀번호로 바꾸려면:
+
+1. 새 bcrypt 해시 생성 (평문은 입력창으로 — 셸 히스토리에 안 남게):
+   ```bash
+   node -e "const b=require('bcryptjs');const rl=require('readline').createInterface({input:process.stdin,output:process.stderr});rl.question('비밀번호 입력: ',p=>{b.hash(p,10).then(h=>{console.log(h);rl.close();});});"
+   ```
+2. GitHub → GeoTracker repo → Settings → Secrets and variables → Actions → `ADMIN_PASSWORD_HASH` 값 Update.
+3. Actions → "Deployment to production" → Run workflow (또는 다음 main 배포 시 자동 반영).
+
+> CMS 게이트 비밀번호까지 함께 통일하는 전체 절차는
+> **CMS repo `docs/BoardAdmin-비밀번호-배포-가이드.md`** 참조 (CMS=PBKDF2 / GeoTracker=bcrypt 해시를 각각 생성).
+
+#### 방법 B — 서버에서 직접 편집 (수동 · 예외적)
 ```bash
 # 1) 새 해시 생성
 node -e "require('bcryptjs').hash('새비밀번호',10).then(console.log)"
 
 # 2) 서버에서 .env 편집
-sudo nano /appdata/apps/geo-tracker/.env
+sudo nano /datadrive/apps/geo-tracker/.env
 # ADMIN_PASSWORD_HASH='<새 해시>' 로 교체
 
 # 3) 컨테이너 재시작
-cd /appdata/apps/geo-tracker && docker compose restart mbd-geo-tracker
+cd /datadrive/apps/geo-tracker && docker compose restart mbd-geo-tracker
 ```
 
 ### DEV_AUTH_BYPASS 전환 절차

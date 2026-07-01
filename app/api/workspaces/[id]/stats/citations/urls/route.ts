@@ -26,6 +26,10 @@ import { getBrandTermsForWorkspace } from "@/lib/server/branded-query-filter";
 import { buildRunStatsWhereClause } from "@/lib/server/run-stats-where";
 import { buildTargetKeys } from "@/components/dashboard/citation-utils";
 import {
+  extractBrandHosts,
+  buildBrandHostPrefilter,
+} from "@/lib/server/citation-brand-host-filter";
+import {
   aggregateBrandCitationUrls,
   decodeCursor,
   encodeCursor,
@@ -108,6 +112,13 @@ export async function GET(
       .limit(1);
     const brandKeySet = new Set(buildTargetKeys(ws?.brandConfig?.websites));
 
+    // 브랜드 호스트 superset 사전 필터 — 펼쳐지는 citation 을 "브랜드 도메인을 포함할 가능성" 으로 미리
+    // 좁혀 행 cap 이 브랜드 인용을 잘라내지 않게 한다(실데이터 스모크 결함). 최종 정확 판정은 아래
+    // aggregateBrandCitationUrls(JS 순수함수)가 그대로 수행 → 정확성 불변, cap truncation 만 제거.
+    // 브랜드 URL 미등록(hosts 빈 배열)이면 buildBrandHostPrefilter 가 FALSE 를 반환해 0 행 방출(빈 결과).
+    const brandHosts = extractBrandHosts(ws?.brandConfig?.websites);
+    const brandHostPrefilter = buildBrandHostPrefilter(brandHosts);
+
     const brandTerms = await getBrandTermsForWorkspace(id);
     const whereClause = buildRunStatsWhereClause({
       workspaceId: id,
@@ -143,6 +154,7 @@ export async function GET(
         CROSS JOIN LATERAL jsonb_array_elements(${schema.runs.citations}) AS cite
         WHERE ${whereClause}
           AND jsonb_typeof(${schema.runs.citations}) = 'array'
+          AND ${brandHostPrefilter}
         ORDER BY ${schema.runs.createdAt}, ${schema.runs.id}
         LIMIT ${CITATION_ROW_CAP}
       `);

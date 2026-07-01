@@ -22,6 +22,10 @@ import { getBrandTermsForWorkspace } from "@/lib/server/branded-query-filter";
 import { buildRunStatsWhereClause } from "@/lib/server/run-stats-where";
 import { buildTargetKeys } from "@/components/dashboard/citation-utils";
 import {
+  extractBrandHosts,
+  buildBrandHostPrefilter,
+} from "@/lib/server/citation-brand-host-filter";
+import {
   aggregatePromptsForUrl,
   decodePromptCursor,
   encodePromptCursor,
@@ -99,6 +103,11 @@ export async function GET(
       .limit(1);
     const brandKeySet = new Set(buildTargetKeys(ws?.brandConfig?.websites));
 
+    // 브랜드 호스트 superset 사전 필터 — urls 라우트와 동일. 특정 URL 의 프롬프트 전수도 브랜드 한정이므로
+    // 펼침 단계에서 브랜드 후보로 좁혀 행 cap 이 브랜드 인용을 잘라내지 않게 한다. 정확 판정은 JS 유지.
+    const brandHosts = extractBrandHosts(ws?.brandConfig?.websites);
+    const brandHostPrefilter = buildBrandHostPrefilter(brandHosts);
+
     const brandTerms = await getBrandTermsForWorkspace(id);
     const whereClause = buildRunStatsWhereClause({
       workspaceId: id,
@@ -126,6 +135,7 @@ export async function GET(
         CROSS JOIN LATERAL jsonb_array_elements(${schema.runs.citations}) AS cite
         WHERE ${whereClause}
           AND jsonb_typeof(${schema.runs.citations}) = 'array'
+          AND ${brandHostPrefilter}
         ORDER BY ${schema.runs.createdAt}, ${schema.runs.id}
         LIMIT ${CITATION_ROW_CAP}
       `);

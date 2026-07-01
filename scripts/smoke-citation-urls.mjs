@@ -55,6 +55,16 @@ try {
     const rows = await client.begin(async (sql) => {
       await sql.unsafe(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
       setLocalOk = true; // 위 문장이 오류 없이 지나면 B-1 해소 확인
+
+      // 신규 route 와 동일: 브랜드 호스트 superset 사전 필터 (ILIKE, 이스케이프)
+      const patterns = [...brandHosts].map(
+        (h) => `%${h.replace(/[\\%_]/g, (ch) => "\\" + ch)}%`,
+      );
+      let brandCond = sql`FALSE`;
+      for (const p of patterns) {
+        brandCond = sql`${brandCond} OR c->>'url' ILIKE ${p} ESCAPE '\' OR c->>'domain' ILIKE ${p} ESCAPE '\'`;
+      }
+
       return sql`
         SELECT r.prompt_text AS prompt_text,
                r.provider    AS provider,
@@ -67,6 +77,7 @@ try {
           AND (r.parse_quality <> 'low' OR r.parse_quality IS NULL)
           AND r.is_auto = true
           AND jsonb_typeof(r.citations) = 'array'
+          AND (${brandCond})
         LIMIT ${ROW_CAP}
       `;
     });

@@ -1,0 +1,33 @@
+name: Verify frontend build (manual)
+
+# 수동 트리거 전용 — 배포된 컨테이너 빌드 산출물에 "인용 출처 URL 드릴다운" 신규 코드가
+# 실제로 포함됐는지 확인(브라우저 캐시 문제와 배포 누락을 구분).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH to Azure VM and grep built bundle
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 3m
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            echo "== 컨테이너 이미지/생성 시각 =="
+            docker inspect --format='image={{.Config.Image}} created={{.Created}}' mbd-geo-tracker || true
+            echo "== 빌드 산출물에서 신규 API 경로 문자열 검색 =="
+            docker compose exec -T mbd-geo-tracker sh -c "grep -rl 'stats/citations/urls' .next 2>/dev/null | head -20; echo '---files---'; grep -rl 'stats/citations/urls' .next 2>/dev/null | wc -l"
+            echo "== 신규 섹션 라벨 검색(있으면 배포 포함 확정) =="
+            docker compose exec -T mbd-geo-tracker sh -c "grep -rl 'citations/urls/prompts' .next 2>/dev/null | wc -l"
+            echo "Verify step complete."

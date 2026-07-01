@@ -2397,6 +2397,7 @@ ${exampleJson}
           onResetManualResponses={handleResetManualResponses}
           windowDays={runsWindowDays}
           onWindowDaysChange={setRunsWindowDays}
+          workspaceId={serverWsId ?? undefined}
         />
       );
     }

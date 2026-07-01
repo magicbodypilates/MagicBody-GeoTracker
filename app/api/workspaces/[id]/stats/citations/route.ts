@@ -20,9 +20,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
-import { and, eq, gte, lt, ne, or, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
-import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
+import { getBrandTermsForWorkspace } from "@/lib/server/branded-query-filter";
+import { buildRunStatsWhere } from "@/lib/server/run-stats-where";
 import type { Citation } from "@/components/dashboard/types";
 import {
   normalizeTargetKey,
@@ -69,21 +70,17 @@ export async function GET(
   const now = new Date();
   const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
-  const qualityFilter = or(
-    ne(schema.runs.parseQuality, "low"),
-    isNull(schema.runs.parseQuality),
-  );
-  const conditions = [
-    eq(schema.runs.workspaceId, id),
-    gte(schema.runs.createdAt, from),
-    lt(schema.runs.createdAt, now),
-    qualityFilter,
-  ];
-  if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
-  const __brandedView = sp.get("branded") === "true";
-  const __brandTerms = await getBrandTermsForWorkspace(id);
-  const __informational = viewModeCondition(__brandTerms, __brandedView);
-  if (__informational) conditions.push(__informational);
+  // 조건 조립은 공유 helper 로 위임 (계획 H-6 — 조건 복제 제거). 동작·계약 불변.
+  const brandedView = sp.get("branded") === "true";
+  const brandTerms = await getBrandTermsForWorkspace(id);
+  const conditions = buildRunStatsWhere({
+    workspaceId: id,
+    fromDate: from,
+    toDate: now,
+    autoOnly,
+    brandTerms,
+    branded: brandedView,
+  });
 
   try {
     // 브랜드 + 경쟁사 키 매핑 (소셜 플랫폼은 채널 핸들까지 포함)

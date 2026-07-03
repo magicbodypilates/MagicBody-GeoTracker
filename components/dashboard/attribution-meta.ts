@@ -10,10 +10,11 @@
 
 /**
  * 차트·표에 그릴 채널 순서(unknown 은 항상 마지막).
- * 권장 순서: 구글 → 유튜브 → 인스타/메타 → 네이버 → 네이버 블로그 → 네이버 카페 → 카카오 → 직접 → 미상.
+ * 권장 순서: 구글 → 구글 자연검색 → 유튜브 → 인스타/메타 → 네이버 → 네이버 블로그 → 네이버 카페 → 카카오 → 직접 → 미상.
  */
 export const CHANNEL_ORDER = [
   "google",
+  "google_organic",
   "youtube",
   "meta",
   "naver",
@@ -26,6 +27,7 @@ export const CHANNEL_ORDER = [
 
 export const CHANNEL_META: Record<string, { label: string; color: string }> = {
   google: { label: "구글", color: "#1a73e8" },
+  google_organic: { label: "구글 자연검색", color: "#34a853" },
   youtube: { label: "유튜브", color: "#ff0000" },
   meta: { label: "인스타/메타", color: "#0866ff" },
   naver: { label: "네이버", color: "#03c75a" },

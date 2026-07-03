@@ -12,7 +12,7 @@
  *   view=byChannel       &start=YYYY-MM-DD&end=YYYY-MM-DD
  *   view=byTransactions  &start=YYYY-MM-DD&end=YYYY-MM-DD
  *                        &channel=(빈값=전체 | ATTRIBUTION_CHANNELS 화이트리스트)&limit=1~2000(기본 500)
- *                        화이트리스트: google·youtube·meta·naver·naver_blog·naver_cafe·kakao·direct·unknown
+ *                        화이트리스트: google·google_organic·youtube·meta·naver·naver_blog·naver_cafe·kakao·direct·unknown
  *
  * value 환산: 정규과정(REGULARCLASS_CONTENTIDS, .NET AppConfig SoT — default "be34274b-cca4-4" 박혀 env 미설정이어도 ON).
  *   계약금 결제 = ×10(195만 환산). 오프라인 잔금("결제 링크" 패턴)은 매출에서 제외(중복 방지). 취소건 제외(.NET 모집단).

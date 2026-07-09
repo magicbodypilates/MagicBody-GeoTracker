@@ -79,12 +79,21 @@ const MODE_CONFIG: Record<SectionMode, ModeConfig> = {
   },
 };
 
+/** 소유 유튜브 영상 신선도 메타 (owned 뷰 배지용 — 계획 v2 §2.2) */
+type OwnedVideosMeta = {
+  count: number;
+  lastSyncedAt: string | null;
+  stale: boolean;
+};
+
 type UrlsResponse = {
   allTime: boolean;
   maxLookbackDays: number;
   uniqueUrlCount: number;
   invalidCitationCount: number;
   capped?: boolean;
+  /** owned 뷰에서만 채워지는 소유 유튜브 영상 신선도. mention 뷰는 undefined. */
+  ownedVideos?: OwnedVideosMeta;
   urls: BrandCitationUrlItem[];
   nextCursor: string | null;
 };
@@ -324,6 +333,7 @@ export function BrandCitationUrls({
         uniqueUrlCount: data.uniqueUrlCount,
         invalidCitationCount: data.invalidCitationCount,
         capped: data.capped,
+        ownedVideos: data.ownedVideos,
       });
       setItems((prev) => (append ? [...prev, ...data.urls] : data.urls));
       setNextCursor(data.nextCursor);
@@ -389,6 +399,24 @@ export function BrandCitationUrls({
             {cfg.intro}
             {" "}(기간 선택과 무관 · {responseTab === "auto-branded" ? "질문에 브랜드명이 포함된 검색" : responseTab === "manual" ? "수동 실행" : "일반 검색"} 기준)
           </p>
+
+          {/* 소유 유튜브 영상 신선도 배지 (owned 뷰 전용 · 계획 v2 §2.2) —
+              우리 채널 영상 목록이 마지막으로 언제 갱신됐는지 + stale(자동 갱신 점검 필요) 노출. */}
+          {mode === "owned" && meta?.ownedVideos && (
+            <div
+              className={
+                meta.ownedVideos.stale
+                  ? "rounded-md border border-th-danger/30 bg-th-danger-soft px-3 py-1.5 text-[11px] text-th-danger"
+                  : "rounded-md border border-th-border bg-th-card-alt px-3 py-1.5 text-[11px] text-th-text-muted"
+              }
+            >
+              내 유튜브 영상 {meta.ownedVideos.count}개 인식 중
+              {meta.ownedVideos.lastSyncedAt
+                ? ` · 최근 갱신 ${toKstDateKey(meta.ownedVideos.lastSyncedAt)}`
+                : " · 갱신 기록 없음"}
+              {meta.ownedVideos.stale && " · ⚠ 자동 갱신 점검 필요"}
+            </div>
+          )}
 
           {loading && (
             <div className="py-6 text-center text-sm text-th-text-muted">불러오는 중…</div>

@@ -25,6 +25,7 @@ import {
   index,
   uniqueIndex,
   primaryKey,
+  check,
 } from "drizzle-orm/pg-core";
 import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
 import type { Citation } from "@/components/dashboard/types";
@@ -275,6 +276,50 @@ export const auditHistory = pgTable(
 );
 
 /* ============================================================
+ * brand_youtube_videos — 우리 채널(@magicbody1) 소유 유튜브 영상 집합
+ * ============================================================
+ * 계획 geotracker-youtube-video-match-v2 §4·R2.
+ *
+ * 목적: AI 답변이 인용한 유튜브 영상 URL 의 video-ID 가 우리 소유 영상인지 판정하기 위한
+ *   video-ID 집합. 조회시점에 로드해 "내 사이트 인용" 목록에 반영한다(노출 점수 재계산 X — D1).
+ *
+ * 자동 갱신 신뢰성(§2): 하드삭제 없이 소프트삭제(is_active)로만 운영한다.
+ *   - upsert 는 절대 삭제하지 않고 is_active=true·missing_count=0·last_seen_at 갱신.
+ *   - 채널에서 사라진 영상은 missing_count 를 누적해 임계(기본 2회) 도달 시에만 is_active=false.
+ *   → 갱신이 부분 실패해도 기존 목록이 손상되지 않는다(행 유지·복구 가능).
+ *
+ * brand_config(sync 대상)와 완전히 분리된 별도 테이블 — 클라이언트 sync 오염 원천 차단(K6).
+ */
+export const brandYoutubeVideos = pgTable(
+  "brand_youtube_videos",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    /** 유튜브 video-ID (11자 [A-Za-z0-9_-]) — CHECK 제약으로 형식 방어(L1) */
+    videoId: text("video_id").notNull(),
+    /** 소유 채널 핸들 — 다채널 확장 전까지 단일값. 감사 추적용 default(L2) */
+    channelHandle: text("channel_handle").notNull().default("@magicbody1"),
+    /** 소프트삭제 플래그(H3) — false 면 조회 집합에서 제외되지만 행은 보존 */
+    isActive: boolean("is_active").notNull().default(true),
+    /** 채널 목록에서 연속 미관측 횟수(H3) — 임계 도달 시에만 소프트삭제 */
+    missingCount: integer("missing_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** 마지막으로 채널 목록에서 관측된 시각 — 신선도(stale) 판정에 사용(§2.2) */
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    // (workspace, video_id) 유일 — upsert ON CONFLICT 대상
+    wsVideoUnique: uniqueIndex("uq_brand_yt_videos_ws_video").on(t.workspaceId, t.videoId),
+    // 조회 경로(is_active=true 집합) 인덱스
+    wsActiveIdx: index("idx_brand_yt_videos_ws_active").on(t.workspaceId, t.isActive),
+    // video-ID 형식 방어(L1) — 11자 [A-Za-z0-9_-]
+    videoIdFormat: check("brand_yt_videos_video_id_format", sql`video_id ~ '^[A-Za-z0-9_-]{11}$'`),
+  }),
+);
+
+/* ============================================================
  * 타입 export — API 레이어에서 재사용
  * ============================================================ */
 export type Workspace = InferSelectModel<typeof workspaces>;
@@ -293,3 +338,5 @@ export type DriftAlert = InferSelectModel<typeof driftAlerts>;
 export type NewDriftAlert = InferInsertModel<typeof driftAlerts>;
 export type AuditHistoryEntry = InferSelectModel<typeof auditHistory>;
 export type NewAuditHistoryEntry = InferInsertModel<typeof auditHistory>;
+export type BrandYoutubeVideo = InferSelectModel<typeof brandYoutubeVideos>;
+export type NewBrandYoutubeVideo = InferInsertModel<typeof brandYoutubeVideos>;

@@ -36,6 +36,7 @@ import {
   safeEnvInt,
   type CitationRow,
 } from "@/lib/server/citation-url-aggregate";
+import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 
 export const dynamic = "force-dynamic";
 
@@ -117,6 +118,10 @@ export async function GET(
     const brandTerms = await getBrandTermsForWorkspace(id);
     const brandMentionPrefilter = buildBrandMentionPrefilter(brandTerms);
 
+    // 소유 유튜브 영상은 "내 사이트" 뷰로 가야 하므로 언급 뷰에서 제외(R5·중복 방지). 언급 뷰는 owned
+    // 후보를 넓게 볼 필요가 없어 별도 유튜브 쿼리는 두지 않고, keep 의 !owned 로만 걸러낸다. 실패/빈 시 빈 Set.
+    const ownedVideoIds = await getOwnedYoutubeVideoIds(id);
+
     const whereClause = buildRunStatsWhereClause({
       workspaceId: id,
       fromDate: from,
@@ -164,7 +169,13 @@ export async function GET(
       createdAt: r.created_at,
     }));
 
-    const agg = aggregateBrandMentionUrls(rows, { brandKeySet, brandTerms, pageSize, cursor });
+    const agg = aggregateBrandMentionUrls(rows, {
+      brandKeySet,
+      brandTerms,
+      ownedVideoIds,
+      pageSize,
+      cursor,
+    });
 
     // capped 이면 cap 을 넘은 URL 은 신뢰성 있게 페이지할 수 없으므로 "더 보기"(cursor)를 잠근다 (계획 H-1).
     const nextCursor = capped || !agg.nextCursor ? null : encodeCursor(agg.nextCursor);

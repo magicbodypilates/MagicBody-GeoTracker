@@ -29,6 +29,7 @@ import {
   safeEnvInt,
   type CitationRow,
 } from "@/lib/server/citation-url-aggregate";
+import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 
 export const dynamic = "force-dynamic";
 
@@ -107,6 +108,9 @@ export async function GET(
     const brandTerms = await getBrandTermsForWorkspace(id);
     const brandMentionPrefilter = buildBrandMentionPrefilter(brandTerms);
 
+    // 소유 유튜브 영상은 언급 뷰 드릴다운에서도 제외(R5·소유 뷰 중복 방지). 실패/빈 시 빈 Set.
+    const ownedVideoIds = await getOwnedYoutubeVideoIds(id);
+
     const whereClause = buildRunStatsWhereClause({
       workspaceId: id,
       fromDate: from,
@@ -157,6 +161,7 @@ export async function GET(
     const res = aggregateMentionPromptsForUrl(rows, canonicalUrlKey, {
       brandKeySet,
       brandTerms,
+      ownedVideoIds,
       pageSize,
       cursor,
     });

@@ -73,10 +73,14 @@ const expandedRows = [
 
 vi.mock("@/lib/server/db", async () => {
   const actual = await vi.importActual<typeof import("@/drizzle/schema")>("@/drizzle/schema");
+  // where() 결과 — brandConfig 조회는 .limit() 로, 소유영상 로더는 await(thenable, 빈 배열)로 소비.
+  const whereResult = {
+    limit: async () => [{ brandConfig: { websites: brandWebsites } }],
+    then: (resolve: (v: Array<{ videoId: string }>) => void) => resolve([]),
+  };
   const selectChain = {
     from: () => selectChain,
-    where: () => selectChain,
-    limit: async () => [{ brandConfig: { websites: brandWebsites } }],
+    where: () => whereResult,
   };
   return {
     schema: actual,

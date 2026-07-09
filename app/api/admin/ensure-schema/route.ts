@@ -30,6 +30,30 @@ export async function POST() {
       ADD COLUMN IF NOT EXISTS "is_production" boolean NOT NULL DEFAULT false
     `);
 
+    // 2.5) brand_youtube_videos 테이블 생성 (0005 마이그레이션 누락 백업) — 모두 IF NOT EXISTS 로 멱등.
+    // 소유 유튜브 영상 집합(계획 geotracker-youtube-video-match-v2). CHECK/인덱스는 0005 와 동일.
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "brand_youtube_videos" (
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+        "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE cascade,
+        "video_id" text NOT NULL,
+        "channel_handle" text DEFAULT '@magicbody1' NOT NULL,
+        "is_active" boolean DEFAULT true NOT NULL,
+        "missing_count" integer DEFAULT 0 NOT NULL,
+        "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+        "last_seen_at" timestamp with time zone DEFAULT now() NOT NULL,
+        CONSTRAINT "brand_yt_videos_video_id_format" CHECK (video_id ~ '^[A-Za-z0-9_-]{11}$')
+      )
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS "uq_brand_yt_videos_ws_video"
+        ON "brand_youtube_videos" ("workspace_id", "video_id")
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS "idx_brand_yt_videos_ws_active"
+        ON "brand_youtube_videos" ("workspace_id", "is_active")
+    `);
+
     // 3) 현재 컬럼 목록 확인
     const cols = await db.execute<{ column_name: string; data_type: string }>(sql`
       SELECT column_name, data_type
@@ -52,12 +76,8 @@ export async function POST() {
       workspacesColumns: wsCols,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown";
-    const stack = err instanceof Error ? err.stack : undefined;
-    console.error("[/api/admin/ensure-schema] 실패:", msg, stack);
-    return NextResponse.json(
-      { error: msg, stack: stack?.split("\n").slice(0, 5).join("\n") },
-      { status: 500 },
-    );
+    // 상세 메시지·stack 은 서버 로그에만 남기고, 응답에는 내부 구조가 새지 않게 일반화한다(보안 L-1).
+    console.error("[/api/admin/ensure-schema] 실패:", err);
+    return NextResponse.json({ error: "internal_error" }, { status: 500 });
   }
 }

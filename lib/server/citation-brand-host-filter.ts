@@ -116,3 +116,37 @@ export function buildBrandMentionPrefilter(terms: string[]): SQL {
   // 모든 용어 조건을 OR 로 결합
   return sql`(${sql.join(perTerm, sql` OR `)})`;
 }
+
+/**
+ * 유튜브 영상 URL superset 사전 필터 SQL 을 조립 (계획 v2 §5 결정 E).
+ *
+ * 배경: "내 사이트 인용" 소유 뷰는 우리 채널 영상(watch·youtu.be·래핑형)을 인용한 것도 포함해야 한다.
+ *   그런데 브랜드가 유튜브 채널을 등록하지 않았거나(brandHostPrefilter 가 youtube.com 을 포함하지 않음)
+ *   등록했더라도 브랜드 host 필터와 별도 cap 으로 실행하지 않으면(H2), 영상 인용이 행 cap 뒤로
+ *   밀려 잘릴 수 있다. 그래서 유튜브 영상 후보를 **브랜드 필터와 별도 cap 쿼리**로 뽑아 앱단에서
+ *   union·dedup 한다(라우트 참조).
+ *
+ * 이 필터는 고정 리터럴 superset(사용자 입력·DB 값 미포함 → injection 없음). host substring 매칭이라
+ *   남의 영상까지 과대 포함하지만, 최종 소유 판정(video-ID ∈ 소유 집합)은 JS 순수함수
+ *   (extractYoutubeVideoId + ownedSet)가 유지한다 → 기존 2단 전략(SQL superset + JS 정확판정) 그대로.
+ *
+ *   - watch·shorts·embed·live·/v/·attribution_link (youtube.com 경로 변형)
+ *   - youtube-nocookie.com (임베드) · youtu.be (단축)
+ *   - m.·music. 서브도메인은 `youtube.com/...`·`youtu.be/` 문자열에 포함되어 함께 통과(L3)
+ *   - google 래핑은 google host + youtube/youtu.be 를 함께 담은 경우만(과대 포함 최소화)
+ *
+ * @returns superset 사전 필터 SQL (항상 유효 — 파라미터·DB 값 없음).
+ */
+export function buildYoutubeVideoPrefilter(): SQL {
+  return sql`(
+    ${sql.raw("cite->>'url'")} ILIKE '%youtube.com/watch%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtube.com/shorts/%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtube.com/embed/%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtube.com/live/%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtube.com/v/%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtube.com/attribution_link%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtube-nocookie.com/%' ESCAPE '\\'
+    OR ${sql.raw("cite->>'url'")} ILIKE '%youtu.be/%' ESCAPE '\\'
+    OR (${sql.raw("cite->>'url'")} ILIKE '%google.%' ESCAPE '\\' AND (${sql.raw("cite->>'url'")} ILIKE '%youtu.be%' ESCAPE '\\' OR ${sql.raw("cite->>'url'")} ILIKE '%youtube%' ESCAPE '\\'))
+  )`;
+}

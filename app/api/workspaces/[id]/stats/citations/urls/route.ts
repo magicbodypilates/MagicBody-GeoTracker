@@ -28,6 +28,7 @@ import { buildTargetKeys } from "@/components/dashboard/citation-utils";
 import {
   extractBrandHosts,
   buildBrandHostPrefilter,
+  buildYoutubeVideoPrefilter,
 } from "@/lib/server/citation-brand-host-filter";
 import {
   aggregateBrandCitationUrls,
@@ -36,6 +37,10 @@ import {
   safeEnvInt,
   type CitationRow,
 } from "@/lib/server/citation-url-aggregate";
+import {
+  getOwnedYoutubeVideoIds,
+  getOwnedVideosMeta,
+} from "@/lib/server/brand-youtube-videos";
 
 export const dynamic = "force-dynamic";
 
@@ -118,6 +123,20 @@ export async function GET(
     // 브랜드 URL 미등록(hosts 빈 배열)이면 buildBrandHostPrefilter 가 FALSE 를 반환해 0 행 방출(빈 결과).
     const brandHosts = extractBrandHosts(ws?.brandConfig?.websites);
     const brandHostPrefilter = buildBrandHostPrefilter(brandHosts);
+    // 유튜브 영상 superset — 브랜드 host 필터와 별도 cap 으로 뽑는다(계획 v2 §5 결정 E·H2).
+    const youtubeVideoPrefilter = buildYoutubeVideoPrefilter();
+
+    // 우리 소유 유튜브 영상 집합 + 신선도 메타 로드 (§5 결정 D2·§2.2). 실패/빈 시 빈 Set·stale 안전.
+    const [ownedVideoIds, ownedVideos] = await Promise.all([
+      getOwnedYoutubeVideoIds(id),
+      getOwnedVideosMeta(id),
+    ]);
+    // 소유 영상이 하나도 없으면(기능 미사용 워크스페이스) 유튜브 superset 쿼리를 아예 돌리지 않는다.
+    // (reviewer HIGH) 소유 0개인데도 유튜브 쿼리를 실행하면 ① 매 조회마다 쿼리 부하가 2배가 되고
+    // ② cappedYoutube 가 브랜드 cursor 를 잠가 페이지네이션이 회귀한다. owned off 시엔 브랜드 단일
+    // 쿼리 경로(legacy)와 결과가 바이트 단위로 동일해야 한다 → 유튜브 쿼리 skip·cappedYoutube=false·
+    // 앱단 union·dedup 도 건너뛰고 브랜드 행을 그대로 사용한다.
+    const ownedEnabled = ownedVideoIds.size > 0;
 
     const brandTerms = await getBrandTermsForWorkspace(id);
     const whereClause = buildRunStatsWhereClause({
@@ -132,6 +151,10 @@ export async function GET(
     // SQL: citations 를 jsonb_array_elements 로 펼침. citation 은 파라미터화된 조건만 통과.
     // 행 cap 은 LIMIT 로, statement_timeout 은 트랜잭션 내 SET LOCAL 로 적용해 커넥션에 누수되지 않게 한다.
     //
+    // 별도 cap 2쿼리(계획 v2 §5 결정 E·H2): 브랜드 host 후보와 유튜브 영상 superset 을 단일 WHERE OR 로
+    // 묶으면, 데이터가 늘 때 한쪽(주로 브랜드)이 행 cap 뒤로 밀려 잘릴 수 있다. 그래서 각각 자체 LIMIT
+    // 으로 뽑은 뒤 앱단에서 union·dedup 한다. 한 트랜잭션·한 SET LOCAL 로 두 쿼리를 함께 실행한다.
+    //
     // SET LOCAL statement_timeout 은 bind 파라미터($1)를 못 받는다(PostgreSQL 문법 제약) → drizzle 이
     // ${STATEMENT_TIMEOUT_MS} 를 $1 로 렌더하면 런타임에 100% 실패한다(계획 B-1). 값은 위에서
     // safeEnvInt 로 정수·범위 검증을 마쳤으므로(사용자 입력 아님) sql.raw 로 정수 리터럴을 인라인한다.
@@ -140,9 +163,7 @@ export async function GET(
     // 없다 → ORDER BY runs.created_at, runs.id 로 항상 같은 앞부분을 자르게 한다.
     // legacy 방어(계획 L-1): citations 가 배열이 아닌 legacy run 이 jsonb_array_elements 에 들어가면
     // 쿼리 전체가 깨진다 → jsonb_typeof(citations) = 'array' 가드로 비배열 run 을 미리 배제한다.
-    const expanded = (await db.transaction(async (tx) => {
-      await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
-      return tx.execute<ExpandedRow>(sql`
+    const buildExpandSql = (prefilter: typeof brandHostPrefilter) => sql`
         SELECT
           ${schema.runs.id}          AS run_id,
           cite->>'url'               AS url,
@@ -154,15 +175,50 @@ export async function GET(
         CROSS JOIN LATERAL jsonb_array_elements(${schema.runs.citations}) AS cite
         WHERE ${whereClause}
           AND jsonb_typeof(${schema.runs.citations}) = 'array'
-          AND ${brandHostPrefilter}
+          AND ${prefilter}
         ORDER BY ${schema.runs.createdAt}, ${schema.runs.id}
         LIMIT ${CITATION_ROW_CAP}
-      `);
-    })) as unknown as ExpandedRow[];
+      `;
 
-    const capped = expanded.length >= CITATION_ROW_CAP;
+    const { brandRows, youtubeRows } = await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
+      const brandRows = (await tx.execute<ExpandedRow>(
+        buildExpandSql(brandHostPrefilter),
+      )) as unknown as ExpandedRow[];
+      // 소유 영상이 있을 때만 유튜브 superset 쿼리 실행 (owned off → skip, legacy 경로 보존).
+      const youtubeRows = ownedEnabled
+        ? ((await tx.execute<ExpandedRow>(
+            buildExpandSql(youtubeVideoPrefilter),
+          )) as unknown as ExpandedRow[])
+        : [];
+      return { brandRows, youtubeRows };
+    });
 
-    const rows: CitationRow[] = expanded.map((r) => ({
+    // 각 쿼리 독립 cap 판정(관측성 — capped 원인을 분리 노출). 어느 하나라도 cap 이면 cursor 잠금.
+    // owned off 면 유튜브 쿼리를 안 돌렸으므로 cappedYoutube 는 항상 false (브랜드 cursor 무영향).
+    const cappedBrand = brandRows.length >= CITATION_ROW_CAP;
+    const cappedYoutube = ownedEnabled && youtubeRows.length >= CITATION_ROW_CAP;
+    const capped = cappedBrand || cappedYoutube;
+
+    // 앱단 union·dedup(계획 v2 §5 결정 E ③): 브랜드에 youtube.com 이 등록된 경우 두 결과가 겹칠 수 있어
+    // (run_id,url,domain) 단위로 중복을 제거한다. per-run dedup 상 count 는 멱등이지만
+    // invalidCitationCount 이중계수·낭비를 막기 위해 명시 dedup.
+    // owned off 면 유튜브 행이 없으므로 dedup 을 건너뛰고 브랜드 행을 그대로 써서 legacy 단일 브랜드
+    // 쿼리 경로와 바이트 단위로 동일하게 한다 (dedup 로 인한 invalidCitationCount 변화 방지).
+    let sourceRows: ExpandedRow[];
+    if (ownedEnabled) {
+      const dedup = new Map<string, ExpandedRow>();
+      for (const r of [...brandRows, ...youtubeRows]) {
+        const key = `${r.run_id} ${r.url ?? ""} ${r.domain ?? ""}`;
+        if (!dedup.has(key)) dedup.set(key, r);
+      }
+
+      sourceRows = [...dedup.values()];
+    } else {
+      sourceRows = brandRows;
+    }
+
+    const rows: CitationRow[] = sourceRows.map((r) => ({
       runId: r.run_id,
       url: r.url,
       domain: r.domain,
@@ -171,7 +227,7 @@ export async function GET(
       createdAt: r.created_at,
     }));
 
-    const agg = aggregateBrandCitationUrls(rows, { brandKeySet, pageSize, cursor });
+    const agg = aggregateBrandCitationUrls(rows, { brandKeySet, ownedVideoIds, pageSize, cursor });
 
     // capped 이면 cap 을 넘은 URL 은 신뢰성 있게 페이지할 수 없으므로 "더 보기"(cursor)를 잠근다
     // (계획 H-1). 이 페이지까지만 노출하고, UI 는 capped 안내만 보여준다.
@@ -183,6 +239,10 @@ export async function GET(
       uniqueUrlCount: agg.uniqueUrlCount,
       invalidCitationCount: agg.invalidCitationCount,
       capped,
+      cappedBrand,
+      cappedYoutube,
+      // 소유 유튜브 영상 신선도(§2.2) — 화면 배지·stale 감지용
+      ownedVideos,
       urls: agg.urls,
       nextCursor,
     });

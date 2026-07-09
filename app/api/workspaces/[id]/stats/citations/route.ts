@@ -30,6 +30,8 @@ import {
   buildTargetKeys,
   SOCIAL_PLATFORM_DOMAINS,
 } from "@/components/dashboard/citation-utils";
+import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
+import { isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +105,20 @@ export async function GET(
       }
     }
 
+    // 소유 유튜브 영상 집합 로드 — 도메인 요약에서 우리 채널 영상 인용을 "brand" 로 승격(M6). 실패/빈 시 빈 Set.
+    const ownedVideoIds = await getOwnedYoutubeVideoIds(id);
+
+    // 소유 영상 승격 대상 key — 요약은 도메인(host/seg) 단위이고 영상 URL 은 host/seg 가 모두
+    // `youtube.com/watch` 로 collapse 되어 남의 영상과 한 버킷을 공유한다(구조 충돌). 남의 영상까지
+    // brand 로 오인하지 않도록, 소유 영상 인용은 **브랜드가 등록한 유튜브 채널 key** 버킷으로 접어
+    // 넣는다(우리 채널 영상이므로 그 채널 도메인에 귀속되는 것이 자연스럽고 회귀도 없다).
+    // 브랜드 유튜브 채널이 등록돼 있지 않으면 이 coarse 요약에서는 승격하지 않는다(상세 URL 목록이
+    // 정본 — D1). 비유튜브·남의 유튜브 영상 집계는 완전히 불변.
+    const brandYoutubeChannelKey =
+      ownedVideoIds.size > 0
+        ? [...brandKeySet].find((k) => k.startsWith("youtube.com/") || k.startsWith("youtu.be/")) ?? null
+        : null;
+
     // runs 의 citations JSONB 로드 (키 단위 집계)
     const runs = await db
       .select({ citations: schema.runs.citations })
@@ -114,7 +130,12 @@ export async function GET(
       const cites = (r.citations as Citation[]) ?? [];
       const seen = new Set<string>(); // 한 run 안에서 같은 키는 1번만 카운트
       for (const c of cites) {
-        const key = extractKey(c.url || c.domain || "");
+        const raw = c.url || c.domain || "";
+        // 소유 유튜브 영상이고 브랜드 채널 key 가 있으면 그 채널 버킷으로 승격(M6). 아니면 기존 규칙 불변.
+        const key =
+          brandYoutubeChannelKey && isOwnedYoutubeVideo(raw, ownedVideoIds)
+            ? brandYoutubeChannelKey
+            : extractKey(raw);
         if (!key || seen.has(key)) continue;
         seen.add(key);
         keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);

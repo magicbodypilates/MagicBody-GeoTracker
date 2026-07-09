@@ -22,6 +22,10 @@
  */
 
 import { SOCIAL_PLATFORM_DOMAINS } from "@/components/dashboard/citation-utils";
+import {
+  extractYoutubeVideoId,
+  canonicalYoutubeWatchUrl,
+} from "@/lib/server/youtube-video-match";
 
 /** promptText 가 null/공백일 때 표시할 라벨 (계획 M-1) */
 export const EMPTY_PROMPT_LABEL = "(제목 없는 질문)";
@@ -237,6 +241,11 @@ export type UrlCursor = { t: number; k: string };
 export type AggregateOptions = {
   /** 브랜드 매칭 key 집합 (buildTargetKeys 결과 — host 또는 host/seg) */
   brandKeySet: Set<string>;
+  /**
+   * 우리 소유 유튜브 video-ID 집합 (계획 v2 §5 결정 D1). 전달·비어있으면 유튜브 영상 소유 판정 off →
+   * 기존 동작 완전 불변. 매칭되면 해당 인용을 canonical watch URL 로 병합 후 "내 사이트" 로 포함한다.
+   */
+  ownedVideoIds?: Set<string>;
   /** URL당 inline 프롬프트 top-N (기본 20) */
   promptInlineLimit?: number;
   /** 페이지 크기 (URL 개수) */
@@ -263,6 +272,11 @@ export type MentionAggregateOptions = {
   brandKeySet: Set<string>;
   /** 언급 판정용 브랜드 용어(brandName + brandAliases). title/description 에 포함되면 언급 */
   brandTerms: string[];
+  /**
+   * 우리 소유 유튜브 video-ID 집합 (R5). 소유 영상 인용은 "내 사이트" 뷰로 가야 하므로 언급 뷰에서
+   * 제외한다 — keep 에서 !owned 로 걸러 소유 뷰와 중복되지 않게 한다.
+   */
+  ownedVideoIds?: Set<string>;
   promptInlineLimit?: number;
   pageSize?: number;
   cursor?: UrlCursor | null;
@@ -354,20 +368,49 @@ function normTitle(t: string | null | undefined): string {
 }
 
 /**
- * 행별 포함 판정 predicate — normalize 결과 + 원본 행으로 해당 citation 을 집계에 넣을지 결정.
+ * 행별 포함 판정 predicate — normalize 결과 + 원본 행 + 소유 유튜브 영상 여부로 집계 포함을 결정.
  * (invalid 는 normalize 실패로 core 가 자동 제외하므로 여기선 유효 행만 받는다)
+ *
+ * owned: 이 인용이 우리 소유 유튜브 영상(video-ID ∈ ownedVideoIds)인지. 소유면 norm 은 이미
+ * canonical watch URL 기준으로 계산돼 있다(core 가 effectiveRaw 로 치환). 소유 뷰는 owned 를 OR 로
+ * 포함하고, 언급 뷰는 owned 를 제외(!owned)한다.
  */
-export type CitationKeepFn = (row: CitationRow, norm: NormalizedCitationUrl) => boolean;
+export type CitationKeepFn = (
+  row: CitationRow,
+  norm: NormalizedCitationUrl,
+  owned: boolean,
+) => boolean;
 
 /** 집계 내부 레코드 — title 포함(언급 뷰용). 소유 뷰는 title 을 버린다. */
 type AggregatedUrlRecord = BrandMentionUrl;
 
 type UrlCoreOptions = {
   keep: CitationKeepFn;
+  /** 소유 유튜브 video-ID 집합 — 매칭 행은 canonical watch URL 로 치환 후 집계(계획 v2 §5 결정 C·D1) */
+  ownedVideoIds?: Set<string>;
   promptInlineLimit?: number;
   pageSize?: number;
   cursor?: UrlCursor | null;
 };
+
+/**
+ * 인용 원본 raw 와 소유 집합으로 { 소유 여부, 정규화에 쓸 effectiveRaw } 를 계산한다 (계획 v2 §5 결정 D1).
+ *   - 소유(video-ID ∈ ownedVideoIds)면 effectiveRaw = canonical watch URL → 3형태(watch·youtu.be·래핑)를
+ *     하나의 canonicalUrlKey(youtube.com/watch?v=ID)로 병합.
+ *   - 비소유·비유튜브는 effectiveRaw = raw 로 완전 불변(H4 회귀 방어 — 비소유/비유튜브 행은 손대지 않음).
+ */
+function resolveOwned(
+  raw: string,
+  ownedVideoIds: Set<string> | undefined,
+): { owned: boolean; effectiveRaw: string } {
+  if (ownedVideoIds && ownedVideoIds.size > 0) {
+    const vid = extractYoutubeVideoId(raw);
+    if (vid && ownedVideoIds.has(vid)) {
+      return { owned: true, effectiveRaw: canonicalYoutubeWatchUrl(vid) };
+    }
+  }
+  return { owned: false, effectiveRaw: raw };
+}
 
 type UrlCoreResult = {
   uniqueUrlCount: number;
@@ -424,12 +467,15 @@ function aggregateUrlsCore(rows: CitationRow[], opts: UrlCoreOptions): UrlCoreRe
 
   for (const row of rows) {
     const raw = row.url || row.domain || "";
-    const norm = normalizeCitationUrl(raw);
+    // 소유 유튜브 영상이면 canonical watch URL 로 치환(effectiveRaw) 후 정규화 → 3형태 병합(결정 C·D1).
+    // 비소유·비유튜브는 effectiveRaw === raw 로 완전 불변(회귀 방어).
+    const { owned, effectiveRaw } = resolveOwned(raw, opts.ownedVideoIds);
+    const norm = normalizeCitationUrl(effectiveRaw);
     if (!norm) {
       invalidCitationCount++;
       continue;
     }
-    if (!opts.keep(row, norm)) {
+    if (!opts.keep(row, norm, owned)) {
       continue; // 뷰별 포함 판정에서 탈락한 URL 제외
     }
 
@@ -557,7 +603,10 @@ export function aggregateBrandCitationUrls(
   opts: AggregateOptions,
 ): AggregateResult {
   const core = aggregateUrlsCore(rows, {
-    keep: (_row, norm) => isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+    // 소유 유튜브 영상(owned)이거나 브랜드 공식 URL 이면 "내 사이트" 로 포함(계획 v2 §5 결정 D1).
+    keep: (_row, norm, owned) =>
+      owned || isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+    ownedVideoIds: opts.ownedVideoIds,
     promptInlineLimit: opts.promptInlineLimit,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
@@ -583,9 +632,12 @@ export function aggregateBrandMentionUrls(
   opts: MentionAggregateOptions,
 ): MentionAggregateResult {
   const core = aggregateUrlsCore(rows, {
-    keep: (row, norm) =>
+    // 언급 판정 + 소유(내 사이트) 아님 + 소유 유튜브 영상 아님(!owned) → 제3자 언급만(R5·중복 방지).
+    keep: (row, norm, owned) =>
       isBrandMentionText(row.title, row.description, opts.brandTerms) &&
-      !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+      !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet) &&
+      !owned,
+    ownedVideoIds: opts.ownedVideoIds,
     promptInlineLimit: opts.promptInlineLimit,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
@@ -685,6 +737,8 @@ export type PromptPageResult = {
 
 type PromptCoreOptions = {
   keep: CitationKeepFn;
+  /** 소유 유튜브 video-ID 집합 — 드릴다운 target(canonical watch URL) 정합을 위해 core 와 동일 치환 */
+  ownedVideoIds?: Set<string>;
   pageSize?: number;
   cursor?: PromptCursor | null;
 };
@@ -712,10 +766,13 @@ function aggregatePromptsCore(
 
   for (const row of rows) {
     const raw = row.url || row.domain || "";
-    const norm = normalizeCitationUrl(raw);
+    // 소유 영상 치환 — 드릴다운 target(youtube.com/watch?v=ID)과 3형태(watch·youtu.be·래핑)가 정합되게
+    // 소유 뷰와 동일 규칙으로 effectiveRaw 를 계산한다(결정 C·D1). 비소유는 raw 불변.
+    const { owned, effectiveRaw } = resolveOwned(raw, opts.ownedVideoIds);
+    const norm = normalizeCitationUrl(effectiveRaw);
     if (!norm) continue;
     if (norm.canonicalUrlKey !== targetCanonicalUrlKey) continue;
-    if (!opts.keep(row, norm)) continue;
+    if (!opts.keep(row, norm, owned)) continue;
 
     const iso = toIso(row.createdAt);
     const ms = new Date(iso).getTime();
@@ -761,10 +818,17 @@ function aggregatePromptsCore(
 export function aggregatePromptsForUrl(
   rows: CitationRow[],
   targetCanonicalUrlKey: string,
-  opts: { brandKeySet: Set<string>; pageSize?: number; cursor?: PromptCursor | null },
+  opts: {
+    brandKeySet: Set<string>;
+    ownedVideoIds?: Set<string>;
+    pageSize?: number;
+    cursor?: PromptCursor | null;
+  },
 ): PromptPageResult {
   return aggregatePromptsCore(rows, targetCanonicalUrlKey, {
-    keep: (_row, norm) => isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+    keep: (_row, norm, owned) =>
+      owned || isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+    ownedVideoIds: opts.ownedVideoIds,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
   });
@@ -774,6 +838,8 @@ export function aggregatePromptsForUrl(
 export type MentionPromptsOptions = {
   brandKeySet: Set<string>;
   brandTerms: string[];
+  /** 소유 유튜브 영상은 언급 뷰에서 제외 — 소유 뷰 드릴다운과 중복 방지(R5) */
+  ownedVideoIds?: Set<string>;
   pageSize?: number;
   cursor?: PromptCursor | null;
 };
@@ -785,9 +851,11 @@ export function aggregateMentionPromptsForUrl(
   opts: MentionPromptsOptions,
 ): PromptPageResult {
   return aggregatePromptsCore(rows, targetCanonicalUrlKey, {
-    keep: (row, norm) =>
+    keep: (row, norm, owned) =>
       isBrandMentionText(row.title, row.description, opts.brandTerms) &&
-      !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+      !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet) &&
+      !owned,
+    ownedVideoIds: opts.ownedVideoIds,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
   });

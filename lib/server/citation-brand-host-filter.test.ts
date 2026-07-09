@@ -16,6 +16,7 @@ import {
   extractBrandHosts,
   buildBrandHostPrefilter,
   buildBrandMentionPrefilter,
+  buildYoutubeVideoPrefilter,
 } from "./citation-brand-host-filter";
 
 const dialect = new PgDialect();
@@ -147,5 +148,27 @@ describe("buildBrandMentionPrefilter (제3자 언급 사전 필터)", () => {
     const { sql, params } = compile(buildBrandMentionPrefilter(["evil'--", "safe"]));
     for (const p of params) expect(typeof p).toBe("string");
     expect(sql).not.toContain("evil'--");
+  });
+});
+
+describe("buildYoutubeVideoPrefilter", () => {
+  it("고정 리터럴 superset — 파라미터 0개(injection 없음)", () => {
+    const { params } = compile(buildYoutubeVideoPrefilter());
+    expect(params).toEqual([]);
+  });
+
+  it("watch·shorts·embed·live·/v/·attribution·nocookie·youtu.be·google 래핑 커버", () => {
+    const { sql } = compile(buildYoutubeVideoPrefilter());
+    expect(sql).toContain("%youtube.com/watch%");
+    expect(sql).toContain("%youtube.com/shorts/%");
+    expect(sql).toContain("%youtube.com/embed/%");
+    expect(sql).toContain("%youtube.com/live/%");
+    expect(sql).toContain("%youtube.com/v/%");
+    expect(sql).toContain("%youtube.com/attribution_link%");
+    expect(sql).toContain("%youtube-nocookie.com/%");
+    expect(sql).toContain("%youtu.be/%");
+    expect(sql).toContain("%google.%");
+    // ESCAPE 절 명시
+    expect(sql).toContain("ESCAPE");
   });
 });

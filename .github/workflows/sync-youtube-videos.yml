@@ -1,0 +1,105 @@
+name: Sync YouTube videos (weekly + manual)
+
+# 우리 채널(@magicbody1) 소유 유튜브 영상 목록을 brand_youtube_videos 에 반영한다.
+# 흐름: 러너에서 yt-dlp 로 영상 ID 목록 취득 → VM 으로 전송 → 앱 컨테이너 안에서 sync 스크립트
+#      (소프트삭제·다층 가드) 실행. 실패/이상 시 Slack 경보 + job 빨간불(조용한 실패 금지).
+#
+# 안전(계획 geotracker-youtube-video-match-v2 §2):
+#   - 스크립트는 하드 DELETE 없음. 소프트삭제(is_active) + 절대최소·상대하한·비활성 상한 가드.
+#   - 부분 취득(차단·구조 변경)으로 목록이 손상되지 않는다. 이상 시 갱신 보류(쓰기 0).
+#   - 최초 1회는 DRY_RUN=1 로 수동 실행해 계획만 확인할 것(dispatch 입력 dry_run).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '계획만 확인(쓰기 0)하려면 "yes". 실제 반영은 "no".'
+        required: true
+        default: 'yes'
+  schedule:
+    # 주 1회 — 매주 일요일 18:00 UTC (KST 월요일 03:00)
+    - cron: '0 18 * * 0'
+
+# 같은 워크스페이스 목록을 동시에 두 번 갱신하지 않도록 직렬화.
+concurrency:
+  group: sync-youtube-videos
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      # 최소 취득 임계 — 러너 1차 방어(스크립트 ABS_MIN 과 별개의 조기 abort).
+      MIN_FETCH: '50'
+      CHANNEL_URL: 'https://www.youtube.com/@magicbody1/videos'
+    steps:
+      - name: Fetch video IDs with yt-dlp
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --upgrade yt-dlp
+          # --flat-playlist: 각 영상 메타를 내려받지 않고 목록만. --print id: 영상 ID 한 줄씩.
+          yt-dlp --flat-playlist --print id "${CHANNEL_URL}" > video-ids.txt
+          COUNT=$(grep -cE '^[A-Za-z0-9_-]{11}$' video-ids.txt || true)
+          echo "fetched_valid_ids=${COUNT}"
+          if [ "${COUNT}" -lt "${MIN_FETCH}" ]; then
+            echo "취득 ID 수(${COUNT})가 최소 임계(${MIN_FETCH}) 미만 — 부분실패 의심, 중단."
+            exit 1
+          fi
+
+      - name: Copy video IDs to VM
+        # 액션 커밋 SHA 고정(보안 M-1) — @master 는 supply-chain 위험(태그·브랜치 재지정). v1.0.0 커밋 핀.
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          source: 'video-ids.txt'
+          target: '/datadrive/apps/geo-tracker/tmp'
+
+      - name: Run sync inside app container
+        # 액션 커밋 SHA 고정(보안 M-1) — @master 는 supply-chain 위험. v1.2.5 커밋 핀.
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DRY_RUN_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'no' }}
+          # Slack webhook 을 script 문자열에 인터폴레이션하지 않고 env→envs 로 전달(보안 L-2) — 시크릿이
+          # 원격 명령 문자열/프로세스 목록에 노출되지 않게 한다.
+          SLACK_WEBHOOK: ${{ secrets.SLACK_APPROVAL_WEBHOOK_URL }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 10m
+          # DRY_RUN_INPUT·SLACK_WEBHOOK 을 원격 셸 env 로 전달(L-2 — script 리터럴 삽입 금지).
+          envs: DRY_RUN_INPUT,SLACK_WEBHOOK
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            # 고정 파일명·고정 경로만 사용 — 사용자 입력 shell 삽입 없음(계획 M4).
+            docker compose cp tmp/video-ids.txt mbd-geo-tracker:/tmp/video-ids.txt
+            # dry-run 게이트 fail-closed(검수 MED): 명시적 "no" 가 아니면 항상 dry-run(쓰기 0).
+            # 예상치 못한 값·빈 값이 실제 반영으로 흐르지 않게 안전측으로 기본 dry.
+            if [ "${DRY_RUN_INPUT}" = "no" ]; then DRY="0"; else DRY="1"; fi
+            docker compose exec -T \
+              -e VIDEO_IDS_FILE=/tmp/video-ids.txt \
+              -e DRY_RUN="${DRY}" \
+              -e SLACK_WEBHOOK="${SLACK_WEBHOOK}" \
+              mbd-geo-tracker node scripts/sync-youtube-videos.mjs
+            echo "Sync step complete (DRY_RUN=${DRY})."
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK: ${{ secrets.SLACK_APPROVAL_WEBHOOK_URL }}
+        run: |
+          if [ -n "${SLACK}" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              --data "{\"text\":\"[GeoTracker sync-yt] 워크플로 실패 — run ${GITHUB_RUN_ID}. 자동 갱신 점검 필요.\"}" \
+              "${SLACK}" || true
+          else
+            echo "SLACK_APPROVAL_WEBHOOK_URL secret 미설정 — Slack 경보 생략(로그만)."
+          fi

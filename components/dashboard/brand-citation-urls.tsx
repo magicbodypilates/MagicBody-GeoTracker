@@ -41,6 +41,42 @@ type BrandCitationUrlItem = {
   lastSeen: string;
   prompts: UrlPromptRef[];
   hasMorePrompts: boolean;
+  /** 언급 뷰(제3자)에서만 채워지는 대표 제목(헤드라인). 소유 뷰는 undefined. */
+  title?: string;
+};
+
+/** 섹션 모드 — "owned"(내 사이트 인용) vs "mention"(브랜드 언급 제3자) */
+type SectionMode = "owned" | "mention";
+
+/** 모드별 API 경로 세그먼트·라벨·안내문 구성 */
+type ModeConfig = {
+  /** /stats/citations/<pathSeg> · <pathSeg>/prompts 경로 세그먼트 */
+  pathSeg: "urls" | "brand-mentions";
+  /** 섹션 헤더 제목 */
+  sectionTitle: string;
+  /** 펼침 안내문(auto-info 기준 문장 앞부분) */
+  intro: string;
+  /** 목록 비었을 때 문구 */
+  emptyLabel: string;
+  /** 대표 제목(헤드라인) 노출 여부 */
+  showTitle: boolean;
+};
+
+const MODE_CONFIG: Record<SectionMode, ModeConfig> = {
+  owned: {
+    pathSeg: "urls",
+    sectionTitle: "내 사이트 인용 URL",
+    intro: "전체 기간 동안 내 사이트가 AI 답변에 한 번이라도 인용된 개별 페이지 URL 을 모두 보여줍니다.",
+    emptyLabel: "내 사이트가 인용된 URL이 아직 없습니다.",
+    showTitle: false,
+  },
+  mention: {
+    pathSeg: "brand-mentions",
+    sectionTitle: "브랜드 언급 출처 (제3자 페이지)",
+    intro: "전체 기간 동안 AI 답변에 인용된 외부 출처(보도자료·언론기사 등) 중, 제목·설명에 브랜드가 언급된 페이지를 보여줍니다. (내 사이트는 제외)",
+    emptyLabel: "브랜드를 언급한 제3자 페이지가 아직 없습니다.",
+    showTitle: true,
+  },
 };
 
 type UrlsResponse = {
@@ -84,11 +120,17 @@ function BrandUrlRow({
   workspaceId,
   auto,
   branded,
+  pathSeg,
+  showTitle,
 }: {
   item: BrandCitationUrlItem;
   workspaceId: string;
   auto: boolean;
   branded: boolean;
+  /** prompts 엔드포인트 경로 세그먼트 (모드별) */
+  pathSeg: "urls" | "brand-mentions";
+  /** 대표 제목(헤드라인) 노출 여부 */
+  showTitle: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [extraPrompts, setExtraPrompts] = useState<UrlPromptRef[]>([]);
@@ -113,7 +155,7 @@ function BrandUrlRow({
       });
       if (promptCursor) qs.set("cursor", promptCursor);
       const resp = await fetch(
-        `${BP}/api/workspaces/${workspaceId}/stats/citations/urls/prompts?${qs.toString()}`,
+        `${BP}/api/workspaces/${workspaceId}/stats/citations/${pathSeg}/prompts?${qs.toString()}`,
         { credentials: "include" },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -134,7 +176,7 @@ function BrandUrlRow({
     } finally {
       setLoadingPrompts(false);
     }
-  }, [item.canonicalUrlKey, item.prompts, auto, branded, promptCursor, workspaceId]);
+  }, [item.canonicalUrlKey, item.prompts, auto, branded, promptCursor, workspaceId, pathSeg]);
 
   return (
     <div className="rounded-lg border border-th-border bg-th-card">
@@ -144,18 +186,37 @@ function BrandUrlRow({
       >
         <span className="mt-0.5 shrink-0 text-xs text-th-text-muted">{open ? "▼" : "▶"}</span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <a
-              href={item.displayUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="truncate text-sm font-medium text-th-text-accent hover:underline"
-              title={item.displayUrl}
-            >
-              {item.displayUrl}
-            </a>
-          </div>
+          {showTitle && item.title ? (
+            <>
+              {/* 언급 뷰: 제3자 페이지의 제목(헤드라인)을 우선 노출, URL 은 보조 */}
+              <div className="truncate text-sm font-medium text-th-text" title={item.title}>
+                {item.title}
+              </div>
+              <a
+                href={item.displayUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="mt-0.5 block truncate text-xs text-th-text-accent hover:underline"
+                title={item.displayUrl}
+              >
+                {item.displayUrl}
+              </a>
+            </>
+          ) : (
+            <div className="flex items-center gap-2">
+              <a
+                href={item.displayUrl}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="truncate text-sm font-medium text-th-text-accent hover:underline"
+                title={item.displayUrl}
+              >
+                {item.displayUrl}
+              </a>
+            </div>
+          )}
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <span className="rounded-full bg-th-brand-bg/20 px-2 py-0.5 text-[10px] font-bold text-th-brand-text">
               인용 {item.totalCount}회
@@ -218,11 +279,15 @@ function BrandUrlRow({
 export function BrandCitationUrls({
   workspaceId,
   responseTab = "auto-info",
+  mode = "owned",
 }: {
   workspaceId: string;
   /** 응답 유형 필터 — 없으면 "auto-info"(일반 검색·자동) 기준 */
   responseTab?: "auto-info" | "auto-branded" | "manual";
+  /** 섹션 모드 — "owned"(내 사이트 인용) / "mention"(브랜드 언급 제3자). 기본 owned */
+  mode?: SectionMode;
 }) {
+  const cfg = MODE_CONFIG[mode];
   const [expanded, setExpanded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -248,7 +313,7 @@ export function BrandCitationUrls({
       });
       if (cursor) qs.set("cursor", cursor);
       const resp = await fetch(
-        `${BP}/api/workspaces/${workspaceId}/stats/citations/urls?${qs.toString()}`,
+        `${BP}/api/workspaces/${workspaceId}/stats/citations/${cfg.pathSeg}?${qs.toString()}`,
         { credentials: "include" },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -263,7 +328,7 @@ export function BrandCitationUrls({
       setItems((prev) => (append ? [...prev, ...data.urls] : data.urls));
       setNextCursor(data.nextCursor);
     },
-    [auto, branded, workspaceId],
+    [auto, branded, workspaceId, cfg.pathSeg],
   );
 
   // 펼칠 때 + 탭(auto/branded) 변경 시 재조회
@@ -309,7 +374,7 @@ export function BrandCitationUrls({
         className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-th-card-hover rounded-t-xl"
       >
         <span className="text-xs text-th-text-muted">{expanded ? "▼" : "▶"}</span>
-        <span className="text-sm font-semibold text-th-text">내 사이트 인용 URL</span>
+        <span className="text-sm font-semibold text-th-text">{cfg.sectionTitle}</span>
         {loaded && meta && (
           <span className="rounded-full bg-th-brand-bg/20 px-2 py-0.5 text-xs font-bold text-th-brand-text">
             {meta.uniqueUrlCount}개
@@ -321,8 +386,8 @@ export function BrandCitationUrls({
       {expanded && (
         <div className="space-y-2 border-t border-th-border px-4 py-3">
           <p className="text-[11px] text-th-text-muted">
-            전체 기간 동안 내 사이트가 AI 답변에 한 번이라도 인용된 개별 페이지 URL 을 모두 보여줍니다.
-            (기간 선택과 무관 · {responseTab === "auto-branded" ? "질문에 브랜드명이 포함된 검색" : responseTab === "manual" ? "수동 실행" : "일반 검색"} 기준)
+            {cfg.intro}
+            {" "}(기간 선택과 무관 · {responseTab === "auto-branded" ? "질문에 브랜드명이 포함된 검색" : responseTab === "manual" ? "수동 실행" : "일반 검색"} 기준)
           </p>
 
           {loading && (
@@ -335,7 +400,7 @@ export function BrandCitationUrls({
           )}
           {!loading && !error && loaded && items.length === 0 && (
             <div className="rounded-lg border border-th-border bg-th-card-alt px-3 py-6 text-center text-sm text-th-text-secondary">
-              내 사이트가 인용된 URL이 아직 없습니다.
+              {cfg.emptyLabel}
             </div>
           )}
 
@@ -354,6 +419,8 @@ export function BrandCitationUrls({
                     workspaceId={workspaceId}
                     auto={auto}
                     branded={branded}
+                    pathSeg={cfg.pathSeg}
+                    showTitle={cfg.showTitle}
                   />
                 ))}
               </div>

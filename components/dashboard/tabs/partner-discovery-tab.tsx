@@ -160,6 +160,10 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [], wo
       <div className="space-y-3">
         {/* ── 내 사이트 인용 URL 전수 섹션 (서버 전체 기간 누적 — 현재 기간 요약이 비어도 노출) ── */}
         {workspaceId && <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" />}
+        {/* ── 브랜드 언급 출처(제3자) 전수 섹션 — 내 사이트 인용과 별개 독립 항목 ── */}
+        {workspaceId && (
+          <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" mode="mention" />
+        )}
 
         <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center">
           <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-th-accent-soft">
@@ -181,6 +185,10 @@ export function PartnerDiscoveryTab({ partnerLeaderboard, brandWebsites = [], wo
     <div className="space-y-3">
       {/* ── 내 사이트 인용 URL 전수 섹션 (전체 기간 누적 · 서버 lazy fetch · 기본 접힘) ── */}
       {workspaceId && <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" />}
+      {/* ── 브랜드 언급 출처(제3자) 전수 섹션 — 내 사이트 인용과 별개 독립 항목 ── */}
+      {workspaceId && (
+        <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" mode="mention" />
+      )}
 
       {/* ── Header row: stats + controls ── */}
       <div className="flex flex-wrap items-end justify-between gap-3">

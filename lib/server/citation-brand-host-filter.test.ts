@@ -12,7 +12,11 @@
 
 import { describe, it, expect } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { extractBrandHosts, buildBrandHostPrefilter } from "./citation-brand-host-filter";
+import {
+  extractBrandHosts,
+  buildBrandHostPrefilter,
+  buildBrandMentionPrefilter,
+} from "./citation-brand-host-filter";
 
 const dialect = new PgDialect();
 function compile(sqlChunk: ReturnType<typeof buildBrandHostPrefilter>) {
@@ -95,6 +99,53 @@ describe("buildBrandHostPrefilter", () => {
     const { sql, params } = compile(buildBrandHostPrefilter(["evil'--", "safe.com"]));
     for (const p of params) expect(typeof p).toBe("string");
     // 인젝션 시도 문자열이 SQL 본문에 나타나지 않음
+    expect(sql).not.toContain("evil'--");
+  });
+});
+
+describe("buildBrandMentionPrefilter (제3자 언급 사전 필터)", () => {
+  it("빈 용어 → FALSE (항상-거짓·빈 결과)", () => {
+    const { sql, params } = compile(buildBrandMentionPrefilter([]));
+    expect(sql.trim()).toBe("FALSE");
+    expect(params).toEqual([]);
+    // 공백만 있는 용어도 정리되어 FALSE
+    const empty = compile(buildBrandMentionPrefilter(["", "   "]));
+    expect(empty.sql.trim()).toBe("FALSE");
+    expect(empty.params).toEqual([]);
+  });
+
+  it("용어 1개 → title/description ILIKE OR, 패턴은 파라미터 바인딩(injection 방어)", () => {
+    const { sql, params } = compile(buildBrandMentionPrefilter(["매직바디"]));
+    expect(sql).toContain("cite->>'title' ILIKE");
+    expect(sql).toContain("cite->>'description' ILIKE");
+    expect(sql).toContain("ESCAPE '\\'");
+    // 용어가 SQL 본문에 직접 인라인되지 않았는지 확인 (파라미터에만 존재)
+    expect(sql).not.toContain("매직바디");
+    // title·description 각각 1회씩 → 같은 패턴이 2회 바인딩
+    expect(params).toEqual(["%매직바디%", "%매직바디%"]);
+  });
+
+  it("용어 여러 개 → OR 로 결합, 각 용어가 파라미터로 바인딩", () => {
+    const { sql, params } = compile(buildBrandMentionPrefilter(["매직바디", "MagicBody"]));
+    expect(sql).toContain(" OR ");
+    // 2 용어 × (title + description) = 4 파라미터
+    expect(params).toEqual(["%매직바디%", "%매직바디%", "%MagicBody%", "%MagicBody%"]);
+  });
+
+  it("용어 앞뒤 공백 trim + 공백 용어 제외", () => {
+    const { params } = compile(buildBrandMentionPrefilter(["  매직바디  ", "", "  "]));
+    expect(params).toEqual(["%매직바디%", "%매직바디%"]);
+  });
+
+  it("ILIKE 특수문자(% _ \\) 는 이스케이프되어 바인딩", () => {
+    const { params } = compile(buildBrandMentionPrefilter(["a%b_c\\d"]));
+    // % → \%, _ → \_, \ → \\ (백슬래시 먼저 이스케이프)
+    expect(params[0]).toBe("%a\\%b\\_c\\\\d%");
+  });
+
+  it("모든 파라미터가 문자열(값 바인딩) — SQL 본문에 raw 용어 없음", () => {
+    const { sql, params } = compile(buildBrandMentionPrefilter(["evil'--", "safe"]));
+    for (const p of params) expect(typeof p).toBe("string");
     expect(sql).not.toContain("evil'--");
   });
 });

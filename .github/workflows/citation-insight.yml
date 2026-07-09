@@ -1,0 +1,27 @@
+name: Citation insight (manual)
+
+# 수동 트리거 전용 — 읽기 전용 진단(브랜드 언급 외부 출처 규모 + 유튜브 영상 인용 현황).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  insight:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH to Azure VM and run insight
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 5m
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            docker compose exec -T mbd-geo-tracker node scripts/citation-insight.mjs
+            echo "Insight step complete."

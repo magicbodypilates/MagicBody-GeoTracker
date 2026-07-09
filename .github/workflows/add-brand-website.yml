@@ -1,0 +1,35 @@
+name: Add brand website (manual)
+
+# 수동 트리거 전용 — 워크스페이스 brand_config.websites 에 브랜드 공식 URL 한 건 추가.
+# 앱 컨테이너 안에서 실행(POSTGRES_URL 주입). 이미 있으면 중복 추가 안 함.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: '추가할 브랜드 공식 URL (예: https://brunch.co.kr/@handle)'
+        required: true
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH to Azure VM and add brand website
+        uses: appleboy/ssh-action@master
+        env:
+          ADD_URL_INPUT: ${{ inputs.url }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 3m
+          envs: ADD_URL_INPUT
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            docker compose exec -T -e ADD_URL="$ADD_URL_INPUT" mbd-geo-tracker node scripts/add-brand-website.mjs
+            echo "Add step complete."

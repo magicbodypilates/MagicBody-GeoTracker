@@ -632,9 +632,9 @@ export function RetargetAbandonerTab() {
                     k="지난 7일 평균 식별률 (기준선)"
                     v={fmtPct(snapshot.health.rateBaseline)}
                   />
-                  <Kv k="마지막 식별 시각" v={fmtKst(snapshot.health.lastIdentifiedAt)} />
+                  <Kv k="마지막 집계 시각" v={fmtKst(snapshot.health.lastIdentifiedAt)} />
                   <Kv
-                    k="현재 남아 있는 가장 오래된 식별 조회"
+                    k="집계 시작 시점 (가장 이른 기록)"
                     v={fmtKst(snapshot.health.oldestIdentifiedAt)}
                   />
                 </tbody>
@@ -643,10 +643,10 @@ export function RetargetAbandonerTab() {
                 판정은 <strong className="text-th-text">자기 기준선(지난 7일) 대비</strong>로만 합니다 — &lsquo;정상
                 식별률&rsquo;에 정답 값이 없어서 절대 기준을 쓰면 오탐이 납니다.
                 <br />
-                &lsquo;가장 오래된 식별 조회&rsquo;는{" "}
-                <strong className="text-th-text">&lsquo;이때부터 식별됐다&rsquo;는 뜻이 아닙니다</strong> — 탈퇴하면
-                그 회원의 과거 조회 기록에서 회원 표시가 지워져 이 값이 앞으로 밀립니다. 같은 이유로 식별률이
-                내려간다고 항상 고장은 아닙니다.
+&lsquo;집계 시작 시점&rsquo;은{" "}
+                <strong className="text-th-text">고정된 값이 아닙니다</strong> — 탈퇴하면 그 회원의 과거 조회
+                기록에서 회원 표시가 지워져 이 값이 앞으로 밀립니다(3년 지난 기록도 지워지며 밀립니다). 같은
+                이유로 식별률이 내려간다고 항상 고장은 아닙니다.
               </p>
             </>
           )}

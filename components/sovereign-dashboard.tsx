@@ -35,6 +35,7 @@ import { HomeServerTab } from "@/components/dashboard/tabs/home-server-tab";
 import { PaymentStatsTab } from "@/components/dashboard/tabs/payment-stats-tab";
 import { Ga4MarketingTab } from "@/components/dashboard/tabs/ga4-marketing-tab";
 import { AttributionTab } from "@/components/dashboard/tabs/attribution-tab";
+import { RetargetAbandonerTab } from "@/components/dashboard/tabs/retarget-abandoner-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-tab";
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
@@ -105,6 +106,14 @@ const tabIcons: Record<TabKey, ReactNode> = {
       <path d="M12 2a10 10 0 1 0 10 10" />
       <path d="M12 12 22 4" />
       <path d="M12 12V2" />
+    </Icon>
+  ),
+  // 이탈자 — 나갔다가 돌아오지 않은 사람(사람 + 나가는 화살표).
+  Abandoners: (
+    <Icon>
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="M16 17l5-5-5-5" />
+      <line x1="21" y1="12" x2="9" y2="12" />
     </Icon>
   ),
   "Project Settings": (
@@ -286,6 +295,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     tooltip: "실제 결제건에 기록된 유입경로를 채널(구글·메타·네이버·직접·미상)별로 분석합니다(확정·결제건 직접).",
     details:
       "결제 시 함께 기록된 유입경로(utm·클릭ID 존재 여부)를 기준으로 채널별 결제 건수·매출과 결제별 상세를 봅니다. 이 값은 실제 결제건에서 직접 집계한 확정 데이터로, 기능 배포 이후 결제만 포함됩니다. GA4 '마케팅 성과' 탭은 전체 트래픽 기준 추정·기여 집계라 수치가 다르므로 두 값을 더하거나 직접 비교하지 마세요. 광고 표시가 없는 결제는 '직접·미상'으로 묶이며 여기에는 기능 켜기 이전 결제와 직접 방문이 섞여 있습니다. 정규과정은 과정 목록 확정 후 계약금의 10배(실매출)로 환산되며, 확정 전에는 실결제액 기준입니다. 자체취소·방문결제는 추적 한계로 오차가 있을 수 있습니다. 개인정보(클릭ID 원문·이메일·전화)는 표시하지 않으며 클릭ID는 기록 여부(✓/−)만 노출합니다. 최고관리자 전용.",
+  },
+  Abandoners: {
+    title: "상세페이지 이탈자",
+    tooltip: "과정 상세를 봤지만 결제하지 않은 회원을 4개 구분으로 나눠 보고, 이름·연락처까지 확인합니다.",
+    details:
+      "과정 상세페이지를 본 뒤 결제하지 않은 회원을 '결제창 이탈 / 반복 조회 / 단순 조회 / 사각지대' 4개로 나눠 봅니다. 한 회원은 과정마다 정확히 한 칸에만 들어가므로 합계가 항상 맞습니다. 각 칸은 전체 인원과 발송 가능 인원(마케팅 수신동의자)을 함께 보여줍니다 — 가입만 한 회원의 수신동의율이 약 54%라 두 숫자는 크게 다릅니다. 맨 위 '결제창에도 안 갔고 결제 이력이 전혀 없는 회원'이 사장님 질문에 대한 직답이며, 가입 전 비로그인 조회는 연결할 수 없어 실제보다 적게 나오는 하한선입니다(회원 식별 수집을 2026-07-17에 켰기 때문에 그 이전 조회는 소급되지 않습니다). '사각지대'는 지금 명단에서 조용히 빠지는 사람들로, 결제창 제외 기간을 조회 기간 이하로 낮추면 0이 됩니다. 이 화면은 이름·연락처를 그대로 표시하며 파일 내려받기는 제공하지 않습니다(조회 전용). 최고관리자 전용.",
   },
   "Project Settings": {
     title: "프로젝트 설정",
@@ -2290,6 +2305,12 @@ ${exampleJson}
 
     if (activeTab === "Attribution") {
       return <AttributionTab />;
+    }
+
+    // ⚠️ 이름·전화번호를 표시하는 화면 — 최고관리자 전용(types.ts REGULAR_ADMIN_HIDDEN_TABS 등재).
+    //    탭 숨김은 편의일 뿐이라 서버(middleware 401 · route requireAdmin 403 · .NET 열쇠 404)가 진짜 게이트다.
+    if (activeTab === "Abandoners") {
+      return <RetargetAbandonerTab />;
     }
 
     if (activeTab === "Project Settings") {

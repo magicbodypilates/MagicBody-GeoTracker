@@ -219,6 +219,7 @@ export const tabs = [
   "Payment Stats",
   "Marketing Performance",
   "Attribution",
+  "Abandoners",
   "Prompt Hub",
   "Responses",
   "Visibility Analytics",
@@ -270,6 +271,10 @@ export const REGULAR_ADMIN_HIDDEN_TABS: readonly TabKey[] = [
   "Payment Stats",
   "Marketing Performance",
   "Attribution",
+  // ⚠️ 이탈자 탭은 이름·전화번호를 표시한다 — 최고관리자 전용에서 절대 빼지 말 것.
+  //    (탭 숨김은 편의일 뿐 인가가 아니다. 진짜 인가는 middleware 401 + route requireAdmin 403
+  //     + .NET X-Retarget-Key 404. 그래도 일반관리자에게 노출 자체를 만들지 않는다.)
+  "Abandoners",
   "Citation Opportunities",
   "SRO Analysis",
   "NAVER AI",

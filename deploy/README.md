@@ -199,6 +199,33 @@ curl -I http://localhost:8040/geo-tracker
 > CMS 게이트 비밀번호까지 함께 통일하는 전체 절차는
 > **CMS repo `docs/BoardAdmin-비밀번호-배포-가이드.md`** 참조 (CMS=PBKDF2 / GeoTracker=bcrypt 해시를 각각 생성).
 
+### 이탈자 조회 전용 열쇠 (`RETARGET_API_KEY`) — 회전 절차
+
+`/geo-tracker` 이탈자 탭이 .NET `/api/Retarget/*` 를 부를 때 쓰는 열쇠다.
+이 화면은 **이름·전화번호를 마스킹 없이** 돌려주고, AppID/AppKey 는 Web 빌드 산출물에 평문으로 들어 있어
+자물쇠가 아니다 → **이 열쇠가 유일한 자물쇠**다.
+
+- **두 repo 에 같은 값**으로 등록해야 한다 — `MagicBody-GeoTracker` (보내는 쪽) · `MagicBody-API` (대조하는 쪽).
+  한쪽만 바꾸면 그 순간부터 화면이 "서버 설정 오류"를 띄운다(.NET 이 404 → GeoTracker 가 502).
+- **32자 이상**이어야 한다. 미만이면 양쪽 모두 비활성으로 간주해 엔드포인트가 항상 404 다(fail-closed).
+- ⚠️ **`appsettings*.json` 에 넣지 말 것** — 그 파일들은 git 추적 중이라 넣는 순간 커밋된다.
+  AppID/AppKey 가 공개된 원인이 정확히 그것이다. 환경변수(=GitHub Secret)로만 주입한다.
+- ⚠️ **`NEXT_PUBLIC_` 접두사를 붙이지 말 것** — 붙이면 브라우저 번들로 인라인돼 같은 사고가 재발한다.
+
+회전(값 교체):
+
+1. 새 값 생성 (64자):
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+2. **두 repo 모두** Settings → Secrets and variables → Actions → `RETARGET_API_KEY` 값 Update.
+   (GeoTracker repo · MagicBody-API repo — **같은 값**)
+3. **두 repo 모두** 재배포. GeoTracker 는 `.env` 해당 줄만 upsert 되고, API 는 override 파일로 주입된다.
+   ⚠️ 둘 사이 시간차 동안에는 화면이 오류를 띄운다 — 연달아 배포할 것.
+
+> API 쪽은 배포 시 override 파일(`/tmp/mbd-tracking-override.yml`)을 **통째로 새로 쓴다**.
+> 그래서 서버에서 손으로 넣은 값은 다음 배포에 지워진다 — 반드시 GitHub Secret 으로 등록해야 유지된다.
+
 #### 방법 B — 서버에서 직접 편집 (수동 · 예외적)
 ```bash
 # 1) 새 해시 생성

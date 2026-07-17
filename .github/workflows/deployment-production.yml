@@ -85,6 +85,14 @@ jobs:
           # 미설정(빈 값)이면 기존 .env 값을 보존한다(부분 롤아웃 안전).
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # ── 이탈자 조회 전용 열쇠 — plan-v2 §3 결정 2 (task_id: magicbody-abandoner-view-2026-07-17) ──
+          #   서버 라우트가 .NET /api/Retarget/* 를 부를 때 X-Retarget-Key 헤더로 보낸다.
+          #   ⚠️ **MagicBody-API repo 의 같은 이름 Secret 과 같은 값**이어야 한다 — 양쪽이 이 값으로 대조한다.
+          #   ⚠️ NEXT_PUBLIC_ 접두사를 절대 붙이지 말 것 — 붙이면 브라우저 번들로 인라인돼
+          #      AppID/AppKey 와 똑같은 사고가 난다(그게 애초에 이 열쇠를 만든 이유다).
+          #   미설정(빈 값)이면 upsert_env 가 건너뛰어 기존 .env 값을 보존한다. 값이 아예 없으면
+          #     cms-api 가 호출 자체를 막고(32자 검사) 화면은 "서버 설정 오류"를 띄운다(fail-closed).
+          RETARGET_API_KEY: ${{ secrets.RETARGET_API_KEY }}
         with:
           host: ${{ secrets.AZURE_PROD_HOST }}
           port: ${{ secrets.AZURE_PROD_PORT }}
@@ -92,7 +100,7 @@ jobs:
           key: ${{ secrets.AZURE_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 20m
-          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET
+          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
           script: |
             set -eu
             DEPLOY_TAG="prod-${{ github.sha }}"
@@ -116,6 +124,7 @@ jobs:
             }
             upsert_env "ADMIN_PASSWORD_HASH" "${ADMIN_PASSWORD_HASH}"
             upsert_env "SESSION_SECRET" "${SESSION_SECRET}"
+            upsert_env "RETARGET_API_KEY" "${RETARGET_API_KEY}"
             # ───────────────────────────────────────────────────────────────────────────
 
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
@@ -175,6 +184,14 @@ jobs:
           # 미설정(빈 값)이면 기존 .env 값을 보존한다(부분 롤아웃 안전).
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # ── 이탈자 조회 전용 열쇠 — plan-v2 §3 결정 2 (task_id: magicbody-abandoner-view-2026-07-17) ──
+          #   서버 라우트가 .NET /api/Retarget/* 를 부를 때 X-Retarget-Key 헤더로 보낸다.
+          #   ⚠️ **MagicBody-API repo 의 같은 이름 Secret 과 같은 값**이어야 한다 — 양쪽이 이 값으로 대조한다.
+          #   ⚠️ NEXT_PUBLIC_ 접두사를 절대 붙이지 말 것 — 붙이면 브라우저 번들로 인라인돼
+          #      AppID/AppKey 와 똑같은 사고가 난다(그게 애초에 이 열쇠를 만든 이유다).
+          #   미설정(빈 값)이면 upsert_env 가 건너뛰어 기존 .env 값을 보존한다. 값이 아예 없으면
+          #     cms-api 가 호출 자체를 막고(32자 검사) 화면은 "서버 설정 오류"를 띄운다(fail-closed).
+          RETARGET_API_KEY: ${{ secrets.RETARGET_API_KEY }}
         with:
           host: ${{ secrets.AZURE_PROD_HOST }}
           port: ${{ secrets.AZURE_PROD_PORT }}
@@ -182,7 +199,7 @@ jobs:
           key: ${{ secrets.AZURE_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 20m
-          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET
+          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
           script: |
             set -eu
             DEPLOY_TAG="prod-${{ github.sha }}"
@@ -206,6 +223,7 @@ jobs:
             }
             upsert_env "ADMIN_PASSWORD_HASH" "${ADMIN_PASSWORD_HASH}"
             upsert_env "SESSION_SECRET" "${SESSION_SECRET}"
+            upsert_env "RETARGET_API_KEY" "${RETARGET_API_KEY}"
             # ───────────────────────────────────────────────────────────────────────────
 
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}

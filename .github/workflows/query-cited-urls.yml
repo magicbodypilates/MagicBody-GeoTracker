@@ -1,0 +1,41 @@
+name: Query cited URLs (manual)
+
+# 수동 트리거 전용 — 인용 출처를 경로 패턴으로 필터해 목록 조회(읽기 전용).
+# 예: url_filter = %magicbodypilates.co.kr/blog/%
+
+on:
+  workflow_dispatch:
+    inputs:
+      url_filter:
+        description: "URL 필터(ILIKE 패턴). 예: %magicbodypilates.co.kr/blog/%"
+        required: true
+        default: "%magicbodypilates.co.kr/blog/%"
+      top:
+        description: "출력 상한(기본 300)"
+        required: false
+        default: "300"
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH to Azure VM and run query
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        env:
+          URL_FILTER_INPUT: ${{ inputs.url_filter }}
+          TOP_INPUT: ${{ inputs.top }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 5m
+          envs: URL_FILTER_INPUT,TOP_INPUT
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            docker compose exec -T -e URL_FILTER="$URL_FILTER_INPUT" -e TOP="$TOP_INPUT" mbd-geo-tracker node scripts/query-cited-urls.mjs
+            echo "Query step complete."

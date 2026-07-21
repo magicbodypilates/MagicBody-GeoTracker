@@ -43,6 +43,19 @@ export type AbandonerStep = (typeof ABANDONER_STEPS)[number];
 export const ABANDONER_SIDE_METRICS = ["consent", "checkoutOnly"] as const;
 export type AbandonerSideMetric = (typeof ABANDONER_SIDE_METRICS)[number];
 
+/**
+ * ⭐ A0 를 **어느 경로로 확인했는지** — .NET a0Paths 의 path 어휘와 1:1(SoT).
+ *   배열 순서 = 확실한 순서(= 표시 순서)이자 배타 우선순위다. 한 회원은 정확히 한 칸에만 들어간다.
+ *     · identified    — 로그인한 채로 봤다. 서버가 직접 본 것이라 가장 확실(원래 잡히던 인원).
+ *     · signupHistory — 가입할 때 그 브라우저가 들고 있던 열람 이력으로 확인됐다(이번 작업으로 새로 잡힘).
+ *     · sameSession   — 가입한 그 방문에 남은 익명 기록으로 이어졌다(이번 작업으로 새로 잡힘).
+ *   ⇒ 세 값의 합 = A0 실인원(peopleTotals.A0.total). 화면이 이 항등식을 스스로 검사한다.
+ *   ⚠️ .NET 이 'unknown' 을 보낼 수도 있다(분류 실패 카나리). 화이트리스트 밖이라 여기서 버려지고,
+ *      그 결과 합이 총계와 어긋나 화면에 경고가 뜬다 — **조용히 섞이는 것보다 낫다**(의도된 동작).
+ */
+export const ABANDONER_A0_PATHS = ["identified", "signupHistory", "sameSession"] as const;
+export type AbandonerA0Path = (typeof ABANDONER_A0_PATHS)[number];
+
 /* ── raw (.NET) 타입 ────────────────────────────────────────────────────── */
 
 export type BucketItemRaw = {
@@ -74,11 +87,39 @@ export type StepRaw = { step?: string | null; people?: number };
 /** scope(A0|B1~B4)별 실인원 — 과정 간 중복 제거된 값(.NET AbandonerPeopleTotal). */
 export type PeopleTotalRaw = { scope?: string | null; total?: number; sendable?: number };
 
+/** A0 경로별 실인원(.NET AbandonerPathTotal). */
+export type PathTotalRaw = { path?: string | null; total?: number; sendable?: number };
+
+/** 가입 순간 기록 커버리지(.NET AbandonerSignupCoverage). */
+export type SignupCoverageRaw = {
+  newMembers30d?: number;
+  signupEvents30d?: number;
+  signupIdentified30d?: number;
+  signupWithHistory30d?: number;
+  crossCheckBase30d?: number;
+  crossCheckMatch30d?: number;
+  /** 지표 ⑤ 초과 주장 건수(2026-07-21 신설 — 구버전 .NET 은 안 보낸다). */
+  crossCheckOver30d?: number;
+  /** 사업자별 분해(2026-07-21 신설 — 구버전 .NET 은 안 보낸다). */
+  kakaoSignups30d?: number;
+  kakaoWithHistory30d?: number;
+  kakaoCrossCheckBase30d?: number;
+  kakaoCrossCheckMatch30d?: number;
+  naverSignups30d?: number;
+  naverWithHistory30d?: number;
+  naverCrossCheckBase30d?: number;
+  naverCrossCheckMatch30d?: number;
+  unknownProviderSignups30d?: number;
+  firstSignupEventAt?: string | null;
+};
+
 export type SnapshotRaw = {
   asOfUtc?: string | null;
   buckets?: BucketItemRaw[];
   a0?: A0ItemRaw[];
   peopleTotals?: PeopleTotalRaw[];
+  a0Paths?: PathTotalRaw[];
+  signupCoverage?: SignupCoverageRaw;
   health?: HealthRaw;
   diagnostics?: StepRaw[];
 };
@@ -140,6 +181,92 @@ export type PeopleTotals = Record<AbandonerBucket, PeopleCount>;
 /** 사다리 밖 별도 지표 — 두 키가 항상 다 있다(없으면 0). */
 export type SideMetrics = Record<AbandonerSideMetric, number>;
 
+/**
+ * ⭐ A0 경로별 실인원 — 3개 키가 항상 다 있다(없으면 0).
+ *   더해도 되는 값이다(배타 분류라 겹치지 않는다) — 오히려 **합이 A0 총계와 같은지**가 검사 항목이다.
+ *   peopleTotals 가 "더하지 말 것"인 것과 반대라 헷갈리기 쉽다. 차이: 저기는 과정별, 여기는 회원별.
+ */
+export type A0PathTotals = Record<AbandonerA0Path, PeopleCount>;
+
+/**
+ * 가입 순간 기록 커버리지 — 화면이 **한계를 스스로 드러내기** 위한 값.
+ *   비율(rate*)은 분모가 0이면 null 이다 — 0 으로 만들면 "고장"처럼 보인다(health 와 같은 규칙).
+ */
+export type SignupCoverage = {
+  /**
+   * 최근 30일 신규 가입 회원 수 — identifiedRate 의 분모.
+   * ⚠️ 소셜(카카오·네이버) 외 경로 가입(비밀번호 가입·CMS 생성)도 섞인다. 그들은 소셜 콜백을 지나지
+   *    않아 가입 기록을 애초에 발사하지 않으므로 비율이 구조적으로 내려간다(.NET 쪽 주석 참조).
+   */
+  newMembers30d: number;
+  /** 최근 30일 기록된 가입 이벤트 수. */
+  signupEvents30d: number;
+  /** 그중 회원이 확인된 수 — "가입 N명 중 확인된 M명"의 M. */
+  signupIdentified30d: number;
+  /** 그중 열람 이력까지 실려 온 수. */
+  signupWithHistory30d: number;
+  /**
+   * ⭐ **①(발사율) × ②(식별률) 결합값** = signupIdentified30d / newMembers30d. 가입이 0이면 null.
+   * ⚠️ 계획서 §9-2 의 "회원 식별률"(분모 = signupEvents30d)과 **정의가 다르다.** 서버가 익명 가입 기록을
+   *    거부해 그 비율은 항상 1.0 이라 아무것도 못 재기 때문이다. 게이트 G5′(≥0.9)는 옛 정의 위의
+   *    임계값이므로 이 값에 그대로 걸 수 없다(위 분모 오염까지 겹친다) — 관찰 착수 전 재합의 대상.
+   */
+  identifiedRate: number | null;
+  /** 이력 동봉률 = signupWithHistory30d / signupIdentified30d. 확인된 게 0이면 null. */
+  historyRate: number | null;
+  /**
+   * ⭐ 지표 ④ **서버 대조 정합률의 분모** — 같은 방문에 서버가 직접 남긴 익명 조회가 있는 가입 기록 수.
+   *   즉 "브라우저 주장을 서버 기록과 맞대볼 수 있는" 표본 크기. 0 이면 대조 자체가 불가능하다.
+   */
+  crossCheckBase30d: number;
+  /** ⭐ 지표 ④의 **분자** — 그 표본 중 브라우저 이력이 서버 기록의 과정을 하나라도 포함한 수. */
+  crossCheckMatch30d: number;
+  /**
+   * ⭐ 지표 ④ **서버 대조 정합률** = crossCheckMatch30d / crossCheckBase30d. 표본이 0이면 null.
+   *   경로 ②(브라우저가 주장한 열람 이력)가 **진짜인지** 사후 관측으로 검증하는 유일한 장치다
+   *   (계획 §6-2 가 서명 영수증 방식을 거부한 근거가 "사후 관측으로 달성한다"였다).
+   *   1.0 에 가까우면 브라우저 주장이 서버 관측과 일치한다는 뜻. 낮으면 명단을 그대로 믿으면 안 된다.
+   */
+  crossCheckRate: number | null;
+  /**
+   * ⭐ 지표 ⑤ **초과 주장 건수** — ④와 같은 표본에서 브라우저 이력이 **서버 기록에 없는 과정**을
+   *   하나라도 주장한 행 수. 게이트 G12 의 나머지 절반이다(계획 §9-3: `④ ≥ 0.9` **且** `초과 주장률 급등 없음`).
+   *   왜 필요한가: 서버 기록의 과정을 포함시키면서 엉뚱한 과정을 **더 얹으면** ④는 1.0 인데 명단만 오염된다.
+   */
+  crossCheckOver30d: number;
+  /** ⭐ 지표 ⑤ 비율 = crossCheckOver30d / crossCheckBase30d. 표본이 0이면 null. */
+  crossCheckOverRate: number | null;
+  /**
+   * ⭐ 사업자별 분해 (게이트 G5c) — 카카오와 네이버는 **내부 동작이 완전히 달라**(카카오는 우리 서버
+   *   직접 호출 · 네이버는 엣지 함수 경유) 합쳐 보면 한쪽 고장이 다른 쪽 숫자에 묻힌다.
+   *   계획 §9-5: "네이버 sign_up 이 0건이면 표본 크기와 무관하게 고장".
+   */
+  byProvider: {
+    kakao: ProviderCoverage;
+    naver: ProviderCoverage;
+    /** 사업자 값이 없거나 화이트리스트 밖인 행 수 — 정상이면 0(카나리). */
+    unknownSignups30d: number;
+  };
+  /**
+   * ⭐ 원본 응답에 사업자별 분해가 **실제로 있었는가**.
+   *   false 면 화면은 그 패널을 아예 그리지 않는다 — 구버전 .NET(미배포)에서 0으로 채운 기본값을
+   *   "네이버 0건 = 고장"으로 잘못 읽지 않게 하기 위함이다(a0PathsPresent 와 같은 이유).
+   */
+  byProviderPresent: boolean;
+  /** 첫 기록 시각(UTC ISO). "" = 아직 한 건도 없음(스위치 OFF 이거나 켠 직후). */
+  firstSignupEventAt: string;
+};
+
+/** 한 사업자(카카오·네이버)의 커버리지 조각. 비율은 분모 0 이면 null. */
+export type ProviderCoverage = {
+  signups30d: number;
+  withHistory30d: number;
+  historyRate: number | null;
+  crossCheckBase30d: number;
+  crossCheckMatch30d: number;
+  crossCheckRate: number | null;
+};
+
 export type HealthNormalized = {
   views24h: number;
   identified24h: number;
@@ -167,6 +294,20 @@ export type SnapshotNormalized = {
   a0: A0Row[];
   /** ⭐ scope 별 실인원(과정 간 중복 제거). "N명" 자리는 전부 이 값. */
   peopleTotals: PeopleTotals;
+  /** ⭐ A0 경로별 실인원(배타) — 합이 peopleTotals.A0.total 과 같아야 한다. */
+  a0Paths: A0PathTotals;
+  /**
+   * ⭐ 원본 응답에 `a0Paths` 가 **실제로 있었는가**.
+   *
+   *   왜 필요한가: 위 `a0Paths` 는 없을 때 0 으로 채운 기본값이 들어간다. 그런데 화면은 "경로별 합 ≠
+   *   A0 총계"를 **분류 고장**으로 보고 빨간 경고를 띄운다. GeoTracker 가 .NET 보다 **먼저 배포되면**
+   *   구버전 서버는 이 필드를 아예 안 보내므로 합이 0 이 되고, 총계는 0 이 아니라서 **아무 문제도 없는데
+   *   "분류에 문제가 있으니 알려 주세요"** 가 뜬다. 사장님이 없는 고장을 신고하시게 된다.
+   *   ⇒ 이 플래그가 false 면 화면은 경로 패널과 그 경고를 **아예 그리지 않는다**(값을 지어내지 않는다).
+   */
+  a0PathsPresent: boolean;
+  /** ⭐ 가입 순간 기록 커버리지 — 화면 상시 표시. */
+  signupCoverage: SignupCoverage;
   health: HealthNormalized;
   /** 진단 사다리 — 단조 감소. 표준 순서로 정렬됨. */
   diagnostics: StepRow[];
@@ -236,6 +377,77 @@ function safeStep(v: unknown): AbandonerStep | null {
 function safeSideMetric(v: unknown): AbandonerSideMetric | null {
   const s = typeof v === "string" ? v.trim() : "";
   return (ABANDONER_SIDE_METRICS as readonly string[]).includes(s) ? (s as AbandonerSideMetric) : null;
+}
+
+function safeA0Path(v: unknown): AbandonerA0Path | null {
+  const s = typeof v === "string" ? v.trim() : "";
+  return (ABANDONER_A0_PATHS as readonly string[]).includes(s) ? (s as AbandonerA0Path) : null;
+}
+
+/** 3개 경로를 0 으로 채운 기본값 — .NET 이 한 경로를 안 보내도 UI 가 undefined 를 만나지 않는다. */
+function emptyA0PathTotals(): A0PathTotals {
+  return {
+    identified: { total: 0, sendable: 0 },
+    signupHistory: { total: 0, sendable: 0 },
+    sameSession: { total: 0, sendable: 0 },
+  };
+}
+
+/** 사업자 조각 기본값. */
+function emptyProviderCoverage(): ProviderCoverage {
+  return {
+    signups30d: 0,
+    withHistory30d: 0,
+    historyRate: null,
+    crossCheckBase30d: 0,
+    crossCheckMatch30d: 0,
+    crossCheckRate: null,
+  };
+}
+
+/** 한 사업자의 커버리지 조각을 raw 에서 만든다(비율은 분모 0 이면 null). */
+function makeProviderCoverage(
+  signups: unknown,
+  withHistory: unknown,
+  base: unknown,
+  match: unknown,
+): ProviderCoverage {
+  const signups30d = safeInt(signups);
+  const withHistory30d = safeInt(withHistory);
+  const crossCheckBase30d = safeInt(base);
+  const crossCheckMatch30d = safeInt(match);
+  return {
+    signups30d,
+    withHistory30d,
+    historyRate: signups30d > 0 ? withHistory30d / signups30d : null,
+    crossCheckBase30d,
+    crossCheckMatch30d,
+    crossCheckRate: crossCheckBase30d > 0 ? crossCheckMatch30d / crossCheckBase30d : null,
+  };
+}
+
+/** 커버리지 기본값 — 스위치 OFF·미배포 상태에서도 UI 가 undefined 를 만나지 않는다. */
+function emptySignupCoverage(): SignupCoverage {
+  return {
+    newMembers30d: 0,
+    signupEvents30d: 0,
+    signupIdentified30d: 0,
+    signupWithHistory30d: 0,
+    identifiedRate: null,
+    historyRate: null,
+    crossCheckBase30d: 0,
+    crossCheckMatch30d: 0,
+    crossCheckRate: null,
+    crossCheckOver30d: 0,
+    crossCheckOverRate: null,
+    byProvider: {
+      kakao: emptyProviderCoverage(),
+      naver: emptyProviderCoverage(),
+      unknownSignups30d: 0,
+    },
+    byProviderPresent: false,
+    firstSignupEventAt: "",
+  };
 }
 
 /** 5개 scope 를 0 으로 채운 기본값 — .NET 이 한 scope 를 안 보내도 UI 가 undefined 를 만나지 않는다. */
@@ -338,6 +550,61 @@ export function normalizeSnapshot(raw: SnapshotRaw | null | undefined): Snapshot
     peopleTotals[scope] = { total: safeInt(r.total), sendable: safeInt(r.sendable) };
   }
 
+  // ⭐ A0 경로별 실인원 — 3개 키를 0 으로 깔아두고 .NET 이 보낸 경로만 덮는다.
+  //    화이트리스트 밖('unknown' 등)은 버린다 → 합이 A0 총계와 어긋나 화면이 경고한다(의도).
+  //    ⚠️ 단, **필드 자체가 없는 경우**(구버전 .NET)와 구분해야 한다 — 그건 고장이 아니라 미배포다.
+  //       a0PathsPresent 로 갈라 UI 가 없는 값을 지어내거나 거짓 경고를 띄우지 않게 한다.
+  const a0PathsPresent = Array.isArray(env.a0Paths);
+  const a0Paths = emptyA0PathTotals();
+  for (const r of a0PathsPresent ? (env.a0Paths as PathTotalRaw[]) : []) {
+    const path = safeA0Path(r.path);
+    if (!path) continue;
+    a0Paths[path] = { total: safeInt(r.total), sendable: safeInt(r.sendable) };
+  }
+
+  // 가입 기록 커버리지 — 비율은 여기서 계산한다(분모 0 이면 null · UI 가 "—" 로 표시).
+  const cov = env.signupCoverage ?? {};
+  const newMembers30d = safeInt(cov.newMembers30d);
+  const signupIdentified30d = safeInt(cov.signupIdentified30d);
+  const signupWithHistory30d = safeInt(cov.signupWithHistory30d);
+  const crossCheckBase30d = safeInt(cov.crossCheckBase30d);
+  const crossCheckMatch30d = safeInt(cov.crossCheckMatch30d);
+  const crossCheckOver30d = safeInt(cov.crossCheckOver30d);
+  // 사업자별 분해가 응답에 실제로 있었는지 — 없으면(구버전 .NET) 화면이 패널을 안 그린다.
+  //   ⚠️ 0 으로 채운 기본값을 "네이버 0건 = 고장"으로 읽으면 없는 고장을 신고하시게 된다.
+  const byProviderPresent =
+    cov.kakaoSignups30d !== undefined || cov.naverSignups30d !== undefined;
+  const signupCoverage: SignupCoverage = {
+    newMembers30d,
+    signupEvents30d: safeInt(cov.signupEvents30d),
+    signupIdentified30d,
+    signupWithHistory30d,
+    identifiedRate: newMembers30d > 0 ? signupIdentified30d / newMembers30d : null,
+    historyRate: signupIdentified30d > 0 ? signupWithHistory30d / signupIdentified30d : null,
+    crossCheckBase30d,
+    crossCheckMatch30d,
+    crossCheckRate: crossCheckBase30d > 0 ? crossCheckMatch30d / crossCheckBase30d : null,
+    crossCheckOver30d,
+    crossCheckOverRate: crossCheckBase30d > 0 ? crossCheckOver30d / crossCheckBase30d : null,
+    byProvider: {
+      kakao: makeProviderCoverage(
+        cov.kakaoSignups30d,
+        cov.kakaoWithHistory30d,
+        cov.kakaoCrossCheckBase30d,
+        cov.kakaoCrossCheckMatch30d,
+      ),
+      naver: makeProviderCoverage(
+        cov.naverSignups30d,
+        cov.naverWithHistory30d,
+        cov.naverCrossCheckBase30d,
+        cov.naverCrossCheckMatch30d,
+      ),
+      unknownSignups30d: safeInt(cov.unknownProviderSignups30d),
+    },
+    byProviderPresent,
+    firstSignupEventAt: safeIso(cov.firstSignupEventAt),
+  };
+
   // .NET 은 사다리와 별도 지표를 **한 리스트**로 보낸다 — 두 화이트리스트로 갈라 담는다(M-1).
   const diagnostics: StepRow[] = [];
   const sideMetrics: SideMetrics = { consent: 0, checkoutOnly: 0 };
@@ -361,6 +628,9 @@ export function normalizeSnapshot(raw: SnapshotRaw | null | undefined): Snapshot
     buckets,
     a0,
     peopleTotals,
+    a0Paths,
+    a0PathsPresent,
+    signupCoverage,
     health: normalizeHealth(env.health),
     diagnostics,
     sideMetrics,

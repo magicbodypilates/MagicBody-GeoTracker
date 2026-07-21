@@ -33,6 +33,46 @@ type PeopleCount = { total: number; sendable: number };
 /** scope 별 실인원 — 과정 간 중복 제거. "N명" 자리는 전부 여기서 읽는다(과정별 행을 더하지 않는다). */
 type PeopleTotals = Record<Bucket, PeopleCount>;
 type SideMetrics = { consent: number; checkoutOnly: number };
+/** A0 를 어느 경로로 확인했는지 — 배타 분류라 **더해도 되는** 값이다(합 = A0 실인원). */
+type A0Path = "identified" | "signupHistory" | "sameSession";
+type A0PathTotals = Record<A0Path, PeopleCount>;
+/** 가입 순간 기록 커버리지 — 화면이 스스로 한계를 드러내기 위한 값. */
+type SignupCoverage = {
+  newMembers30d: number;
+  signupEvents30d: number;
+  signupIdentified30d: number;
+  signupWithHistory30d: number;
+  identifiedRate: number | null;
+  historyRate: number | null;
+  /** 지표 ④ 서버 대조 정합률 — 분모(맞대어 볼 수 있는 표본 수). */
+  crossCheckBase30d: number;
+  /** 지표 ④ 분자(실제로 일치한 수). */
+  crossCheckMatch30d: number;
+  /** 지표 ④ 비율. 표본이 0이면 null — 화면은 "아직 확인할 수 없다"고 말한다(비율을 지어내지 않는다). */
+  crossCheckRate: number | null;
+  /** 지표 ⑤ 초과 주장 건수 — 서버 기록에 **없는** 과정을 이력이 주장한 행 수(게이트 G12 나머지 절반). */
+  crossCheckOver30d: number;
+  /** 지표 ⑤ 비율. */
+  crossCheckOverRate: number | null;
+  /** 사업자별 분해 — 카카오·네이버는 내부 동작이 달라 합치면 서로를 가린다(게이트 G5c). */
+  byProvider: {
+    kakao: ProviderCoverage;
+    naver: ProviderCoverage;
+    unknownSignups30d: number;
+  };
+  /** 응답에 사업자별 분해가 실제로 있었는가 — false 면 패널을 그리지 않는다(구버전 서버 대비). */
+  byProviderPresent: boolean;
+  firstSignupEventAt: string;
+};
+/** 한 사업자의 커버리지 조각. */
+type ProviderCoverage = {
+  signups30d: number;
+  withHistory30d: number;
+  historyRate: number | null;
+  crossCheckBase30d: number;
+  crossCheckMatch30d: number;
+  crossCheckRate: number | null;
+};
 type Health = {
   views24h: number;
   identified24h: number;
@@ -51,6 +91,10 @@ type Snapshot = {
   /** ⚠️ 위와 동일. */
   a0: A0Row[];
   peopleTotals: PeopleTotals;
+  a0Paths: A0PathTotals;
+  /** 원본 응답에 a0Paths 가 실제로 있었는가 — false 면 경로 패널·합 경고를 그리지 않는다(reviewer M2). */
+  a0PathsPresent: boolean;
+  signupCoverage: SignupCoverage;
   health: Health;
   diagnostics: StepRow[];
   sideMetrics: SideMetrics;
@@ -84,6 +128,26 @@ const BUCKET_META: Record<Bucket, { label: string; hint: string }> = {
 const ORDER: Bucket[] = ["B1", "B2", "B3", "B4"];
 
 /**
+ * A0 경로 라벨 — "어떻게 확인한 분인가"를 사장님 말로 적는다(기술 용어 금지).
+ *   순서 = 확실한 순서. 한 회원은 정확히 한 칸에만 들어가므로 **세로로 더하면 A0 총계**가 된다.
+ */
+const A0_PATH_ORDER: A0Path[] = ["identified", "signupHistory", "sameSession"];
+const A0_PATH_META: Record<A0Path, { label: string; hint: string }> = {
+  identified: {
+    label: "로그인한 채로 보신 분",
+    hint: "회원으로 로그인한 상태에서 그 과정을 보셨습니다 — 가장 확실합니다(원래도 잡히던 분).",
+  },
+  signupHistory: {
+    label: "가입할 때 확인된 분",
+    hint: "가입하시는 순간, 그 브라우저에 남아 있던 '최근 본 과정'으로 확인했습니다(이번에 새로 잡히는 분).",
+  },
+  sameSession: {
+    label: "가입한 그 방문에서 이어진 분",
+    hint: "가입하신 그 방문에 남아 있던 기록으로 이었습니다(이번에 새로 잡히는 분).",
+  },
+};
+
+/**
  * 필터가 바뀐 뒤 실제로 조회하기까지 기다리는 시간(ms).
  *
  * 왜 필요한가: 필터 상태가 바뀔 때마다 조회가 나가는데, 과정 ID 는 **타이핑**하는 값이라
@@ -97,9 +161,37 @@ const ORDER: Bucket[] = ["B1", "B2", "B3", "B4"];
  */
 const DEBOUNCE_MS = 350;
 
-/** 사다리 4단 — 밑변이 "그 과정을 본 회원" 하나라 단조 감소한다(위아래를 비교해 읽어도 되는 줄들). */
+/** 사업자 조각 기본값(스위치 OFF·구버전 서버 대비). */
+const EMPTY_PROVIDER: ProviderCoverage = {
+  signups30d: 0,
+  withHistory30d: 0,
+  historyRate: null,
+  crossCheckBase30d: 0,
+  crossCheckMatch30d: 0,
+  crossCheckRate: null,
+};
+
+/**
+ * 사업자 라벨 — 사장님 말로 적는다.
+ * ⚠️ 두 줄을 **따로** 보여드리는 이유: 카카오는 우리 서버를 바로 부르고 네이버는 중간 서버를 한 번 더
+ *    거친다. 동작이 달라서 한쪽만 고장 나는 일이 실제로 가능한데, 합쳐 놓으면 다른 쪽 숫자에 묻혀
+ *    보이지 않는다. 특히 **한쪽이 0건이면 그 자체가 고장 신호**다(계획 §9-5).
+ */
+const PROVIDER_LABEL: Record<"kakao" | "naver", string> = {
+  kakao: "카카오로 가입",
+  naver: "네이버로 가입",
+};
+
+/**
+ * 사다리 4단 — 밑변이 "그 과정을 본 회원" 하나라 단조 감소한다(위아래를 비교해 읽어도 되는 줄들).
+ *
+ * ⚠️ 첫 줄 라벨을 2026-07-21 에 고쳤다. 서버의 `viewedIdentified` 단계는 **경로 3종**(①로그인 조회
+ *    ②가입할 때 확인 ③가입한 그 방문)의 합집합을 센다. 옛 라벨 "그 과정을 본 회원 (식별됨)"은
+ *    ①만 세는 것처럼 읽혀, 아래 경로별 표와 같은 값을 보면서 사장님이 서로 다른 뜻으로 이해하시게 된다.
+ *    키(=서버와의 계약)는 그대로 두고 **보이는 말만** 실제 의미로 맞췄다.
+ */
 const STEP_LABEL: Record<string, string> = {
-  viewedIdentified: "그 과정을 본 회원 (식별됨)",
+  viewedIdentified: "그 과정을 본 회원 (연결 확인된 분 전체)",
   userJoined: "회원 정보 연결 성공",
   unpaid: "그 과정 미결제",
   bucketed: "최종 (버킷 배정)",
@@ -302,6 +394,40 @@ export function RetargetAbandonerTab() {
   const a0People = snapshot?.peopleTotals.A0 ?? { total: 0, sendable: 0 };
   const blindspotPeople = snapshot?.peopleTotals.B4.total ?? 0;
 
+  /** 가입 순간 기록 커버리지(없으면 0으로 채운 기본값 — 스위치 OFF·구버전 서버 대비). */
+  const cov: SignupCoverage = snapshot?.signupCoverage ?? {
+    newMembers30d: 0,
+    signupEvents30d: 0,
+    signupIdentified30d: 0,
+    signupWithHistory30d: 0,
+    identifiedRate: null,
+    historyRate: null,
+    crossCheckBase30d: 0,
+    crossCheckMatch30d: 0,
+    crossCheckRate: null,
+    crossCheckOver30d: 0,
+    crossCheckOverRate: null,
+    byProvider: {
+      kakao: EMPTY_PROVIDER,
+      naver: EMPTY_PROVIDER,
+      unknownSignups30d: 0,
+    },
+    byProviderPresent: false,
+    firstSignupEventAt: "",
+  };
+
+  /**
+   * "언제부터 쌓인 기록인가" — **날짜를 코드에 박지 않는다**(plan-v2 L2).
+   *   첫 기록 시각을 서버에서 받아 그대로 쓴다. 한 건도 없으면 "" → 배너가 "아직 켜지 않았다"로 말한다.
+   *   ⚠️ 하드코딩하면 스위치를 켠 날과 어긋나는 순간 화면이 거짓을 말하고, 아무도 알아채지 못한다.
+   */
+  const signupSince = cov.firstSignupEventAt ? fmtKst(cov.firstSignupEventAt, false) : "";
+
+  /** 경로별 합 — 배타 분류라 A0 총계와 **같아야** 한다. 다르면 화면이 경고한다(게이트 G11). */
+  const a0PathSum = snapshot
+    ? A0_PATH_ORDER.reduce((acc, k) => acc + snapshot.a0Paths[k].total, 0)
+    : 0;
+
   return (
     <div className="space-y-5">
       {/* ── 컨트롤 바 ── */}
@@ -361,13 +487,24 @@ export function RetargetAbandonerTab() {
           ))}
         </div>
 
-        <label className="flex items-center gap-1 text-xs text-th-text-secondary">
+        {/*
+          ⚠️ **"발송 가능만"이라고 쓰지 않는다** (2026-07-21 · reviewer H2-a · 표 헤더와 어휘 통일).
+             회원 정보에 수신동의 표시가 있다는 것과 "지금 광고를 보내도 된다"는 것은 다르다.
+             이 화면 다른 곳(A0 헤드라인·표 헤더)은 이미 "수신동의 표시"로 고쳤는데 이 체크박스만
+             옛 말이 남아 있어, 같은 값을 두 이름으로 부르고 있었다.
+             ⚠️ 내부 상태명(consentOnly)과 API 파라미터는 **그대로 둔다** — 서버와의 계약이라 바꾸면
+                양쪽 동시 배포가 필요한데, 얻는 것이 없다(보이는 말만 고치면 되는 문제였다).
+        */}
+        <label
+          className="flex items-center gap-1 text-xs text-th-text-secondary"
+          title="회원 정보에 수신동의 표시가 있는 분. 보내도 된다는 뜻은 아닙니다."
+        >
           <input
             type="checkbox"
             checked={consentOnly}
             onChange={(e) => setConsentOnly(e.target.checked)}
           />
-          발송 가능만
+          수신동의 표시만
         </label>
 
         <button
@@ -401,7 +538,7 @@ export function RetargetAbandonerTab() {
             <>
               <span className="text-xl font-bold">{a0People.total}명</span>{" "}
               <span className="text-sm font-normal text-th-text-secondary">
-                (발송 가능 {a0People.sendable}명)
+                (수신동의 표시가 있는 분 {a0People.sendable}명)
               </span>
             </>
           ) : (
@@ -410,27 +547,220 @@ export function RetargetAbandonerTab() {
             </span>
           )}
         </h3>
+        {/*
+          ⚠️ **"발송 가능"이라고 쓰지 않는다** (plan-v3 §8-3 "1단계 후" · D8 · 2026-07-21).
+             회원 정보에 수신동의 표시가 있다는 것과 "지금 광고를 보내도 된다"는 것은 다르다 —
+             그 표시는 **동의를 켜지 않으면 사이트를 쓸 수 없던 구조**에서 쌓인 것이고(계획 §2 실측:
+             거부 상태인 회원이 2,266명 중 0명), 언제·어떤 문구로 받았는지 기록이 없다.
+             "발송 가능 N명"이라고 적으면 사장님이 2단계(동의 구조 정상화) 전에 보내셔도 되는 것으로
+             읽으신다. 그래서 **사실 그대로의 라벨**로 바꾸고 아래 한 줄로 조건을 밝힌다.
+             ⇒ 2A 배포 후에는 §8-3 "2A 후" 문구("근거 기록 있음 M명 · 근거 불명 K명")로 다시 바꾼다.
+        */}
+        <p className="mt-1 text-[11px] text-th-warning">
+          ※ 수신동의를 <strong className="text-th-text">언제 어떤 문구로 받았는지 기록이 없어</strong>,
+          실제로 보내시기 전에 확인이 필요합니다.
+        </p>
         <div className="mt-2 space-y-1 text-[11px] leading-relaxed text-th-text-secondary">
+          {/*
+            ⚠️ 이 문단들은 화면이 **스스로 한계를 밝히는** 자리다(게이트 G8·R2).
+               기능이 바뀌면 여기도 같은 커밋에서 함께 고칠 것 — 안 고치면 화면이 사장님께 거짓을 말한다.
+               2026-07-21: "가입 전 비로그인 조회는 연결되지 않습니다"를 교체했다. 가입 순간 기록이
+               생기면서 그 문장이 사실이 아니게 됐기 때문이다(plan-v3 §4 1단계).
+          */}
           <p>
-            <strong className="text-th-text">가입 전에 비로그인으로 본 조회는 연결되지 않습니다.</strong>{" "}
-            조회 당시에는 누구인지 알 수 없기 때문입니다 — 회원 식별 수집을 켜도 이 한계는 그대로입니다.
-            즉 여기 숫자는 <strong className="text-th-text">가입 후 로그인 상태로 (다시) 본 회원</strong>만
-            센 <strong className="text-th-text">하한선</strong>입니다. 실제로는 이보다 많습니다.
+            <strong className="text-th-text">확인된 범위입니다.</strong> 빠진 분도, 잘못 들어온 분도 있을 수 있습니다.
+            {signupSince ? (
+              <>
+                {" "}
+                가입 전에 비로그인으로 보신 기록은{" "}
+                <strong className="text-th-text">{signupSince}부터</strong> 쌓인 것만 반영됩니다 — 그 이전 것은
+                남아 있지 않아 되살릴 수 없습니다.
+              </>
+            ) : (
+              <>
+                {" "}
+                <strong className="text-th-text">
+                  가입 전 비로그인 조회를 잇는 기능은 아직 켜지 않았습니다.
+                </strong>{" "}
+                지금 숫자는 로그인한 채로 보신 분만 센 것입니다.
+              </>
+            )}
           </p>
           <p>
-            회원 식별 수집은 <strong className="text-th-text">2026-07-17에 켰습니다</strong> — 그 이전 조회는
-            전부 익명이라 소급되지 않습니다. 당분간 이 숫자가 0이거나 매우 적은 것은 고장이 아니라 그 때문입니다
-            (수집이 살아있는지는 아래 &lsquo;수집 상태&rsquo;에서 따로 확인하세요).
+            <strong className="text-th-text">다른 기기·시크릿 모드는 잡히지 않습니다.</strong> &lsquo;최근 본 과정&rsquo;은
+            그 손님이 보던 브라우저 안에만 2주 동안 남기 때문입니다. 그리고 그 목록에는{" "}
+            <strong className="text-th-text">본 시각이 없어</strong>, 가입하신 시점에 보신 것으로 계산합니다 —
+            조회 기간이 실제보다 최대 2주 넓게 잡힐 수 있습니다.
           </p>
           <p>
             &lsquo;결제 이력이 전혀 없음&rsquo;은 취소·미완 주문도 없는 경우를 말합니다 — 2차 대기명단(§G1)과 같은 기준입니다.
           </p>
+          {/*
+            ⚠️ 자기 고지 (reviewer M8 · 게이트 G8 "화면이 스스로 한계를 드러낸다").
+               경로 ②(가입할 때 확인된 분)는 열람 이력에 **조회 횟수가 없어** 조회 1회로 고정 계산된다.
+               그래서 그분들은 아래 '반복 조회(B2)' 칸에 **원리적으로 절대 들어가지 않는다.**
+               이걸 안 밝히면 사장님이 "반복해서 본 분이 이렇게 적나?"를 관심도가 낮은 것으로 오해하신다.
+          */}
           <p>
-            <strong className="text-th-text">결제창까지 갔던 기록도 회원 식별을 켠 뒤(2026-07-17)의 것만 보입니다.</strong>{" "}
-            그 이전에 결제창에 갔던 회원은 &lsquo;아무것도 안 함&rsquo;으로 읽혀 여기 포함될 수 있습니다 — 위의 다른 한계들이
+            <strong className="text-th-text">
+              &lsquo;가입할 때 확인된 분&rsquo;은 &lsquo;반복 조회&rsquo;로 분류되지 않습니다.
+            </strong>{" "}
+            그 목록에는 몇 번 보셨는지가 없어 <strong className="text-th-text">1회로 계산</strong>하기 때문입니다 —
+            실제로 여러 번 보셨더라도 아래 &lsquo;반복 조회&rsquo; 칸에는 들어가지 않습니다.
+          </p>
+          <p>
+            <strong className="text-th-text">결제창까지 갔던 기록은 회원 식별을 켠 뒤(2026-07-17)의 것만 보입니다.</strong>{" "}
+            그 이전에 결제창에 갔던 회원은 &lsquo;아무것도 안 함&rsquo;으로 읽혀 여기 포함될 수 있습니다 — 다른 한계들이
             숫자를 줄이는 것과 달리 이 한 가지만은 <strong className="text-th-text">늘리는</strong> 방향입니다.
           </p>
         </div>
+
+        {/* ── 경로별 인원 — "어느 쪽 덕분에 늘었나"를 숫자로 가른다(plan-v2 §8-3 · 게이트 G11) ──
+            ⚠️ `a0PathsPresent` 로 막는다 (reviewer M2). 이 패널은 서버가 a0Paths 를 보낼 때만 의미가 있다.
+               GeoTracker 가 .NET 보다 **먼저 배포되면** 구버전 서버는 그 필드를 안 보내고, 정규화가 0 으로
+               채운 값 때문에 "합(0) ≠ 전체(N)" 이 되어 **아무 문제도 없는데 빨간 경고**가 뜬다.
+               사장님이 없는 고장을 신고하시게 되므로, 필드가 없으면 패널 자체를 그리지 않는다. */}
+        {snapshot && snapshot.a0PathsPresent && (
+          <div className="mt-3 rounded-md border border-th-border-subtle bg-th-card/50 p-3">
+            <p className="mb-2 text-[11px] font-medium text-th-text">이 {a0People.total}명을 어떻게 확인했나</p>
+            <div className="space-y-1">
+              {A0_PATH_ORDER.map((k) => (
+                <div key={k} className="flex items-baseline justify-between gap-2 text-[11px]">
+                  <span className="text-th-text-secondary" title={A0_PATH_META[k].hint}>
+                    {A0_PATH_META[k].label}
+                  </span>
+                  <span className="font-mono text-th-text">
+                    {snapshot.a0Paths[k].total}명{" "}
+                    <span className="text-th-text-muted">
+                      (수신동의 표시 {snapshot.a0Paths[k].sendable}명)
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            {/*
+              합이 총계와 다르면 **숨기지 않고 드러낸다.** 배타 분류라 원래 같아야 하고,
+              다르다는 것은 분류가 깨졌다는 뜻이다(서버가 'unknown' 을 보낸 경우 등).
+            */}
+            {a0PathSum !== a0People.total && (
+              <p className="mt-2 text-[11px] text-th-danger">
+                ⚠️ 경로별 합({a0PathSum}명)이 전체({a0People.total}명)와 다릅니다 — 분류에 문제가 있으니
+                이 표는 참고만 하시고 알려 주세요.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* ── 커버리지 상시 표시 — 화면이 스스로 "얼마나 잡고 있는가"를 밝힌다 ── */}
+        {snapshot && (
+          <div className="mt-2 space-y-1 text-[11px] text-th-text-muted">
+            <p>
+              최근 30일 새로 가입하신 <strong className="text-th-text">{cov.newMembers30d}명</strong> 가운데{" "}
+              <strong className="text-th-text">{cov.signupIdentified30d}명</strong>은 가입 순간에 회원 연결까지
+              확인됐습니다{cov.identifiedRate != null ? ` (${fmtPct(cov.identifiedRate)})` : ""}. 그중{" "}
+              <strong className="text-th-text">{cov.signupWithHistory30d}명</strong>은 &lsquo;최근 본 과정&rsquo;까지
+              함께 들어왔습니다{cov.historyRate != null ? ` (${fmtPct(cov.historyRate)})` : ""}.
+              {cov.signupIdentified30d === 0 && (
+                <> 아직 한 건도 없다면 기능이 켜지지 않았거나 켠 직후일 수 있습니다.</>
+              )}
+            </p>
+            {/*
+              ⚠️ 분모 오염 고지 (reviewer H3). 위 비율의 분모(신규 가입 회원)에는 소셜 로그인이 아닌
+                 경로로 만들어진 회원도 섞인다 — 그분들은 애초에 이 기록을 만들지 않으므로 비율이
+                 구조적으로 100%에 못 미친다. 안 밝히면 정상인데 고장으로 읽히고, 반대로 진짜 고장일 때도
+                 "원래 그런가 보다"로 넘어간다. 두 방향 모두 위험해서 화면이 먼저 말한다.
+            */}
+            <p>
+              ※ 위 비율의 기준이 되는 &lsquo;새로 가입하신 분&rsquo;에는{" "}
+              <strong className="text-th-text">카카오·네이버가 아닌 방법으로 만들어진 계정</strong>도 포함됩니다.
+              그런 계정은 이 기록을 남기지 않으므로 비율은 100%까지 오르지 않는 것이 정상입니다.
+            </p>
+            {/*
+              ⭐ 지표 ④ 서버 대조 정합률 (plan-v2 §9-3 · §13 S5 · reviewer H1).
+                 경로 ②는 "브라우저가 그렇게 주장했다"까지만 보증한다. 이 줄이 그 주장을 **서버가 직접 남긴
+                 기록**과 맞대 본 결과다 — 이번 작업으로 늘어난 명단이 진짜인지 확인하는 유일한 장치.
+                 표본이 0이면 "아직 확인할 수 없다"고 정직하게 말한다(비율을 지어내지 않는다).
+            */}
+            <p>
+              {cov.crossCheckBase30d > 0 ? (
+                <>
+                  같은 방문에 우리 서버 기록이 함께 남은{" "}
+                  <strong className="text-th-text">{cov.crossCheckBase30d}건</strong>을 맞대어 보니{" "}
+                  <strong className="text-th-text">{cov.crossCheckMatch30d}건</strong>이 서로 일치했습니다
+                  {cov.crossCheckRate != null ? ` (${fmtPct(cov.crossCheckRate)})` : ""} — 이 값이 높을수록
+                  브라우저가 전해 준 &lsquo;최근 본 과정&rsquo;을 믿을 근거가 커집니다.
+                </>
+              ) : (
+                <>
+                  ※ 브라우저가 전해 준 &lsquo;최근 본 과정&rsquo;을 우리 서버 기록과 맞대어 볼 표본이 아직
+                  없습니다 — 대조 결과는 기록이 쌓인 뒤에 표시됩니다.
+                </>
+              )}
+            </p>
+            {/*
+              ⭐ 지표 ⑤ 초과 주장 (plan-v2 §9-3 · 게이트 G12 나머지 절반 · reviewer M-2).
+                 위 줄만으로는 못 잡는 고장이 있다 — 브라우저가 **맞는 과정을 넣으면서 엉뚱한 과정을
+                 더 얹으면** 위 일치율은 100%인데 명단만 오염된다. 그래서 반대 방향도 함께 센다.
+            */}
+            {cov.crossCheckBase30d > 0 && (
+              <p>
+                그중 <strong className="text-th-text">{cov.crossCheckOver30d}건</strong>은 우리 서버 기록에{" "}
+                <strong className="text-th-text">없는 과정</strong>까지 함께 전해 왔습니다
+                {cov.crossCheckOverRate != null ? ` (${fmtPct(cov.crossCheckOverRate)})` : ""} — 이 값이
+                갑자기 올라가면 명단에 엉뚱한 과정이 섞이고 있다는 뜻이니 알려 주세요.
+              </p>
+            )}
+            {/*
+              ⭐ 사업자별 분해 (게이트 G5c · reviewer M-1).
+                 ⚠️ `byProviderPresent` 로 막는다 — 서버가 이 값을 안 보내는 구버전이면 전부 0 으로
+                    채워지는데, 그걸 "네이버 0건 = 고장"으로 읽으면 없는 고장을 신고하시게 된다.
+            */}
+            {cov.byProviderPresent && (
+              <div className="mt-1 rounded-md border border-th-border-subtle bg-th-card/50 p-2">
+                <p className="mb-1 text-[11px] font-medium text-th-text">
+                  가입 방법별로 나눠 보기 (한쪽이 0건이면 그쪽이 고장 난 것입니다)
+                </p>
+                {(["kakao", "naver"] as const).map((k) => {
+                  const pv = cov.byProvider[k];
+                  return (
+                    <div key={k} className="flex items-baseline justify-between gap-2 text-[11px]">
+                      <span className="text-th-text-secondary">{PROVIDER_LABEL[k]}</span>
+                      <span className="font-mono text-th-text">
+                        {pv.signups30d}건
+                        <span className="text-th-text-muted">
+                          {" "}
+                          (최근 본 과정 함께 온 것 {pv.withHistory30d}건
+                          {pv.historyRate != null ? ` · ${fmtPct(pv.historyRate)}` : ""} / 서버 기록과
+                          맞대 본 {pv.crossCheckBase30d}건 중 {pv.crossCheckMatch30d}건 일치
+                          {pv.crossCheckRate != null ? ` · ${fmtPct(pv.crossCheckRate)}` : ""})
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })}
+                {cov.byProvider.kakao.signups30d === 0 && cov.byProvider.naver.signups30d === 0 ? (
+                  <p className="mt-1 text-th-text-muted">
+                    아직 두 방법 모두 기록이 없습니다 — 기능을 켜지 않았거나 켠 직후일 수 있습니다.
+                  </p>
+                ) : (
+                  (cov.byProvider.kakao.signups30d === 0 || cov.byProvider.naver.signups30d === 0) && (
+                    <p className="mt-1 text-th-danger">
+                      ⚠️ 한쪽만 0건입니다 — 그쪽 가입 경로가 기록을 남기지 못하고 있을 가능성이 큽니다.
+                      알려 주세요.
+                    </p>
+                  )
+                )}
+                {cov.byProvider.unknownSignups30d > 0 && (
+                  <p className="mt-1 text-th-warning">
+                    ⚠️ 가입 방법을 알 수 없는 기록이{" "}
+                    <strong className="text-th-text">{cov.byProvider.unknownSignups30d}건</strong>{" "}
+                    있습니다 — 위 두 줄이 그만큼 못 보고 있다는 뜻입니다.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {snapshot && snapshot.a0.length > 0 && (
           <div className="mt-3 overflow-x-auto">
@@ -444,7 +774,10 @@ export function RetargetAbandonerTab() {
                 <tr className="border-b border-th-border text-left text-th-text-muted">
                   <th className="py-1.5">과정</th>
                   <th className="py-1.5 text-right">전체</th>
-                  <th className="py-1.5 text-right">발송 가능</th>
+                  {/* "발송 가능" → 사실 그대로(D8). 위 헤드라인 주석 참조. */}
+                  <th className="py-1.5 text-right" title="회원 정보에 수신동의 표시가 있는 분. 보내도 된다는 뜻은 아닙니다.">
+                    수신동의 표시
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -468,8 +801,12 @@ export function RetargetAbandonerTab() {
           한 회원은 과정마다 <strong className="text-th-text">정확히 한 칸에만</strong> 들어갑니다 — 그래서{" "}
           <strong className="text-th-text">가로 합계</strong>는 항상 맞습니다. 다만 한 회원이 여러 과정을 봤으면 과정마다
           한 번씩 들어가므로 <strong className="text-th-text">세로로는 더하지 마세요</strong> — 실인원보다 크거나 같습니다.
-          각 칸은 <strong className="text-th-text">전체 / 발송 가능</strong>(마케팅 수신동의자)입니다. 실측 수신동의율이
-          약 54%라 두 숫자는 크게 다릅니다.
+          각 칸은 <strong className="text-th-text">전체 / 수신동의 표시가 있는 분</strong>입니다. 실측 수신동의율이
+          약 54%라 두 숫자는 크게 다릅니다.{" "}
+          <strong className="text-th-warning">
+            뒤 숫자는 &lsquo;보내도 되는 분&rsquo;이 아니라 &lsquo;표시가 있는 분&rsquo;입니다
+          </strong>{" "}
+          — 동의를 언제 어떤 문구로 받았는지 기록이 없어 보내시기 전 확인이 필요합니다.
         </p>
 
         {/* ⚠️ 순서 주의 — 실패(!snapshot)를 "없음"보다 **먼저** 판정한다(HIGH-2).

@@ -285,3 +285,88 @@ describe("어휘 SoT", () => {
     expect([...ABANDONER_SIDE_METRICS]).toEqual(["consent", "checkoutOnly"]);
   });
 });
+
+/*
+ * ⭐ 2026-07-21 추가 (reviewer M-4) — 비용이 매우 낮은데 회귀 보호가 없던 세 분기.
+ *   셋 다 "화면이 없는 고장을 신고하게 만드는" 경로라, 조용히 깨지면 사장님이 그 신고를 하시게 된다.
+ */
+describe("normalizeSnapshot — a0PathsPresent 는 '필드 부재'와 '빈 배열'을 가른다", () => {
+  it("필드 자체가 없으면 false — 화면이 경로 패널과 합 경고를 아예 그리지 않는다", () => {
+    // 구버전 .NET(미배포) 상황. 0 으로 채운 기본값 때문에 "합(0) ≠ 전체(N)" 경고가 뜨면
+    // 아무 문제도 없는데 고장으로 읽힌다.
+    const s = normalizeSnapshot({ peopleTotals: [{ scope: "A0", total: 3, sendable: 2 }] });
+    expect(s.a0PathsPresent).toBe(false);
+    expect(s.a0Paths.identified).toEqual({ total: 0, sendable: 0 });
+  });
+
+  it("빈 배열이면 true — 서버가 '경로가 하나도 없다'고 말한 것이라 화면이 그려야 한다", () => {
+    const s = normalizeSnapshot({ a0Paths: [] });
+    expect(s.a0PathsPresent).toBe(true);
+  });
+
+  it("값이 있으면 true 이고 화이트리스트 밖 경로는 버린다(합이 어긋나 화면이 경고한다)", () => {
+    const s = normalizeSnapshot({
+      a0Paths: [
+        { path: "identified", total: 2, sendable: 1 },
+        { path: "unknown", total: 5, sendable: 5 },
+      ],
+    });
+    expect(s.a0PathsPresent).toBe(true);
+    expect(s.a0Paths.identified).toEqual({ total: 2, sendable: 1 });
+    expect(s.a0Paths.signupHistory).toEqual({ total: 0, sendable: 0 });
+  });
+});
+
+describe("normalizeSnapshot — 커버리지 비율은 분모가 0 이면 null", () => {
+  it("crossCheckRate: 표본 0 이면 null (0 으로 만들면 '정합률 0% = 고장'처럼 보인다)", () => {
+    const s = normalizeSnapshot({
+      signupCoverage: { crossCheckBase30d: 0, crossCheckMatch30d: 0 },
+    });
+    expect(s.signupCoverage.crossCheckRate).toBeNull();
+    expect(s.signupCoverage.crossCheckOverRate).toBeNull();
+  });
+
+  it("표본이 있으면 비율을 계산한다(④ 정합률 · ⑤ 초과 주장률)", () => {
+    const s = normalizeSnapshot({
+      signupCoverage: { crossCheckBase30d: 4, crossCheckMatch30d: 3, crossCheckOver30d: 1 },
+    });
+    expect(s.signupCoverage.crossCheckRate).toBeCloseTo(0.75);
+    expect(s.signupCoverage.crossCheckOverRate).toBeCloseTo(0.25);
+  });
+
+  it("byProviderPresent: 사업자 칸이 없으면 false — '네이버 0건 = 고장' 오독을 막는다", () => {
+    const s = normalizeSnapshot({ signupCoverage: { newMembers30d: 10 } });
+    expect(s.signupCoverage.byProviderPresent).toBe(false);
+    expect(s.signupCoverage.byProvider.naver.signups30d).toBe(0);
+  });
+
+  it("byProviderPresent: 한쪽만 와도 true 이고 비율이 계산된다", () => {
+    const s = normalizeSnapshot({
+      signupCoverage: {
+        kakaoSignups30d: 4,
+        kakaoWithHistory30d: 2,
+        kakaoCrossCheckBase30d: 2,
+        kakaoCrossCheckMatch30d: 1,
+        naverSignups30d: 0,
+      },
+    });
+    expect(s.signupCoverage.byProviderPresent).toBe(true);
+    expect(s.signupCoverage.byProvider.kakao.historyRate).toBeCloseTo(0.5);
+    expect(s.signupCoverage.byProvider.kakao.crossCheckRate).toBeCloseTo(0.5);
+    expect(s.signupCoverage.byProvider.naver.historyRate).toBeNull();
+  });
+});
+
+describe("normalizeSnapshot — 화이트리스트 밖 진단 단계는 버린다", () => {
+  it("모르는 step 은 사다리에도 별도 지표에도 안 들어간다(합 불일치로 드러난다)", () => {
+    const s = normalizeSnapshot({
+      diagnostics: [
+        { step: "unpaid", people: 5 },
+        { step: "somethingNew", people: 99 },
+        { step: "consent", people: 3 },
+      ],
+    });
+    expect(s.diagnostics.map((d) => d.step)).toEqual(["unpaid"]);
+    expect(s.sideMetrics).toEqual({ consent: 3, checkoutOnly: 0 });
+  });
+});

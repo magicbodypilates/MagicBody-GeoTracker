@@ -1,0 +1,50 @@
+name: Rotate Bright Data key (manual)
+
+# 수동 트리거 전용 — 운영 서버 .env 의 BRIGHT_DATA_KEY 를 교체하고 컨테이너 재기동.
+# 키 값은 워크플로 입력(secret 처리)으로만 전달하며 저장소·로그에 남기지 않는다.
+# 교체 전 .env 백업 생성. 실패 시 백업으로 되돌릴 수 있다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_key:
+        description: '새 Bright Data API 키'
+        required: true
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: SSH to Azure VM and rotate key
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        env:
+          NEW_KEY: ${{ inputs.new_key }}
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 10m
+          envs: NEW_KEY
+          script: |
+            set -e
+            cd /datadrive/apps/geo-tracker
+            test -f .env || { echo ".env 없음 — 중단"; exit 1; }
+            cp .env ".env.bak-$(date +%Y%m%d-%H%M%S)"
+            echo "백업 생성 완료"
+            if grep -q '^BRIGHT_DATA_KEY=' .env; then
+              # 기존 줄 교체 (키 값은 출력하지 않음)
+              awk -v k="$NEW_KEY" '/^BRIGHT_DATA_KEY=/{print "BRIGHT_DATA_KEY=" k; next} {print}' .env > .env.tmp
+              mv .env.tmp .env
+              echo "BRIGHT_DATA_KEY 교체 완료"
+            else
+              echo "BRIGHT_DATA_KEY=$NEW_KEY" >> .env
+              echo "BRIGHT_DATA_KEY 신규 추가"
+            fi
+            # 마스킹 확인(앞 4자만)
+            echo "적용된 키(앞 4자): $(grep '^BRIGHT_DATA_KEY=' .env | cut -d= -f2 | cut -c1-4)****"
+            docker compose up -d --force-recreate mbd-geo-tracker
+            echo "컨테이너 재기동 완료"

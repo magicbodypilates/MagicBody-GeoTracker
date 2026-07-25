@@ -36,8 +36,9 @@ export type AbandonerStep = (typeof ABANDONER_STEPS)[number];
 
 /**
  * 사다리 **밖** 별도 지표 — .NET diagSql 이 같은 리스트에 담아 보내지만 의미가 다르다.
- *   · consent      — 수신동의로 좁힌 값. A0·버킷은 snsagree 를 일부러 안 건다(사장님 요구가 "발송"이
- *                    아니라 "구분"이라서) → 사다리에 끼우면 아랫줄이 더 커진다.
+ *   · consent      — 광고(마케팅) 수신동의(marketingagree=1)로 좁힌 값. A0·버킷은 marketingagree 를 일부러
+ *                    안 건다(사장님 요구가 "발송"이 아니라 "구분"이라서) → 사다리에 끼우면 아랫줄이 더 커진다.
+ *                    (발송 근거 이관 §5-2 · C3 — 옛 snsagree)
  *   · checkoutOnly — 조회 0회인 결제창 진입자(B1·B4). 표에는 잡히는데 "본 회원" 밑변엔 아예 없다.
  */
 export const ABANDONER_SIDE_METRICS = ["consent", "checkoutOnly"] as const;

@@ -1,8 +1,8 @@
 /**
  * route.test.ts — /api/admin/recalc-visibility 백필 route 실행 경로 계약 테스트.
  *
- * 배경(reviewer M-1): 순수함수(resolveBackfillScore·visibilityPhaseLevel·calcVisibility)는
- *   40케이스로 green 이지만 route 자체(selector·keyset·CAS·preflight·dry-run)는 자동 테스트 0건이었다.
+ * 배경(reviewer M-1): 순수함수(resolveBackfillScore·applyRampScore·visibilityRampFactor·calcVisibility)는
+ *   순수 테스트로 green 이지만 route 자체(selector·keyset·CAS·preflight·dry-run·ramp)는 자동 테스트 0건이었다.
  *   이 파일이 그 실행 경로를 실제 DB 없이 덮는다.
  *
  * 검증 방식(저장소 컨벤션 = route.test.ts 모듈 모킹):
@@ -10,17 +10,17 @@
  *   - drizzle-orm          : and/eq/gt/gte/lte/asc/sql 등을 "술어 서술자(predicate descriptor)"로
  *                            바꿔, fake db 가 조건을 실제로 평가(selector·keyset 검증 가능).
  *   - @/lib/server/auth-guard : getSession 주입 + requireAdmin 순수 재현(401/403/null).
- *   - 나머지(calcVisibility·resolveBackfillScore·visibilityPhaseLevel·toKstDateKey·buildBrandTerms·
- *     citation-utils)는 실제 함수 그대로 → 경계일 예상 점수를 §3 배점표(=calcVisibility)로 self-check.
+ *   - 나머지(calcVisibility·resolveBackfillScore·applyRampScore·visibilityRampFactor·toKstDateKey·
+ *     buildBrandTerms·citation-utils)는 실제 함수 그대로 → 경계일 예상 점수를 램프 산식으로 self-check.
  *
  * 덮는 항목(계획 §7 Hard Gate / reviewer M-1):
  *   (a) dry-run 은 DB write 를 안 함
- *   (b) selector = score_version=8 AND created_at≥FROZEN 만 선택(07-14 이전·다른 버전 미선택)
+ *   (b) selector = score_version=8 AND created_at≥FROZEN 만 선택(07-11 이전·다른 버전 미선택)
  *   (c) keyset 커서가 anomaly row 도 전진
  *   (d) CAS(WHERE score_version=8)로 중복/동시 실행 시 이중 적용 안 됨(멱등)
  *   (e) 전량 anomaly batch 에서 stalled 오탐 없음(nextCursor 전진 기준)
  *   (f) preflight 가 v8 외 버전 분포 있을 때 clean=false(중단 게이트)
- *   + 경계일(07-13/14/16/18/20) 표본 dry-run 점수가 배점표와 일치, 07-14 이전 표본 불변.
+ *   + 경계일(07-11/13/15/17/19) 표본 dry-run 점수가 램프 산식과 일치, 07-11 이전 표본 불변.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -292,6 +292,7 @@ vi.mock("@/lib/server/auth-guard", () => ({
 // 모킹 이후 import (route 는 위 모듈에 의존).
 import { POST } from "./route";
 import { calcVisibility } from "@/lib/server/automation-runner";
+import { applyRampScore } from "@/lib/server/visibility-backfill";
 
 // ── 공통 픽스처 ──
 const WS_ID = "11111111-1111-1111-1111-111111111111";
@@ -301,22 +302,39 @@ const GEN_PROMPT = "필라테스 학원 추천";
 const GEN_ANSWER = "가".repeat(210) + "요가원 좋아요";
 const BRAND_CONFIG = { brandName: "요가원", brandAliases: "", websites: [] as string[] };
 
-/** 실제 배점 함수로 계산한, 일반·중립·단일언급 run 의 레벨별 기대 점수(topRanked=false). */
+/** 실제 배점 함수로 계산한, 일반·중립·단일언급 run 의 레벨별 점수(topRanked=false). */
 const expectedScore = (level: 0 | 1 | 2 | 3 | 4) =>
   calcVisibility(GEN_ANSWER, ["요가원"], false, false, "neutral", false, false, false, level);
 
 // 저장값(레벨0 기준). topRanked=true 는 50 을 내므로 오직 topRanked=false 조합만 재현 → 목표 유일.
 const STORED = expectedScore(0); // = 35
+// 완전 적용(레벨4) 점수 — 램프 상한.
+const FULL_NEW = expectedScore(4); // = 48
+/** factor 비율로 램프 적용한 기대 점수(route 와 동일한 산식). */
+const ramp = (factor: number) => applyRampScore(STORED, FULL_NEW, factor);
 
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 
-/** KST 경계일 정오(UTC = KST-9h). 07-13 은 frozenBefore(2026-07-13T15:00Z) 이전이라 창 밖. */
+/** KST 경계일 정오(UTC = KST-9h). 07-10 은 frozenBefore(2026-07-10T15:00Z) 이전이라 창 밖. */
 const KST = {
-  d0713: "2026-07-13T03:00:00Z", // KST 07-13 12:00 → frozen 이전(미선택)
-  d0714: "2026-07-14T03:00:00Z", // L1
-  d0716: "2026-07-16T03:00:00Z", // L2
-  d0718: "2026-07-18T03:00:00Z", // L3
-  d0720: "2026-07-20T03:00:00Z", // L4
+  d0710: "2026-07-10T03:00:00Z", // KST 07-10 12:00 → frozen 이전(미선택)
+  d0711: "2026-07-11T03:00:00Z", // factor 0.2
+  d0713: "2026-07-13T03:00:00Z", // factor 0.4
+  d0715: "2026-07-15T03:00:00Z", // factor 0.6
+  d0717: "2026-07-17T03:00:00Z", // factor 0.8
+  d0719: "2026-07-19T03:00:00Z", // factor 1.0
+};
+
+type SeedRow = {
+  id: string;
+  workspaceId: string;
+  promptText: string;
+  answer: string;
+  citations: unknown[];
+  sentiment: string;
+  visibilityScore: number;
+  createdAt: Date;
+  scoreVersion: number;
 };
 
 function seedGenRun(
@@ -324,7 +342,7 @@ function seedGenRun(
   createdIso: string,
   storedScore: number,
   opts: { version?: number } = {},
-): Record<string, unknown> {
+): SeedRow {
   const row = {
     id: id(n),
     workspaceId: WS_ID,
@@ -358,25 +376,30 @@ beforeEach(() => {
   seedWorkspace();
 });
 
-describe("배점표 self-check (전제)", () => {
-  it("저장값·레벨별 기대 점수가 §3 배점표와 일치(회귀 앵커)", () => {
+describe("램프 산식 self-check (전제)", () => {
+  it("저장값·완전 적용 점수 앵커", () => {
     expect(STORED).toBe(35); // L0 baseline
-    expect(expectedScore(1)).toBe(35); // L1: mid 0, neutral 5
-    expect(expectedScore(2)).toBe(35); // L2: mid 0, neutral 5
-    expect(expectedScore(3)).toBe(45); // L3: mid +10
-    expect(expectedScore(4)).toBe(48); // L4: mid +10, neutral 8
+    expect(FULL_NEW).toBe(48); // L4: mid +10, neutral +8 → delta 13
+  });
+  it("경계 factor별 램프 점수(old=35, fullNew=48, delta=13)", () => {
+    expect(ramp(0.2)).toBe(38); // 35+2.6→38
+    expect(ramp(0.4)).toBe(40); // 35+5.2→40
+    expect(ramp(0.6)).toBe(43); // 35+7.8→43
+    expect(ramp(0.8)).toBe(45); // 35+10.4→45
+    expect(ramp(1)).toBe(48); // 완전 적용
   });
 });
 
-describe("(a)(b) dry-run: 무쓰기 + selector + 경계일 점수 + 07-14 이전 불변", () => {
-  it("v8·frozen 이후만 선택하고, dry-run 은 write 없이 배점표 점수를 산출", async () => {
-    const r1 = seedGenRun(1, KST.d0714, STORED); // L1
-    const r2 = seedGenRun(2, KST.d0716, STORED); // L2
-    const r3 = seedGenRun(3, KST.d0718, STORED); // L3
-    const r4 = seedGenRun(4, KST.d0720, STORED); // L4
-    const rFrozen = seedGenRun(5, KST.d0713, STORED); // frozen 이전 → 미선택
-    const rV7 = seedGenRun(6, KST.d0716, STORED, { version: 7 }); // 다른 버전 → 미선택
-    const rV9 = seedGenRun(7, KST.d0716, STORED, { version: 9 }); // 다른 버전 → 미선택
+describe("(a)(b) dry-run: 무쓰기 + selector + 경계일 램프 점수 + 07-11 이전 불변", () => {
+  it("v8·frozen 이후만 선택하고, dry-run 은 write 없이 램프 점수를 산출", async () => {
+    const r1 = seedGenRun(1, KST.d0711, STORED); // factor 0.2 → 38
+    const r2 = seedGenRun(2, KST.d0713, STORED); // factor 0.4 → 40
+    const r3 = seedGenRun(3, KST.d0715, STORED); // factor 0.6 → 43
+    const r4 = seedGenRun(4, KST.d0717, STORED); // factor 0.8 → 45
+    const r5 = seedGenRun(5, KST.d0719, STORED); // factor 1.0 → 48
+    const rFrozen = seedGenRun(6, KST.d0710, STORED); // frozen 이전 → 미선택
+    const rV7 = seedGenRun(7, KST.d0715, STORED, { version: 7 }); // 다른 버전 → 미선택
+    const rV9 = seedGenRun(8, KST.d0715, STORED, { version: 9 }); // 다른 버전 → 미선택
 
     const res = await POST(post({ dryRun: true, batchSize: 200 }));
     expect(res.status).toBe(200);
@@ -387,25 +410,26 @@ describe("(a)(b) dry-run: 무쓰기 + selector + 경계일 점수 + 07-14 이전
     expect(body.updated).toBe(0);
     expect(body.anomalyRemaining).toBeNull();
 
-    // (b) selector: v8 AND created_at≥frozen 만(4건). frozen 이전·v7·v9 제외.
-    expect(body.processed).toBe(4);
+    // (b) selector: v8 AND created_at≥frozen 만(5건). frozen 이전·v7·v9 제외.
+    expect(body.processed).toBe(5);
     const sampleIds = (body.samples as { id: string }[]).map((s) => s.id).sort();
-    expect(sampleIds).toEqual([r1.id, r2.id, r3.id, r4.id].sort());
+    expect(sampleIds).toEqual([r1.id, r2.id, r3.id, r4.id, r5.id].sort());
     expect(sampleIds).not.toContain(rFrozen.id);
     expect(sampleIds).not.toContain(rV7.id);
     expect(sampleIds).not.toContain(rV9.id);
 
-    // 경계일별 예상 점수(§3 배점표 = calcVisibility) 일치
+    // 경계일별 램프 점수(factor + after) 일치
     const byId = new Map(
-      (body.samples as { id: string; after: number; phaseLevel: number }[]).map((s) => [s.id, s]),
+      (body.samples as { id: string; after: number; factor: number }[]).map((s) => [s.id, s]),
     );
-    expect(byId.get(r1.id)).toMatchObject({ after: 35, phaseLevel: 1 });
-    expect(byId.get(r2.id)).toMatchObject({ after: 35, phaseLevel: 2 });
-    expect(byId.get(r3.id)).toMatchObject({ after: 45, phaseLevel: 3 });
-    expect(byId.get(r4.id)).toMatchObject({ after: 48, phaseLevel: 4 });
+    expect(byId.get(r1.id)).toMatchObject({ after: 38, factor: 0.2 });
+    expect(byId.get(r2.id)).toMatchObject({ after: 40, factor: 0.4 });
+    expect(byId.get(r3.id)).toMatchObject({ after: 43, factor: 0.6 });
+    expect(byId.get(r4.id)).toMatchObject({ after: 45, factor: 0.8 });
+    expect(byId.get(r5.id)).toMatchObject({ after: 48, factor: 1 });
 
-    // (a) 실제 store 는 전혀 변하지 않음(버전·점수 유지). 07-14 이전 표본도 불변.
-    for (const r of [r1, r2, r3, r4, rFrozen, rV7, rV9]) {
+    // (a) 실제 store 는 전혀 변하지 않음(버전·점수 유지). 07-11 이전 표본도 불변.
+    for (const r of [r1, r2, r3, r4, r5, rFrozen, rV7, rV9]) {
       const stored = H.store.runs.find((x) => x.id === r.id)!;
       expect(stored.scoreVersion).toBe(r.scoreVersion);
       expect(stored.visibilityScore).toBe(STORED);
@@ -414,11 +438,11 @@ describe("(a)(b) dry-run: 무쓰기 + selector + 경계일 점수 + 07-14 이전
 });
 
 describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () => {
-  it("1회차: v8 4건을 배점표 점수로 갱신하고 v9 로 승격", async () => {
-    seedGenRun(1, KST.d0714, STORED);
-    seedGenRun(2, KST.d0716, STORED);
-    seedGenRun(3, KST.d0718, STORED);
-    seedGenRun(4, KST.d0720, STORED);
+  it("1회차: v8 4건을 램프 점수로 갱신하고 v9 로 승격", async () => {
+    seedGenRun(1, KST.d0713, STORED); // 0.4 → 40
+    seedGenRun(2, KST.d0715, STORED); // 0.6 → 43
+    seedGenRun(3, KST.d0717, STORED); // 0.8 → 45
+    seedGenRun(4, KST.d0719, STORED); // 1.0 → 48
 
     const res = await POST(post({ batchSize: 200 }));
     const body = await res.json();
@@ -427,14 +451,15 @@ describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () 
     expect(body.processableRemaining).toBe(0);
 
     const s = (n: number) => H.store.runs.find((x) => x.id === id(n))!;
+    expect(s(1).visibilityScore).toBe(40);
     expect(s(3).visibilityScore).toBe(45);
     expect(s(4).visibilityScore).toBe(48);
     for (const n of [1, 2, 3, 4]) expect(s(n).scoreVersion).toBe(9);
   });
 
   it("2회차(동일 커서): 남은 v8 없음 → 무처리, 점수 이중 적용 안 됨(멱등)", async () => {
-    seedGenRun(3, KST.d0718, STORED);
-    seedGenRun(4, KST.d0720, STORED);
+    seedGenRun(3, KST.d0717, STORED); // 0.8 → 45
+    seedGenRun(4, KST.d0719, STORED); // 1.0 → 48
 
     await POST(post({ batchSize: 200 })); // 1회차
     const before = H.store.runs.map((r) => ({ id: r.id, v: r.visibilityScore }));
@@ -452,10 +477,10 @@ describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () 
   });
 
   it("CAS 충돌(동시 v9 bump): 선택됐어도 갱신 실패 → conflicted 로 집계, 원값 보존", async () => {
-    seedGenRun(1, KST.d0714, STORED);
-    seedGenRun(2, KST.d0716, STORED); // 이 row 가 update 직전에 v9 로 bump 됐다고 가정
-    seedGenRun(3, KST.d0718, STORED);
-    seedGenRun(4, KST.d0720, STORED);
+    seedGenRun(1, KST.d0713, STORED);
+    seedGenRun(2, KST.d0715, STORED); // 이 row 가 update 직전에 v9 로 bump 됐다고 가정
+    seedGenRun(3, KST.d0717, STORED);
+    seedGenRun(4, KST.d0719, STORED);
     H.conflictIds.add(id(2));
 
     const res = await POST(post({ batchSize: 200 }));
@@ -473,8 +498,8 @@ describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () 
 
 describe("(c)(e) keyset 커서 전진 + anomaly + 전량 anomaly stalled 오탐 없음", () => {
   it("anomaly row 를 지나 커서가 전진하고, 뒤의 정상 row 를 처리", async () => {
-    const rAnom = seedGenRun(1, KST.d0716, 999); // 어떤 조합으로도 재현 불가 → no-candidate
-    const rOk = seedGenRun(2, KST.d0718, STORED); // L3 → 45
+    const rAnom = seedGenRun(1, KST.d0715, 999); // 어떤 조합으로도 재현 불가 → no-candidate
+    const rOk = seedGenRun(2, KST.d0717, STORED); // factor 0.8 → 45
 
     const res = await POST(post({ batchSize: 200 }));
     const body = await res.json();
@@ -490,8 +515,8 @@ describe("(c)(e) keyset 커서 전진 + anomaly + 전량 anomaly stalled 오탐 
   });
 
   it("(e) 전량 anomaly batch 에서도 nextCursor 전진 → stalled=false", async () => {
-    seedGenRun(1, KST.d0716, 999);
-    seedGenRun(2, KST.d0718, 999);
+    seedGenRun(1, KST.d0715, 999);
+    seedGenRun(2, KST.d0717, 999);
 
     const res = await POST(post({ batchSize: 200 }));
     const body = await res.json();
@@ -506,10 +531,10 @@ describe("(c)(e) keyset 커서 전진 + anomaly + 전량 anomaly stalled 오탐 
 
 describe("(b)(c) keyset 페이지네이션: batchSize 제한 + nextCursor 로 다음 페이지", () => {
   it("2건씩 두 페이지로 전량 처리(커서 전진 실측)", async () => {
-    seedGenRun(1, KST.d0714, STORED);
-    seedGenRun(2, KST.d0716, STORED);
-    seedGenRun(3, KST.d0718, STORED);
-    seedGenRun(4, KST.d0720, STORED);
+    seedGenRun(1, KST.d0713, STORED); // 0.4 → 40
+    seedGenRun(2, KST.d0715, STORED); // 0.6 → 43
+    seedGenRun(3, KST.d0717, STORED); // 0.8 → 45
+    seedGenRun(4, KST.d0719, STORED); // 1.0 → 48
 
     const res1 = await POST(post({ batchSize: 2 }));
     const b1 = await res1.json();
@@ -523,7 +548,7 @@ describe("(b)(c) keyset 페이지네이션: batchSize 제한 + nextCursor 로 �
     expect(b2.nextCursor).toBe(id(4));
     expect(b2.processableRemaining).toBe(0);
 
-    // 전량 v9 승격, 각 배점표 점수
+    // 전량 v9 승격, 각 램프 점수
     expect(H.store.runs.find((x) => x.id === id(3))!.visibilityScore).toBe(45);
     expect(H.store.runs.find((x) => x.id === id(4))!.visibilityScore).toBe(48);
     for (const n of [1, 2, 3, 4]) expect(H.store.runs.find((x) => x.id === id(n))!.scoreVersion).toBe(9);
@@ -532,11 +557,11 @@ describe("(b)(c) keyset 페이지네이션: batchSize 제한 + nextCursor 로 �
 
 describe("(f) preflight 분포 게이트", () => {
   it("창 안에 v8 외 버전 있으면 clean=false, targetCount 는 v8 만", async () => {
-    seedGenRun(1, KST.d0714, STORED); // v8
-    seedGenRun(2, KST.d0716, STORED); // v8
-    seedGenRun(3, KST.d0716, STORED, { version: 7 }); // v7
-    seedGenRun(4, KST.d0716, STORED, { version: 9 }); // v9
-    seedGenRun(5, KST.d0713, STORED); // frozen 이전 v8 → 창 밖(분포 제외)
+    seedGenRun(1, KST.d0711, STORED); // v8
+    seedGenRun(2, KST.d0713, STORED); // v8
+    seedGenRun(3, KST.d0715, STORED, { version: 7 }); // v7
+    seedGenRun(4, KST.d0715, STORED, { version: 9 }); // v9
+    seedGenRun(5, KST.d0710, STORED); // frozen 이전 v8 → 창 밖(분포 제외)
 
     const res = await POST(post({ preflight: true }));
     const body = await res.json();
@@ -550,8 +575,8 @@ describe("(f) preflight 분포 게이트", () => {
   });
 
   it("창 안이 전부 v8 이면 clean=true", async () => {
-    seedGenRun(1, KST.d0714, STORED);
-    seedGenRun(2, KST.d0716, STORED);
+    seedGenRun(1, KST.d0711, STORED);
+    seedGenRun(2, KST.d0713, STORED);
 
     const res = await POST(post({ preflight: true }));
     const body = await res.json();

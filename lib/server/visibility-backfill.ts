@@ -74,3 +74,21 @@ export function resolveBackfillScore(
     candidateCount: candidates.length,
   };
 }
+
+/**
+ * 재산출 점수 램프 적용 — 순수 함수.
+ *
+ * oldScore(기준)와 fullNewScore(완전 적용) 사이를 factor 비율로 선형 보간해 반올림.
+ * factor∈[0,1] 이고 fullNewScore>=oldScore 이면 결과는 oldScore 이상(단조 비감소).
+ *
+ * @param oldScore      run 에 저장된(기준 레벨) 점수
+ * @param fullNewScore  완전 적용(최신 레벨) 점수
+ * @param factor        적용 비율(0~1)
+ */
+export function applyRampScore(
+  oldScore: number,
+  fullNewScore: number,
+  factor: number,
+): number {
+  return Math.round(oldScore + (fullNewScore - oldScore) * factor);
+}

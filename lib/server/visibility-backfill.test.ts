@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveBackfillScore,
+  applyRampScore,
   RANKING_COMBOS,
   type RankingFlags,
 } from "./visibility-backfill";
@@ -125,5 +126,45 @@ describe("resolveBackfillScore — 실제 calcVisibility 바인딩", () => {
     const r = resolveBackfillScore(999, 1, bound); // 어떤 조합으로도 999 안 나옴
     expect(r.status).toBe("anomaly");
     if (r.status === "anomaly") expect(r.reason).toBe("no-candidate");
+  });
+});
+
+describe("applyRampScore — 램프 스케일 산식", () => {
+  it("계획 예시: old=10, fullNew=20, factor=0.4 → 14", () => {
+    expect(applyRampScore(10, 20, 0.4)).toBe(14);
+  });
+
+  it("factor=0 → 옛 점수 그대로", () => {
+    expect(applyRampScore(35, 48, 0)).toBe(35);
+  });
+
+  it("factor=1 → 완전 적용 점수", () => {
+    expect(applyRampScore(35, 48, 1)).toBe(48);
+  });
+
+  it("경계 factor별 반올림(old=35, fullNew=48, delta=13)", () => {
+    // 0.2→37.6→38, 0.4→40.2→40, 0.6→42.8→43, 0.8→45.4→45
+    expect(applyRampScore(35, 48, 0.2)).toBe(38);
+    expect(applyRampScore(35, 48, 0.4)).toBe(40);
+    expect(applyRampScore(35, 48, 0.6)).toBe(43);
+    expect(applyRampScore(35, 48, 0.8)).toBe(45);
+  });
+
+  it("반올림 경계(.5)는 Math.round 규칙(half-up)", () => {
+    // old=10, fullNew=15, factor=0.5 → 10+2.5=12.5 → 13
+    expect(applyRampScore(10, 15, 0.5)).toBe(13);
+    // old=0, fullNew=1, factor=0.5 → 0.5 → 1
+    expect(applyRampScore(0, 1, 0.5)).toBe(1);
+  });
+
+  it("factor 오름차순 → 적용값 단조 비감소(fullNew>=old 일 때)", () => {
+    const factors = [0, 0.2, 0.4, 0.6, 0.8, 1];
+    const seq = factors.map((f) => applyRampScore(35, 48, f));
+    for (let i = 1; i < seq.length; i++) {
+      expect(seq[i]).toBeGreaterThanOrEqual(seq[i - 1]);
+    }
+    // 하한은 옛 점수, 상한은 완전 적용
+    expect(seq[0]).toBe(35);
+    expect(seq[seq.length - 1]).toBe(48);
   });
 });

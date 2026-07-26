@@ -10,7 +10,8 @@
  *
  * 플래그 역산(LLM 미사용):
  *   - 저장값(레벨0)을 재현하는 (isTopRanked, isStronglyRecommended) 조합을 열거해
- *     목표 레벨 점수의 고유성으로 결정. 재현 불가/모호 → anomaly skip.
+ *     완전 적용(레벨4) 점수의 고유성으로 결정. 재현 불가/모호 → anomaly skip.
+ *   - 적용 점수 = round(oldScore + (fullNew - oldScore) * factor). factor 는 KST 생성일자로 판정.
  *   - sentiment 는 저장값 보존(재분류 안 함).
  *
  * UPDATE: score_version=8 CAS 로 stale clobber 방지. affected=0 → conflict.
@@ -32,11 +33,14 @@ import {
 import { buildBrandTerms } from "@/lib/server/branded-query-filter";
 import type { Citation } from "@/components/dashboard/types";
 import {
-  visibilityPhaseLevel,
+  visibilityRampFactor,
+  LATEST_PHASE_LEVEL,
   type PhaseLevel,
+  type RampFactor,
 } from "@/lib/server/visibility-phase";
 import { toKstDateKey } from "@/lib/client/date-kst";
 import {
+  applyRampScore,
   resolveBackfillScore,
   type RankingFlags,
 } from "@/lib/server/visibility-backfill";
@@ -48,13 +52,13 @@ const CURRENT_SCORE_VERSION = 9;
 /** 재산출 대상 버전 — 이 버전 행만 처리(전제 보장). */
 const TARGET_SCORE_VERSION = 8;
 /** 이 시각 이전에 생성된 행은 대상에서 제외(불변). */
-const FROZEN_BEFORE_UTC = "2026-07-13T15:00:00Z";
+const FROZEN_BEFORE_UTC = "2026-07-10T15:00:00Z";
 /** keyset 커서(runs.id, uuid) 형식 검증 — 파라미터 바인딩이라 injection 은 없으나 방어적. */
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type Anomaly = { id: string; reason: string };
-type Sample = { id: string; before: number; after: number; phaseLevel: PhaseLevel };
+type Sample = { id: string; before: number; after: number; factor: RampFactor };
 
 export async function POST(req: NextRequest) {
   try {
@@ -224,8 +228,8 @@ export async function POST(req: NextRequest) {
           | "negative"
           | "not-mentioned";
 
-        // KST 날짜 → 목표 레벨
-        const phaseLevel = visibilityPhaseLevel(toKstDateKey(run.createdAt));
+        // KST 생성일자 → 적용 비율(factor)
+        const factor = visibilityRampFactor(toKstDateKey(run.createdAt));
 
         // 나머지 입력 고정 → (플래그, 레벨) 순수 계산
         const scoreOf = (flags: RankingFlags, level: PhaseLevel): number =>
@@ -241,9 +245,10 @@ export async function POST(req: NextRequest) {
             level,
           );
 
+        // 레벨0 재현으로 플래그 역산 + 완전 적용(레벨4) 점수 고유성 결정.
         const resolution = resolveBackfillScore(
           run.visibilityScore,
-          phaseLevel,
+          LATEST_PHASE_LEVEL,
           scoreOf,
         );
 
@@ -252,14 +257,19 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        const targetScore = resolution.targetScore;
+        // 완전 적용 점수와 옛 점수 사이를 factor 비율로 램프 적용.
+        const applied = applyRampScore(
+          run.visibilityScore,
+          resolution.targetScore,
+          factor,
+        );
 
         if (!dryRun) {
           // CAS: 여전히 v8 인 경우만 갱신. sentiment 는 건드리지 않음(보존).
           const affected = await db
             .update(schema.runs)
             .set({
-              visibilityScore: targetScore,
+              visibilityScore: applied,
               scoreVersion: CURRENT_SCORE_VERSION,
             })
             .where(
@@ -281,8 +291,8 @@ export async function POST(req: NextRequest) {
           samples.push({
             id: run.id,
             before: run.visibilityScore,
-            after: targetScore,
-            phaseLevel,
+            after: applied,
+            factor,
           });
         }
       } catch (err) {

@@ -36,18 +36,23 @@ export type BackfillResolution =
     };
 
 /**
- * 저장 점수를 재현하는 조합을 열거해 목표 레벨 점수를 결정.
+ * 조합 열거 → 목표 고유성 결정의 일반형(순수·DI).
  *
- * @param storedScore  run 에 저장된(기준 레벨) 점수
- * @param targetLevel  적용할 목표 레벨
- * @param scoreOf      (flags, level) → 점수. 나머지 입력은 바인딩된 순수 함수
+ * reproducedOf(flags) 가 저장 점수를 재현하는 조합만 후보로 남기고, 그 후보들이
+ * 만드는 targetOf(flags) 가 유일하면 채택한다. 재현 산식·목표 산식을 호출부가
+ * 자유롭게 바인딩할 수 있어, "저장값 = 레벨0" 뿐 아니라 "저장값 = 램프된 값" 같은
+ * 다른 재현 규칙에도 그대로 쓸 수 있다.
+ *
+ * @param storedScore  run 에 저장된 점수
+ * @param reproducedOf (flags) → 그 조합이 만들었을 저장 점수(재현값)
+ * @param targetOf     (flags) → 적용할 목표 점수
  */
-export function resolveBackfillScore(
+export function resolveByReproduction(
   storedScore: number,
-  targetLevel: PhaseLevel,
-  scoreOf: (flags: RankingFlags, level: PhaseLevel) => number,
+  reproducedOf: (flags: RankingFlags) => number,
+  targetOf: (flags: RankingFlags) => number,
 ): BackfillResolution {
-  const candidates = RANKING_COMBOS.filter((f) => scoreOf(f, 0) === storedScore);
+  const candidates = RANKING_COMBOS.filter((f) => reproducedOf(f) === storedScore);
 
   if (candidates.length === 0) {
     return {
@@ -58,7 +63,7 @@ export function resolveBackfillScore(
     };
   }
 
-  const targetScores = [...new Set(candidates.map((f) => scoreOf(f, targetLevel)))];
+  const targetScores = [...new Set(candidates.map((f) => targetOf(f)))];
   if (targetScores.length !== 1) {
     return {
       status: "anomaly",
@@ -73,6 +78,26 @@ export function resolveBackfillScore(
     targetScore: targetScores[0],
     candidateCount: candidates.length,
   };
+}
+
+/**
+ * 저장 점수(기준 레벨)를 재현하는 조합을 열거해 목표 레벨 점수를 결정.
+ * resolveByReproduction 의 특수형 — 재현=레벨0, 목표=targetLevel.
+ *
+ * @param storedScore  run 에 저장된(기준 레벨) 점수
+ * @param targetLevel  적용할 목표 레벨
+ * @param scoreOf      (flags, level) → 점수. 나머지 입력은 바인딩된 순수 함수
+ */
+export function resolveBackfillScore(
+  storedScore: number,
+  targetLevel: PhaseLevel,
+  scoreOf: (flags: RankingFlags, level: PhaseLevel) => number,
+): BackfillResolution {
+  return resolveByReproduction(
+    storedScore,
+    (f) => scoreOf(f, 0),
+    (f) => scoreOf(f, targetLevel),
+  );
 }
 
 /**

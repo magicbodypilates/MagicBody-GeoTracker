@@ -1171,18 +1171,18 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       }
     }
 
-    // brand 명 검색: 평가 어조 + URL 노출만 점수 (만점 55).
+    // brand 명 검색: 평가 어조 + URL 노출만 점수.
     if (isBrandedQuery) {
       if (positions.length === 0) return 0;
       const brandTargetKeysB = buildTargetKeys(state.brand.websites);
       const hasCitationOnlyB =
         brandTargetKeysB.length > 0 &&
         sources.some((s) => isUrlMatchingCitedKeys(s, brandTargetKeysB));
-      // 클라이언트는 본문 URL vs 참고자료 구분이 어려워 매칭=참고자료로 간주 (+2)
+      // 클라이언트는 본문 URL vs 참고자료 구분이 어려워 매칭=참고자료로 간주.
       let s = 0;
-      if (sentiment === "positive") s += 20;
-      if (isStronglyRecommended) s += 30;
-      if (hasCitationOnlyB) s += 2;
+      if (sentiment === "positive") s += 34;
+      if (isStronglyRecommended) s += 48;
+      if (hasCitationOnlyB) s += 8;
       return Math.min(100, s);
     }
 
@@ -1194,8 +1194,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     if (positions.length === 0) {
       // mentions=0: URL 노출만 약한 신호. 클라이언트에선 sources 만 가지고 있어
-      // 본문 URL vs 참고자료 구분이 어렵지만, 매칭 자체가 약한 신호라 일관되게 +2 처리.
-      return hasCitationOnly ? 2 : 0;
+      // 본문 URL vs 참고자료 구분이 어렵지만, 매칭 자체가 약한 신호로 처리.
+      return hasCitationOnly ? 10 : 0;
     }
 
     // 50자 이내 근접 등장은 1회로 merge
@@ -1212,13 +1212,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     let score = 30;
     if (firstPos < 200) score += 20;
+    else if (firstPos < 500) score += 14;
     if (mentions >= 3) score += 15;
     else if (mentions >= 2) score += 8;
 
-    if (sentiment === "positive") score += 15;
-    else if (sentiment === "neutral") score += 5;
+    if (sentiment === "positive") score += 18;
+    else if (sentiment === "neutral") score += 12;
 
-    if (isTopRanked) score += 15;
+    if (isTopRanked) score += 16;
     void isStronglyRecommended; // brand 명 검색 분기 전용
 
     return Math.min(100, score);
@@ -2902,26 +2903,26 @@ ${exampleJson}
                 가시성 점수(0–100)는 AI 응답에서 브랜드가 얼마나 두드러지게 등장하는지 측정합니다. 각 요소가 점수에 기여합니다:
               </p>
               <p className="mb-2 text-xs text-th-text-muted">
-                일반 검색 (prompt 에 brand 명 없음) — 만점 95점
+                일반 검색 (prompt 에 brand 명 없음) — 만점 99점
               </p>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 <ScoreFactorCard emoji="🔍" label="브랜드 언급" points="+30" desc="응답 본문에 브랜드명 또는 별칭이 등장" />
-                <ScoreFactorCard emoji="🏆" label="노출 위치" points="+20" desc="첫 200자 이내에 브랜드가 등장" />
+                <ScoreFactorCard emoji="🏆" label="노출 위치" points="+20 / +14" desc="첫 200자 이내(+20) 또는 500자 이내 중단(+14)에 브랜드가 등장" />
                 <ScoreFactorCard emoji="🔁" label="반복 언급" points="+8~+15" desc="본문에 2회 이상(8점) 또는 3회 이상(15점) 언급" />
-                <ScoreFactorCard emoji="👍" label="긍정 감성" points="+15" desc="여러 brand 중 매직바디만 차이있게 긍정적으로 평가됨 (LLM 분류). 모두 같은 톤이면 NEUTRAL" />
-                <ScoreFactorCard emoji="😐" label="중립 감성" points="+5" desc="단순 등장·사실 설명·여러 옵션 중 하나로 나열" />
-                <ScoreFactorCard emoji="🥇" label="1순위 명시 추천" points="+15" desc='"가장 적절", "최고", "1위", "단연", "귀하 케이스에 적합" 등으로 명시적 1위 추천' />
-                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+15" desc="brand 언급 없이 본문에 자사 URL/도메인만 노출 (mentions=0 케이스)" />
-                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="brand 언급도 본문 URL도 없고 참고자료에만 URL 포함 (mentions=0 케이스)" />
+                <ScoreFactorCard emoji="👍" label="긍정 감성" points="+18" desc="여러 brand 중 매직바디만 차이있게 긍정적으로 평가됨 (LLM 분류). 모두 같은 톤이면 NEUTRAL" />
+                <ScoreFactorCard emoji="😐" label="중립 감성" points="+12" desc="단순 등장·사실 설명·여러 옵션 중 하나로 나열" />
+                <ScoreFactorCard emoji="🥇" label="1순위 명시 추천" points="+16" desc='"가장 적절", "최고", "1위", "단연", "귀하 케이스에 적합" 등으로 명시적 1위 추천' />
+                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+25" desc="brand 언급 없이 본문에 자사 URL/도메인만 노출 (mentions=0 케이스)" />
+                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+10" desc="brand 언급도 본문 URL도 없고 참고자료에만 URL 포함 (mentions=0 케이스)" />
               </div>
               <p className="mt-3 mb-2 text-xs text-th-text-muted">
-                brand 명 검색 (prompt 에 brand 명 포함, 예: &ldquo;매직바디 어때?&rdquo;) — 만점 55점, 통계 분리 집계
+                brand 명 검색 (prompt 에 brand 명 포함, 예: &ldquo;매직바디 어때?&rdquo;) — 만점 97점, 통계 분리 집계
               </p>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                <ScoreFactorCard emoji="✅" label="긍정 평가" points="+20" desc="brand 에 평가적·우호적 어조 사용. brand 명 검색은 언급/위치/반복 점수 없음" />
-                <ScoreFactorCard emoji="🌟" label="적극 추천 보너스" points="+30" desc='"강력 추천", "꼭 추천", "highly recommend" 같은 강한 추천 어조' />
-                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+5" desc="답변 본문에 자사 URL/도메인 직접 노출" />
-                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+2" desc="본문 URL 없고 참고자료에만 URL 포함" />
+                <ScoreFactorCard emoji="✅" label="긍정 평가" points="+34" desc="brand 에 평가적·우호적 어조 사용. brand 명 검색은 언급/위치/반복 점수 없음" />
+                <ScoreFactorCard emoji="🌟" label="적극 추천 보너스" points="+48" desc='"강력 추천", "꼭 추천", "highly recommend" 같은 강한 추천 어조' />
+                <ScoreFactorCard emoji="🔗" label="본문 URL 등장" points="+15" desc="답변 본문에 자사 URL/도메인 직접 노출" />
+                <ScoreFactorCard emoji="📎" label="참고자료에만" points="+8" desc="본문 URL 없고 참고자료에만 URL 포함" />
               </div>
             </section>
           )}

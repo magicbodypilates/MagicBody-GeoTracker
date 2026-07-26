@@ -1,20 +1,23 @@
 /**
  * /api/admin/recalc-visibility — 기존 runs 의 visibility_score 를 최신 룰로 재산출.
  *
- * 대상: score_version = 8 AND created_at >= FROZEN_BEFORE_UTC 인 row 만.
+ * 대상: score_version = 9 AND created_at >= FROZEN_BEFORE_UTC 인 row 만.
  * 그 이전 행은 물리적으로 대상에서 제외(불변).
  *
  * 멱등성/종료:
- *   - keyset 커서(id 오름차순)로 batch 순회. anomaly 는 버전 유지(v8) + 커서로 건너뜀.
+ *   - keyset 커서(id 오름차순)로 batch 순회. anomaly 는 버전 유지(v9) + 커서로 건너뜀.
  *   - 종료 = processableRemaining(커서 이후 남은 대상) == 0.
  *
  * 플래그 역산(LLM 미사용):
- *   - 저장값(레벨0)을 재현하는 (isTopRanked, isStronglyRecommended) 조합을 열거해
- *     완전 적용(레벨4) 점수의 고유성으로 결정. 재현 불가/모호 → anomaly skip.
- *   - 적용 점수 = round(oldScore + (fullNew - oldScore) * factor). factor 는 KST 생성일자로 판정.
+ *   - 저장된 v9 값은 램프 산식 round(level0 + (level4 - level0) * factor)로 만들어졌다.
+ *     (isTopRanked, isStronglyRecommended) 4조합을 열거해 그 램프 산식으로 저장 v9 를
+ *     재현하는 조합만 후보로 남기고, 후보들의 새 배점(calcVisibilityFull)이 유일하면 채택.
+ *     재현 불가/모호 → anomaly skip.
+ *   - factor 는 저장 v9 를 만든 값과 동일하게 KST 생성일자로 판정.
+ *   - 새 점수는 램프 없이 100% 새 배점 그대로 적용.
  *   - sentiment 는 저장값 보존(재분류 안 함).
  *
- * UPDATE: score_version=8 CAS 로 stale clobber 방지. affected=0 → conflict.
+ * UPDATE: score_version=9 CAS 로 stale clobber 방지. affected=0 → conflict.
  *
  * 호출: admin 전용. POST body
  *   { workspaceId?, batchSize?, dryRun?, cursor?, preflight? }
@@ -24,7 +27,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, asc, eq, gt, gte, lte, sql } from "drizzle-orm";
 import { getSession, requireAdmin } from "@/lib/server/auth-guard";
-import { calcVisibility } from "@/lib/server/automation-runner";
+import { calcVisibility, calcVisibilityFull } from "@/lib/server/automation-runner";
 import {
   matchCitationDomains,
   normalizeTargetKey,
@@ -41,16 +44,16 @@ import {
 import { toKstDateKey } from "@/lib/client/date-kst";
 import {
   applyRampScore,
-  resolveBackfillScore,
+  resolveByReproduction,
   type RankingFlags,
 } from "@/lib/server/visibility-backfill";
 
 export const dynamic = "force-dynamic";
 
 /** 현재 점수 룰 버전. 신규 수집이 저장하는 버전과 일치. */
-const CURRENT_SCORE_VERSION = 9;
+const CURRENT_SCORE_VERSION = 10;
 /** 재산출 대상 버전 — 이 버전 행만 처리(전제 보장). */
-const TARGET_SCORE_VERSION = 8;
+const TARGET_SCORE_VERSION = 9;
 /** 이 시각 이전에 생성된 행은 대상에서 제외(불변). */
 const FROZEN_BEFORE_UTC = "2026-07-10T15:00:00Z";
 /** keyset 커서(runs.id, uuid) 형식 검증 — 파라미터 바인딩이라 injection 은 없으나 방어적. */
@@ -228,11 +231,11 @@ export async function POST(req: NextRequest) {
           | "negative"
           | "not-mentioned";
 
-        // KST 생성일자 → 적용 비율(factor)
+        // KST 생성일자 → 저장 v9 를 만든 것과 동일한 적용 비율(factor)
         const factor = visibilityRampFactor(toKstDateKey(run.createdAt));
 
-        // 나머지 입력 고정 → (플래그, 레벨) 순수 계산
-        const scoreOf = (flags: RankingFlags, level: PhaseLevel): number =>
+        // 나머지 입력 고정 → (플래그, 레벨) 옛 배점 순수 계산
+        const oldScoreOf = (flags: RankingFlags, level: PhaseLevel): number =>
           calcVisibility(
             answerText,
             brandTerms,
@@ -245,11 +248,32 @@ export async function POST(req: NextRequest) {
             level,
           );
 
-        // 레벨0 재현으로 플래그 역산 + 완전 적용(레벨4) 점수 고유성 결정.
-        const resolution = resolveBackfillScore(
+        // 저장 v9 재현: round(level0 + (level4 - level0) * factor) (저장 시 산식과 동일).
+        const reproducedV9Of = (flags: RankingFlags): number =>
+          applyRampScore(
+            oldScoreOf(flags, 0),
+            oldScoreOf(flags, LATEST_PHASE_LEVEL),
+            factor,
+          );
+
+        // 목표: 새 배점(램프 없이 100% 적용).
+        const newFullOf = (flags: RankingFlags): number =>
+          calcVisibilityFull(
+            answerText,
+            brandTerms,
+            hasBodyUrl,
+            hasCitationOnly,
+            sentiment,
+            flags.isTopRanked,
+            flags.isStronglyRecommended,
+            isBrandedQuery,
+          );
+
+        // 저장 v9 재현으로 플래그 역산 + 새 배점 점수 고유성 결정.
+        const resolution = resolveByReproduction(
           run.visibilityScore,
-          LATEST_PHASE_LEVEL,
-          scoreOf,
+          reproducedV9Of,
+          newFullOf,
         );
 
         if (resolution.status === "anomaly") {
@@ -257,15 +281,11 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        // 완전 적용 점수와 옛 점수 사이를 factor 비율로 램프 적용.
-        const applied = applyRampScore(
-          run.visibilityScore,
-          resolution.targetScore,
-          factor,
-        );
+        // 새 배점을 그대로 적용(램프 없음).
+        const applied = resolution.targetScore;
 
         if (!dryRun) {
-          // CAS: 여전히 v8 인 경우만 갱신. sentiment 는 건드리지 않음(보존).
+          // CAS: 여전히 v9 인 경우만 갱신. sentiment 는 건드리지 않음(보존).
           const affected = await db
             .update(schema.runs)
             .set({

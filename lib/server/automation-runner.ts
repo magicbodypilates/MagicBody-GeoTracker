@@ -33,7 +33,7 @@ import {
 } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt } from "@/drizzle/schema";
-import { LATEST_PHASE_LEVEL, type PhaseLevel } from "@/lib/server/visibility-phase";
+import { type PhaseLevel } from "@/lib/server/visibility-phase";
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
@@ -360,7 +360,7 @@ async function runOneProviderForPrompt(args: {
     // 참고자료에만 등장 (본문엔 없음)
     const hasCitationOnly = !hasBodyUrl && citedBrandDomains.length > 0;
 
-    const visibilityScore = calcVisibility(
+    const visibilityScore = calcVisibilityFull(
       answerText,
       brandTerms,
       hasBodyUrl,
@@ -369,7 +369,6 @@ async function runOneProviderForPrompt(args: {
       isTopRanked,
       isStronglyRecommended,
       isBrandedQuery,
-      LATEST_PHASE_LEVEL,
     );
 
     const inserted = await db
@@ -384,7 +383,7 @@ async function runOneProviderForPrompt(args: {
         citations: citations as never,
         visibilityScore,
         // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
-        scoreVersion: 9,
+        scoreVersion: 10,
         sentiment,
         brandMentions,
         competitorMentions,
@@ -642,6 +641,42 @@ const PHASE_SCORE: Record<
   4: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 10, genNeutral: 8 },
 };
 
+/** 브랜드 용어(본명 + 별칭)의 전체 출현 위치 수집 — 순수. */
+function collectBrandPositions(lower: string, brandTerms: string[]): number[] {
+  const positions: number[] = [];
+  for (const t of brandTerms) {
+    const term = t.toLowerCase();
+    if (!term) continue;
+    let from = 0;
+    while (from < lower.length) {
+      const idx = lower.indexOf(term, from);
+      if (idx < 0) break;
+      positions.push(idx);
+      from = idx + term.length;
+    }
+  }
+  return positions;
+}
+
+/**
+ * 근접한 위치(50자 이내)는 1회로 merge 후 mentions 수·첫 위치 반환 — 별칭
+ * 풀어쓰기 중복 카운트 방지. positions 는 비어있지 않아야 한다(호출부가 보장).
+ */
+function mergeMentionPositions(positions: number[]): {
+  mentions: number;
+  firstPos: number;
+} {
+  const sorted = [...positions].sort((a, b) => a - b);
+  const MERGE_WINDOW = 50;
+  const merged: number[] = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] - merged[merged.length - 1] > MERGE_WINDOW) {
+      merged.push(sorted[i]);
+    }
+  }
+  return { mentions: merged.length, firstPos: merged[0] };
+}
+
 export function calcVisibility(
   text: string,
   brandTerms: string[],
@@ -656,20 +691,7 @@ export function calcVisibility(
   if (!text) return 0;
   const c = PHASE_SCORE[phaseLevel];
   const lower = text.toLowerCase();
-
-  // 모든 브랜드 용어(본명 + 별칭)의 전체 출현 위치 수집
-  const positions: number[] = [];
-  for (const t of brandTerms) {
-    const term = t.toLowerCase();
-    if (!term) continue;
-    let from = 0;
-    while (from < lower.length) {
-      const idx = lower.indexOf(term, from);
-      if (idx < 0) break;
-      positions.push(idx);
-      from = idx + term.length;
-    }
-  }
+  const positions = collectBrandPositions(lower, brandTerms);
 
   // ─────────────────────────────────────────────────────────────────
   // brand 명 검색 (예: "매직바디 어때?") — 평가 어조 + URL 노출만 점수.
@@ -695,18 +717,8 @@ export function calcVisibility(
     if (hasCitationOnly) return c.genNoMentionCitation;
     return 0;
   }
-  positions.sort((a, b) => a - b);
 
-  // 근접한 위치(50자 이내)는 1회로 merge — 별칭 풀어쓰기 중복 카운트 방지
-  const MERGE_WINDOW = 50;
-  const merged: number[] = [positions[0]];
-  for (let i = 1; i < positions.length; i++) {
-    if (positions[i] - merged[merged.length - 1] > MERGE_WINDOW) {
-      merged.push(positions[i]);
-    }
-  }
-  const mentions = merged.length;
-  const firstPos = merged[0];
+  const { mentions, firstPos } = mergeMentionPositions(positions);
 
   let score = 30; // 기본: 언급 있음
   if (firstPos < 200) score += 20; // 노출 위치(상단)
@@ -724,6 +736,79 @@ export function calcVisibility(
   // 1순위 추천 보너스 — 일반 검색에서 명시적 1위로 콕 집어 추천된 경우
   if (isTopRanked) score += 15;
   void isStronglyRecommended; // brand 명 검색 분기에서만 사용
+
+  return Math.min(score, 100);
+}
+
+/**
+ * 현행 수집(신규·수동)이 쓰는 배점. calcVisibility 의 phaseLevel 계열과 독립된
+ * 별도 상수 세트(FULL_SCORE)로 계산한다. 분기·병합·cap 구조는 동일.
+ * 어떤 조합도 100 을 넘지 않는다(cap 이 정보를 잘라 역산 불변식을 깨지 않도록).
+ */
+const FULL_SCORE = {
+  brandPositive: 34,
+  brandStrong: 48,
+  brandBodyUrl: 15,
+  brandCitation: 8,
+  genNoMentionBodyUrl: 25,
+  genNoMentionCitation: 10,
+  genBase: 30,
+  genFirstPos: 20,
+  genMidPos: 14,
+  genMentions3: 15,
+  genMentions2: 8,
+  genPositive: 18,
+  genNeutral: 12,
+  genTopRanked: 16,
+} as const;
+
+export function calcVisibilityFull(
+  text: string,
+  brandTerms: string[],
+  hasBodyUrl: boolean,
+  hasCitationOnly: boolean,
+  sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
+  isTopRanked: boolean,
+  isStronglyRecommended: boolean,
+  isBrandedQuery: boolean,
+): number {
+  if (!text) return 0;
+  const c = FULL_SCORE;
+  const lower = text.toLowerCase();
+  const positions = collectBrandPositions(lower, brandTerms);
+
+  if (isBrandedQuery) {
+    if (positions.length === 0) return 0;
+    let score = 0;
+    if (sentiment === "positive") score += c.brandPositive;
+    if (isStronglyRecommended) score += c.brandStrong;
+    if (hasBodyUrl) score += c.brandBodyUrl;
+    else if (hasCitationOnly) score += c.brandCitation;
+    return Math.min(score, 100);
+  }
+
+  if (positions.length === 0) {
+    if (hasBodyUrl) return c.genNoMentionBodyUrl;
+    if (hasCitationOnly) return c.genNoMentionCitation;
+    return 0;
+  }
+
+  const { mentions, firstPos } = mergeMentionPositions(positions);
+
+  let score = c.genBase;
+  if (firstPos < 200) score += c.genFirstPos;
+  else if (firstPos < 500) score += c.genMidPos;
+  if (mentions >= 3) score += c.genMentions3;
+  else if (mentions >= 2) score += c.genMentions2;
+
+  void hasBodyUrl;
+  void hasCitationOnly;
+
+  if (sentiment === "positive") score += c.genPositive;
+  else if (sentiment === "neutral") score += c.genNeutral;
+
+  if (isTopRanked) score += c.genTopRanked;
+  void isStronglyRecommended;
 
   return Math.min(score, 100);
 }

@@ -158,7 +158,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
   const autoOnly = true; // 홈은 항상 자동화 데이터만 표시
   const [timeseriesTab, setTimeseriesTab] = useState<"visibility" | "mention">("visibility");
   // brand 모드 토글 — 체크박스 아래 모든 분석 카드의 데이터 소스 전환.
-  // false (기본) = 일반 검색만 / true = brand 명 검색만 (만점 55점 기준).
+  // false (기본) = 일반 검색만 / true = brand 명 검색만 (만점 97점 기준).
   // 상단 KPI strip 과 주요 변동은 이 토글과 무관하게 항상 일반 검색.
   const [brandedView, setBrandedView] = useState(false);
 
@@ -260,6 +260,21 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
       return row;
     });
   }, [timeseries]);
+
+  // 가시성 차트 Y축 상한 — 값 분포에 맞춰 확대(변화 가독성). 항상 실제 최대값 +
+  // 여유 한 칸 이상이라 과장 왜곡 없음. 20~100 범위로 clamp, 데이터 없으면 40.
+  const visibilityYMax = useMemo(() => {
+    let max = 0;
+    for (const row of chartData) {
+      for (const p of VISIBLE_PROVIDERS) {
+        const v = row[p];
+        if (typeof v === "number" && v > max) max = v;
+      }
+    }
+    if (max <= 0) return 40;
+    const ceil = Math.ceil(max / 10) * 10 + 10;
+    return Math.min(100, Math.max(20, ceil));
+  }, [chartData]);
 
   // 모델별 브랜드 언급률 시계열 (mentionRate 0-100%)
   const mentionChartData = useMemo(() => {
@@ -428,7 +443,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                 />
               </div>
               <p className="mt-2 text-[11px] text-th-text-muted">
-                brand 명 검색 만점 = 55점 (긍정 평가 +20 / 적극 추천 보너스 +30 / 본문 URL +5 또는 참고자료에만 +2). 일반 검색 만점(95점)과 점수 의미가 다름.
+                brand 명 검색 만점 = 97점 (긍정 평가 +34 / 적극 추천 보너스 +48 / 본문 URL +15 또는 참고자료에만 +8). 일반 검색 만점(99점)과 점수 의미가 다름.
               </p>
             </section>
           )}
@@ -471,9 +486,10 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
                   <XAxis dataKey="day" tick={{ fontSize: 10 }} />
                   <YAxis
-                    domain={[0, timeseriesTab === "visibility" ? 100 : 100]}
+                    domain={[0, timeseriesTab === "visibility" ? visibilityYMax : 100]}
                     tick={{ fontSize: 10 }}
                     unit={timeseriesTab === "mention" ? "%" : ""}
+                    allowDecimals={false}
                   />
                   <Tooltip formatter={(v: unknown) => timeseriesTab === "mention" ? [`${String(v)}%`, "언급률"] : [`${String(v)}`, "가시성"]} />
                   <Legend />
@@ -495,7 +511,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
             <p className="mt-1.5 text-xs text-th-text-muted">
               {timeseriesTab === "mention"
                 ? "AI 응답 중 브랜드가 본문에 직접 언급된 비율 (%)"
-                : "모델별 일일 평균 가시성 점수 (0-100). 실행이 없는 날은 0으로 표시됩니다."}
+                : "모델별 일일 평균 가시성 점수. 세로축은 값 분포에 맞춰 확대 표시됩니다. 실행이 없는 날은 0으로 표시됩니다."}
             </p>
           </div>
 

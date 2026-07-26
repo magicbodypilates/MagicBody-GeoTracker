@@ -15,12 +15,12 @@
  *
  * 덮는 항목(계획 §7 Hard Gate / reviewer M-1):
  *   (a) dry-run 은 DB write 를 안 함
- *   (b) selector = score_version=8 AND created_at≥FROZEN 만 선택(07-11 이전·다른 버전 미선택)
+ *   (b) selector = score_version=9 AND created_at≥FROZEN 만 선택(07-11 이전·다른 버전 미선택)
  *   (c) keyset 커서가 anomaly row 도 전진
- *   (d) CAS(WHERE score_version=8)로 중복/동시 실행 시 이중 적용 안 됨(멱등)
+ *   (d) CAS(WHERE score_version=9)로 중복/동시 실행 시 이중 적용 안 됨(멱등)
  *   (e) 전량 anomaly batch 에서 stalled 오탐 없음(nextCursor 전진 기준)
- *   (f) preflight 가 v8 외 버전 분포 있을 때 clean=false(중단 게이트)
- *   + 경계일(07-11/13/15/17/19) 표본 dry-run 점수가 램프 산식과 일치, 07-11 이전 표본 불변.
+ *   (f) preflight 가 v9 외 버전 분포 있을 때 clean=false(중단 게이트)
+ *   + 저장 v9(램프값) 재현으로 플래그 역산 후 새 배점(램프 없음)을 적용, 07-11 이전 표본 불변.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -291,27 +291,27 @@ vi.mock("@/lib/server/auth-guard", () => ({
 
 // 모킹 이후 import (route 는 위 모듈에 의존).
 import { POST } from "./route";
-import { calcVisibility } from "@/lib/server/automation-runner";
+import { calcVisibility, calcVisibilityFull } from "@/lib/server/automation-runner";
 import { applyRampScore } from "@/lib/server/visibility-backfill";
 
 // ── 공통 픽스처 ──
 const WS_ID = "11111111-1111-1111-1111-111111111111";
 // 일반 검색(informational): prompt 에 brand 별칭 없음.
 const GEN_PROMPT = "필라테스 학원 추천";
-// answer: "요가원" 이 정확히 1회, 위치 210(≥200 → 상단 보너스 없음, <500 → L3/L4 중단 보너스 대상).
+// answer: "요가원" 이 정확히 1회, 위치 210(≥200 → 상단 보너스 없음, <500 → 중단 보너스 대상).
 const GEN_ANSWER = "가".repeat(210) + "요가원 좋아요";
 const BRAND_CONFIG = { brandName: "요가원", brandAliases: "", websites: [] as string[] };
 
-/** 실제 배점 함수로 계산한, 일반·중립·단일언급 run 의 레벨별 점수(topRanked=false). */
-const expectedScore = (level: 0 | 1 | 2 | 3 | 4) =>
+/** 옛 배점(레벨별). v9 재현에 쓰이는 레벨0·레벨4. topRanked=false. */
+const oldLevel = (level: 0 | 1 | 2 | 3 | 4) =>
   calcVisibility(GEN_ANSWER, ["요가원"], false, false, "neutral", false, false, false, level);
 
-// 저장값(레벨0 기준). topRanked=true 는 50 을 내므로 오직 topRanked=false 조합만 재현 → 목표 유일.
-const STORED = expectedScore(0); // = 35
-// 완전 적용(레벨4) 점수 — 램프 상한.
-const FULL_NEW = expectedScore(4); // = 48
-/** factor 비율로 램프 적용한 기대 점수(route 와 동일한 산식). */
-const ramp = (factor: number) => applyRampScore(STORED, FULL_NEW, factor);
+const OLD_L0 = oldLevel(0); // = 35
+const OLD_L4 = oldLevel(4); // = 48
+/** 저장 v9 = round(L0 + (L4-L0)*factor) — backfill 이 저장한 값과 동일. topRanked=false 만 이 값. */
+const storedV9 = (factor: number) => applyRampScore(OLD_L0, OLD_L4, factor);
+/** v10 목표 = 새 배점(램프 없음). topRanked=false → 56 고정. */
+const FULL_V10 = calcVisibilityFull(GEN_ANSWER, ["요가원"], false, false, "neutral", false, false, false); // = 56
 
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
 
@@ -352,7 +352,7 @@ function seedGenRun(
     sentiment: "neutral",
     visibilityScore: storedScore,
     createdAt: new Date(createdIso),
-    scoreVersion: opts.version ?? 8,
+    scoreVersion: opts.version ?? 9,
   };
   H.store.runs.push(row);
   return row;
@@ -376,30 +376,31 @@ beforeEach(() => {
   seedWorkspace();
 });
 
-describe("램프 산식 self-check (전제)", () => {
-  it("저장값·완전 적용 점수 앵커", () => {
-    expect(STORED).toBe(35); // L0 baseline
-    expect(FULL_NEW).toBe(48); // L4: mid +10, neutral +8 → delta 13
+describe("재현/목표 산식 self-check (전제)", () => {
+  it("옛 레벨 앵커 + 새 배점 목표", () => {
+    expect(OLD_L0).toBe(35); // 옛 L0(=v8 baseline)
+    expect(OLD_L4).toBe(48); // 옛 L4: mid +10, neutral +8 → delta 13
+    expect(FULL_V10).toBe(56); // 새 배점: base30 + mid14 + neutral12
   });
-  it("경계 factor별 램프 점수(old=35, fullNew=48, delta=13)", () => {
-    expect(ramp(0.2)).toBe(38); // 35+2.6→38
-    expect(ramp(0.4)).toBe(40); // 35+5.2→40
-    expect(ramp(0.6)).toBe(43); // 35+7.8→43
-    expect(ramp(0.8)).toBe(45); // 35+10.4→45
-    expect(ramp(1)).toBe(48); // 완전 적용
+  it("저장 v9 = 램프(L0,L4,factor) — backfill 이 저장한 값", () => {
+    expect(storedV9(0.2)).toBe(38); // 35+2.6→38
+    expect(storedV9(0.4)).toBe(40); // 35+5.2→40
+    expect(storedV9(0.6)).toBe(43); // 35+7.8→43
+    expect(storedV9(0.8)).toBe(45); // 35+10.4→45
+    expect(storedV9(1)).toBe(48); // 완전 적용(옛)
   });
 });
 
-describe("(a)(b) dry-run: 무쓰기 + selector + 경계일 램프 점수 + 07-11 이전 불변", () => {
-  it("v8·frozen 이후만 선택하고, dry-run 은 write 없이 램프 점수를 산출", async () => {
-    const r1 = seedGenRun(1, KST.d0711, STORED); // factor 0.2 → 38
-    const r2 = seedGenRun(2, KST.d0713, STORED); // factor 0.4 → 40
-    const r3 = seedGenRun(3, KST.d0715, STORED); // factor 0.6 → 43
-    const r4 = seedGenRun(4, KST.d0717, STORED); // factor 0.8 → 45
-    const r5 = seedGenRun(5, KST.d0719, STORED); // factor 1.0 → 48
-    const rFrozen = seedGenRun(6, KST.d0710, STORED); // frozen 이전 → 미선택
-    const rV7 = seedGenRun(7, KST.d0715, STORED, { version: 7 }); // 다른 버전 → 미선택
-    const rV9 = seedGenRun(8, KST.d0715, STORED, { version: 9 }); // 다른 버전 → 미선택
+describe("(a)(b) dry-run: 무쓰기 + selector + 새 배점 목표(램프 없음) + 07-11 이전 불변", () => {
+  it("v9·frozen 이후만 선택하고, dry-run 은 write 없이 새 배점을 산출", async () => {
+    const r1 = seedGenRun(1, KST.d0711, storedV9(0.2)); // v9 38 → v10 56
+    const r2 = seedGenRun(2, KST.d0713, storedV9(0.4)); // v9 40 → v10 56
+    const r3 = seedGenRun(3, KST.d0715, storedV9(0.6)); // v9 43 → v10 56
+    const r4 = seedGenRun(4, KST.d0717, storedV9(0.8)); // v9 45 → v10 56
+    const r5 = seedGenRun(5, KST.d0719, storedV9(1)); //   v9 48 → v10 56
+    const rFrozen = seedGenRun(6, KST.d0710, storedV9(0.6)); // frozen 이전 → 미선택
+    const rV8 = seedGenRun(7, KST.d0715, storedV9(0.6), { version: 8 }); // 다른 버전 → 미선택
+    const rV10 = seedGenRun(8, KST.d0715, FULL_V10, { version: 10 }); // 이미 v10 → 미선택
 
     const res = await POST(post({ dryRun: true, batchSize: 200 }));
     expect(res.status).toBe(200);
@@ -410,39 +411,41 @@ describe("(a)(b) dry-run: 무쓰기 + selector + 경계일 램프 점수 + 07-11
     expect(body.updated).toBe(0);
     expect(body.anomalyRemaining).toBeNull();
 
-    // (b) selector: v8 AND created_at≥frozen 만(5건). frozen 이전·v7·v9 제외.
+    // (b) selector: v9 AND created_at≥frozen 만(5건). frozen 이전·v8·v10 제외.
     expect(body.processed).toBe(5);
     const sampleIds = (body.samples as { id: string }[]).map((s) => s.id).sort();
     expect(sampleIds).toEqual([r1.id, r2.id, r3.id, r4.id, r5.id].sort());
     expect(sampleIds).not.toContain(rFrozen.id);
-    expect(sampleIds).not.toContain(rV7.id);
-    expect(sampleIds).not.toContain(rV9.id);
+    expect(sampleIds).not.toContain(rV8.id);
+    expect(sampleIds).not.toContain(rV10.id);
 
-    // 경계일별 램프 점수(factor + after) 일치
+    // 모든 대상 after = 새 배점 56(램프 없음). before=저장 v9, factor=날짜별.
     const byId = new Map(
-      (body.samples as { id: string; after: number; factor: number }[]).map((s) => [s.id, s]),
+      (body.samples as { id: string; before: number; after: number; factor: number }[]).map(
+        (s) => [s.id, s],
+      ),
     );
-    expect(byId.get(r1.id)).toMatchObject({ after: 38, factor: 0.2 });
-    expect(byId.get(r2.id)).toMatchObject({ after: 40, factor: 0.4 });
-    expect(byId.get(r3.id)).toMatchObject({ after: 43, factor: 0.6 });
-    expect(byId.get(r4.id)).toMatchObject({ after: 45, factor: 0.8 });
-    expect(byId.get(r5.id)).toMatchObject({ after: 48, factor: 1 });
+    expect(byId.get(r1.id)).toMatchObject({ before: 38, after: 56, factor: 0.2 });
+    expect(byId.get(r2.id)).toMatchObject({ before: 40, after: 56, factor: 0.4 });
+    expect(byId.get(r3.id)).toMatchObject({ before: 43, after: 56, factor: 0.6 });
+    expect(byId.get(r4.id)).toMatchObject({ before: 45, after: 56, factor: 0.8 });
+    expect(byId.get(r5.id)).toMatchObject({ before: 48, after: 56, factor: 1 });
 
     // (a) 실제 store 는 전혀 변하지 않음(버전·점수 유지). 07-11 이전 표본도 불변.
-    for (const r of [r1, r2, r3, r4, r5, rFrozen, rV7, rV9]) {
+    for (const r of [r1, r2, r3, r4, r5, rFrozen, rV8, rV10]) {
       const stored = H.store.runs.find((x) => x.id === r.id)!;
       expect(stored.scoreVersion).toBe(r.scoreVersion);
-      expect(stored.visibilityScore).toBe(STORED);
+      expect(stored.visibilityScore).toBe(r.visibilityScore);
     }
   });
 });
 
 describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () => {
-  it("1회차: v8 4건을 램프 점수로 갱신하고 v9 로 승격", async () => {
-    seedGenRun(1, KST.d0713, STORED); // 0.4 → 40
-    seedGenRun(2, KST.d0715, STORED); // 0.6 → 43
-    seedGenRun(3, KST.d0717, STORED); // 0.8 → 45
-    seedGenRun(4, KST.d0719, STORED); // 1.0 → 48
+  it("1회차: v9 4건을 새 배점으로 갱신하고 v10 로 승격", async () => {
+    seedGenRun(1, KST.d0713, storedV9(0.4)); // 40 → 56
+    seedGenRun(2, KST.d0715, storedV9(0.6)); // 43 → 56
+    seedGenRun(3, KST.d0717, storedV9(0.8)); // 45 → 56
+    seedGenRun(4, KST.d0719, storedV9(1)); //   48 → 56
 
     const res = await POST(post({ batchSize: 200 }));
     const body = await res.json();
@@ -451,36 +454,36 @@ describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () 
     expect(body.processableRemaining).toBe(0);
 
     const s = (n: number) => H.store.runs.find((x) => x.id === id(n))!;
-    expect(s(1).visibilityScore).toBe(40);
-    expect(s(3).visibilityScore).toBe(45);
-    expect(s(4).visibilityScore).toBe(48);
-    for (const n of [1, 2, 3, 4]) expect(s(n).scoreVersion).toBe(9);
+    for (const n of [1, 2, 3, 4]) {
+      expect(s(n).visibilityScore).toBe(56); // 새 배점, 램프 없음
+      expect(s(n).scoreVersion).toBe(10);
+    }
   });
 
-  it("2회차(동일 커서): 남은 v8 없음 → 무처리, 점수 이중 적용 안 됨(멱등)", async () => {
-    seedGenRun(3, KST.d0717, STORED); // 0.8 → 45
-    seedGenRun(4, KST.d0719, STORED); // 1.0 → 48
+  it("2회차(동일 커서): 남은 v9 없음 → 무처리, 점수 이중 적용 안 됨(멱등)", async () => {
+    seedGenRun(3, KST.d0717, storedV9(0.8)); // 45 → 56
+    seedGenRun(4, KST.d0719, storedV9(1)); //   48 → 56
 
     await POST(post({ batchSize: 200 })); // 1회차
     const before = H.store.runs.map((r) => ({ id: r.id, v: r.visibilityScore }));
 
     const res = await POST(post({ batchSize: 200 })); // 2회차
     const body = await res.json();
-    expect(body.processed).toBe(0); // WHERE score_version=8 → 이미 v9 라 선택 0
+    expect(body.processed).toBe(0); // WHERE score_version=9 → 이미 v10 라 선택 0
     expect(body.updated).toBe(0);
     expect(body.processableRemaining).toBe(0);
 
     const after = H.store.runs.map((r) => ({ id: r.id, v: r.visibilityScore }));
     expect(after).toEqual(before); // 점수가 두 번 이동하지 않음
-    expect(H.store.runs.find((x) => x.id === id(3))!.visibilityScore).toBe(45);
-    expect(H.store.runs.find((x) => x.id === id(4))!.visibilityScore).toBe(48);
+    expect(H.store.runs.find((x) => x.id === id(3))!.visibilityScore).toBe(56);
+    expect(H.store.runs.find((x) => x.id === id(4))!.visibilityScore).toBe(56);
   });
 
-  it("CAS 충돌(동시 v9 bump): 선택됐어도 갱신 실패 → conflicted 로 집계, 원값 보존", async () => {
-    seedGenRun(1, KST.d0713, STORED);
-    seedGenRun(2, KST.d0715, STORED); // 이 row 가 update 직전에 v9 로 bump 됐다고 가정
-    seedGenRun(3, KST.d0717, STORED);
-    seedGenRun(4, KST.d0719, STORED);
+  it("CAS 충돌(동시 v10 bump): 선택됐어도 갱신 실패 → conflicted 로 집계, 원값 보존", async () => {
+    seedGenRun(1, KST.d0713, storedV9(0.4));
+    seedGenRun(2, KST.d0715, storedV9(0.6)); // 이 row 가 update 직전에 v10 으로 bump 됐다고 가정
+    seedGenRun(3, KST.d0717, storedV9(0.8));
+    seedGenRun(4, KST.d0719, storedV9(1));
     H.conflictIds.add(id(2));
 
     const res = await POST(post({ batchSize: 200 }));
@@ -489,9 +492,9 @@ describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () 
     expect(body.conflicted).toBe(1);
 
     const r2 = H.store.runs.find((x) => x.id === id(2))!;
-    expect(r2.scoreVersion).toBe(8); // 갱신 안 됨
-    expect(r2.visibilityScore).toBe(STORED); // 원값 보존
-    // 커서 이하로 남은 v8(=재시도 대상) 1건 집계
+    expect(r2.scoreVersion).toBe(9); // 갱신 안 됨
+    expect(r2.visibilityScore).toBe(storedV9(0.6)); // 원값 보존
+    // 커서 이하로 남은 v9(=재시도 대상) 1건 집계
     expect(body.anomalyRemaining).toBe(1);
   });
 });
@@ -499,7 +502,7 @@ describe("(d) live 적용 + CAS 멱등(중복 실행 이중 적용 없음)", () 
 describe("(c)(e) keyset 커서 전진 + anomaly + 전량 anomaly stalled 오탐 없음", () => {
   it("anomaly row 를 지나 커서가 전진하고, 뒤의 정상 row 를 처리", async () => {
     const rAnom = seedGenRun(1, KST.d0715, 999); // 어떤 조합으로도 재현 불가 → no-candidate
-    const rOk = seedGenRun(2, KST.d0717, STORED); // factor 0.8 → 45
+    const rOk = seedGenRun(2, KST.d0717, storedV9(0.8)); // factor 0.8 v9 45 → v10 56
 
     const res = await POST(post({ batchSize: 200 }));
     const body = await res.json();
@@ -509,9 +512,9 @@ describe("(c)(e) keyset 커서 전진 + anomaly + 전량 anomaly stalled 오탐 
     expect(body.anomalies[0].id).toBe(rAnom.id);
     // (c) 커서는 마지막 방문 row(정상)까지 전진
     expect(body.nextCursor).toBe(rOk.id);
-    expect(H.store.runs.find((x) => x.id === rOk.id)!.visibilityScore).toBe(45);
-    // anomaly row 는 v8 유지
-    expect(H.store.runs.find((x) => x.id === rAnom.id)!.scoreVersion).toBe(8);
+    expect(H.store.runs.find((x) => x.id === rOk.id)!.visibilityScore).toBe(56);
+    // anomaly row 는 v9 유지
+    expect(H.store.runs.find((x) => x.id === rAnom.id)!.scoreVersion).toBe(9);
   });
 
   it("(e) 전량 anomaly batch 에서도 nextCursor 전진 → stalled=false", async () => {
@@ -531,16 +534,16 @@ describe("(c)(e) keyset 커서 전진 + anomaly + 전량 anomaly stalled 오탐 
 
 describe("(b)(c) keyset 페이지네이션: batchSize 제한 + nextCursor 로 다음 페이지", () => {
   it("2건씩 두 페이지로 전량 처리(커서 전진 실측)", async () => {
-    seedGenRun(1, KST.d0713, STORED); // 0.4 → 40
-    seedGenRun(2, KST.d0715, STORED); // 0.6 → 43
-    seedGenRun(3, KST.d0717, STORED); // 0.8 → 45
-    seedGenRun(4, KST.d0719, STORED); // 1.0 → 48
+    seedGenRun(1, KST.d0713, storedV9(0.4)); // 40 → 56
+    seedGenRun(2, KST.d0715, storedV9(0.6)); // 43 → 56
+    seedGenRun(3, KST.d0717, storedV9(0.8)); // 45 → 56
+    seedGenRun(4, KST.d0719, storedV9(1)); //   48 → 56
 
     const res1 = await POST(post({ batchSize: 2 }));
     const b1 = await res1.json();
     expect(b1.processed).toBe(2);
     expect(b1.nextCursor).toBe(id(2));
-    expect(b1.processableRemaining).toBe(2); // id>커서 남은 v8
+    expect(b1.processableRemaining).toBe(2); // id>커서 남은 v9
 
     const res2 = await POST(post({ batchSize: 2, cursor: b1.nextCursor }));
     const b2 = await res2.json();
@@ -548,35 +551,38 @@ describe("(b)(c) keyset 페이지네이션: batchSize 제한 + nextCursor 로 �
     expect(b2.nextCursor).toBe(id(4));
     expect(b2.processableRemaining).toBe(0);
 
-    // 전량 v9 승격, 각 램프 점수
-    expect(H.store.runs.find((x) => x.id === id(3))!.visibilityScore).toBe(45);
-    expect(H.store.runs.find((x) => x.id === id(4))!.visibilityScore).toBe(48);
-    for (const n of [1, 2, 3, 4]) expect(H.store.runs.find((x) => x.id === id(n))!.scoreVersion).toBe(9);
+    // 전량 v10 승격, 각 새 배점(56)
+    for (const n of [1, 2, 3, 4]) {
+      expect(H.store.runs.find((x) => x.id === id(n))!.visibilityScore).toBe(56);
+      expect(H.store.runs.find((x) => x.id === id(n))!.scoreVersion).toBe(10);
+    }
   });
 });
 
 describe("(f) preflight 분포 게이트", () => {
-  it("창 안에 v8 외 버전 있으면 clean=false, targetCount 는 v8 만", async () => {
-    seedGenRun(1, KST.d0711, STORED); // v8
-    seedGenRun(2, KST.d0713, STORED); // v8
-    seedGenRun(3, KST.d0715, STORED, { version: 7 }); // v7
-    seedGenRun(4, KST.d0715, STORED, { version: 9 }); // v9
-    seedGenRun(5, KST.d0710, STORED); // frozen 이전 v8 → 창 밖(분포 제외)
+  it("창 안에 v9 외 버전 있으면 clean=false, targetCount 는 v9 만", async () => {
+    seedGenRun(1, KST.d0711, storedV9(0.2)); // v9
+    seedGenRun(2, KST.d0713, storedV9(0.4)); // v9
+    seedGenRun(3, KST.d0715, storedV9(0.6), { version: 8 }); // v8
+    seedGenRun(4, KST.d0715, FULL_V10, { version: 10 }); // v10
+    seedGenRun(5, KST.d0710, storedV9(0.6)); // frozen 이전 v9 → 창 밖(분포 제외)
 
     const res = await POST(post({ preflight: true }));
     const body = await res.json();
     expect(body.preflight).toBe(true);
-    expect(body.targetCount).toBe(2); // frozen 이전 v8 은 제외 → 3 아님 2
-    expect(body.clean).toBe(false); // v7·v9 존재
+    expect(body.targetVersion).toBe(9);
+    expect(body.currentVersion).toBe(10);
+    expect(body.targetCount).toBe(2); // frozen 이전 v9 은 제외 → 3 아님 2
+    expect(body.clean).toBe(false); // v8·v10 존재
     const dist = body.distribution as { scoreVersion: number; count: number }[];
-    expect(dist.find((d) => d.scoreVersion === 8)!.count).toBe(2);
-    expect(dist.find((d) => d.scoreVersion === 7)!.count).toBe(1);
-    expect(dist.find((d) => d.scoreVersion === 9)!.count).toBe(1);
+    expect(dist.find((d) => d.scoreVersion === 9)!.count).toBe(2);
+    expect(dist.find((d) => d.scoreVersion === 8)!.count).toBe(1);
+    expect(dist.find((d) => d.scoreVersion === 10)!.count).toBe(1);
   });
 
-  it("창 안이 전부 v8 이면 clean=true", async () => {
-    seedGenRun(1, KST.d0711, STORED);
-    seedGenRun(2, KST.d0713, STORED);
+  it("창 안이 전부 v9 이면 clean=true", async () => {
+    seedGenRun(1, KST.d0711, storedV9(0.2));
+    seedGenRun(2, KST.d0713, storedV9(0.4));
 
     const res = await POST(post({ preflight: true }));
     const body = await res.json();

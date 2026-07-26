@@ -9,11 +9,12 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveBackfillScore,
+  resolveByReproduction,
   applyRampScore,
   RANKING_COMBOS,
   type RankingFlags,
 } from "./visibility-backfill";
-import { calcVisibility } from "./automation-runner";
+import { calcVisibility, calcVisibilityFull } from "./automation-runner";
 import type { PhaseLevel } from "./visibility-phase";
 
 describe("resolveBackfillScore — 합성 scoreOf", () => {
@@ -124,6 +125,108 @@ describe("resolveBackfillScore — 실제 calcVisibility 바인딩", () => {
         l,
       );
     const r = resolveBackfillScore(999, 1, bound); // 어떤 조합으로도 999 안 나옴
+    expect(r.status).toBe("anomaly");
+    if (r.status === "anomaly") expect(r.reason).toBe("no-candidate");
+  });
+});
+
+describe("resolveByReproduction — 합성 재현/목표", () => {
+  it("재현 후보 0개 → no-candidate", () => {
+    const r = resolveByReproduction(
+      42,
+      () => 10, // 어떤 조합도 42 재현 못함
+      () => 99,
+    );
+    expect(r.status).toBe("anomaly");
+    if (r.status === "anomaly") expect(r.reason).toBe("no-candidate");
+  });
+
+  it("여럿 재현하지만 목표 유일 → ok", () => {
+    const r = resolveByReproduction(
+      50,
+      () => 50, // 전 조합 재현
+      () => 70, // 전 조합 목표 동일
+    );
+    expect(r.status).toBe("ok");
+    if (r.status === "ok") {
+      expect(r.targetScore).toBe(70);
+      expect(r.candidateCount).toBe(RANKING_COMBOS.length);
+    }
+  });
+
+  it("재현 여럿·목표 갈림 → ambiguous-target", () => {
+    const r = resolveByReproduction(
+      50,
+      () => 50,
+      (f) => (f.isTopRanked ? 60 : 72),
+    );
+    expect(r.status).toBe("anomaly");
+    if (r.status === "anomaly") {
+      expect(r.reason).toBe("ambiguous-target");
+      expect([...r.targetScores].sort((a, b) => a - b)).toEqual([60, 72]);
+    }
+  });
+
+  it("resolveBackfillScore 는 재현=레벨0·목표=레벨N 특수형과 동치", () => {
+    const scoreOf = (f: RankingFlags, l: PhaseLevel) => {
+      const base = f.isStronglyRecommended ? 55 : 25;
+      return l === 0 ? base : base + 10;
+    };
+    const viaSpecial = resolveBackfillScore(55, 4, scoreOf);
+    const viaGeneral = resolveByReproduction(
+      55,
+      (f) => scoreOf(f, 0),
+      (f) => scoreOf(f, 4),
+    );
+    expect(viaGeneral).toEqual(viaSpecial);
+  });
+});
+
+describe("resolveByReproduction — v9→v10 실제 바인딩(램프 재현 + 새 배점 목표)", () => {
+  // 일반·중립·단일언급·중단노출(firstPos 210) 고정. isStronglyRecommended 는 일반 분기에서 void.
+  const TEXT = "가".repeat(210) + "요가원 좋아요";
+  const old = (f: RankingFlags, l: PhaseLevel) =>
+    calcVisibility(TEXT, ["요가원"], false, false, "neutral", f.isTopRanked, f.isStronglyRecommended, false, l);
+  const full = (f: RankingFlags) =>
+    calcVisibilityFull(TEXT, ["요가원"], false, false, "neutral", f.isTopRanked, f.isStronglyRecommended, false);
+  const reproduced = (factor: number) => (f: RankingFlags) =>
+    applyRampScore(old(f, 0), old(f, 4), factor);
+
+  // 앵커: topRanked=false → old L0=35, L4=48, full=56 / topRanked=true → 50, 63, 72
+  it("앵커값 확인", () => {
+    const F = { isTopRanked: false, isStronglyRecommended: false };
+    const T = { isTopRanked: true, isStronglyRecommended: false };
+    expect(old(F, 0)).toBe(35);
+    expect(old(F, 4)).toBe(48);
+    expect(full(F)).toBe(56);
+    expect(old(T, 0)).toBe(50);
+    expect(old(T, 4)).toBe(63);
+    expect(full(T)).toBe(72);
+  });
+
+  it.each([
+    [0.2, 38],
+    [0.4, 40],
+    [0.6, 43],
+    [0.8, 45],
+    [1, 48],
+  ])("factor %s: 저장 v9 %i(topRanked=false) 재현 → 새 배점 56 채택", (factor, storedV9) => {
+    const r = resolveByReproduction(storedV9, reproduced(factor), full);
+    expect(r.status).toBe("ok");
+    if (r.status === "ok") {
+      expect(r.targetScore).toBe(56);
+      expect(r.candidateCount).toBe(2); // isStronglyRecommended void → tr=false 2조합
+    }
+  });
+
+  it("factor 1.0: topRanked=true 저장 v9 63 재현 → 새 배점 72", () => {
+    const r = resolveByReproduction(63, reproduced(1), full);
+    expect(r.status).toBe("ok");
+    if (r.status === "ok") expect(r.targetScore).toBe(72);
+  });
+
+  it("재현 불가 저장값 → no-candidate anomaly", () => {
+    const r = resolveByReproduction(999, reproduced(0.6), full);
     expect(r.status).toBe("anomaly");
     if (r.status === "anomaly") expect(r.reason).toBe("no-candidate");
   });

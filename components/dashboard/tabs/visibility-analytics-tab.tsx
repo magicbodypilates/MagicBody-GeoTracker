@@ -246,7 +246,7 @@ export function VisibilityAnalyticsTab({
           <div className="flex-1">
             <span className="font-medium text-th-text">brand 명 검색 데이터로 보기</span>
             <span className="ml-2 text-[11px] text-th-text-muted">
-              {brandedView ? "(brand 명 검색 / 만점 55점 기준)" : "(기본: 일반 검색 / 만점 95점 기준)"}
+              {brandedView ? "(brand 명 검색 / 만점 97점 기준)" : "(기본: 일반 검색 / 만점 99점 기준)"}
             </span>
           </div>
         </label>
@@ -318,7 +318,7 @@ export function VisibilityAnalyticsTab({
           <div className="text-xs uppercase tracking-wider text-th-text-muted">
             평균 가시성
             <span className="ml-1 text-[10px] normal-case text-th-text-muted">
-              {brandedView ? "/55" : "/100"}
+              /100
             </span>
           </div>
           <div className="mt-0.5 text-xl font-bold text-th-text">{avgVisibility}</div>

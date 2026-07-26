@@ -33,6 +33,7 @@ import {
 } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt } from "@/drizzle/schema";
+import { LATEST_PHASE_LEVEL, type PhaseLevel } from "@/lib/server/visibility-phase";
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
@@ -368,6 +369,7 @@ async function runOneProviderForPrompt(args: {
       isTopRanked,
       isStronglyRecommended,
       isBrandedQuery,
+      LATEST_PHASE_LEVEL,
     );
 
     const inserted = await db
@@ -382,7 +384,7 @@ async function runOneProviderForPrompt(args: {
         citations: citations as never,
         visibilityScore,
         // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
-        scoreVersion: 8,
+        scoreVersion: 9,
         sentiment,
         brandMentions,
         competitorMentions,
@@ -616,6 +618,30 @@ function findMentions(text: string, terms: string[]): string[] {
   return [...found];
 }
 
+/**
+ * phaseLevel 별 점수 상수. index = PhaseLevel(0~4). 레벨 0 = 기준 출력.
+ * 나머지 점수 항(base·위치·반복·긍정·isTopRanked·cap)은 레벨 무관 고정.
+ */
+const PHASE_SCORE: Record<
+  PhaseLevel,
+  {
+    brandPositive: number;
+    brandStrong: number;
+    brandBodyUrl: number;
+    brandCitation: number;
+    genNoMentionBodyUrl: number;
+    genNoMentionCitation: number;
+    genMidPos: number;
+    genNeutral: number;
+  }
+> = {
+  0: { brandPositive: 20, brandStrong: 30, brandBodyUrl: 5, brandCitation: 2, genNoMentionBodyUrl: 15, genNoMentionCitation: 2, genMidPos: 0, genNeutral: 5 },
+  1: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 5, brandCitation: 2, genNoMentionBodyUrl: 15, genNoMentionCitation: 2, genMidPos: 0, genNeutral: 5 },
+  2: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 0, genNeutral: 5 },
+  3: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 10, genNeutral: 5 },
+  4: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 10, genNeutral: 8 },
+};
+
 export function calcVisibility(
   text: string,
   brandTerms: string[],
@@ -625,8 +651,10 @@ export function calcVisibility(
   isTopRanked: boolean,
   isStronglyRecommended: boolean,
   isBrandedQuery: boolean,
+  phaseLevel: PhaseLevel,
 ): number {
   if (!text) return 0;
+  const c = PHASE_SCORE[phaseLevel];
   const lower = text.toLowerCase();
 
   // 모든 브랜드 용어(본명 + 별칭)의 전체 출현 위치 수집
@@ -646,28 +674,25 @@ export function calcVisibility(
   // ─────────────────────────────────────────────────────────────────
   // brand 명 검색 (예: "매직바디 어때?") — 평가 어조 + URL 노출만 점수.
   // 언급/위치/반복은 당연한 거라 의미 없음.
-  // 만점 55 = 긍정 평가(+20) + 적극 추천 보너스(+30) + 본문 URL(+5).
   // ─────────────────────────────────────────────────────────────────
   if (isBrandedQuery) {
     if (positions.length === 0) return 0; // 답변에 brand 언급조차 없으면 0
     let score = 0;
-    if (sentiment === "positive") score += 20;
-    if (isStronglyRecommended) score += 30;
-    // URL 점수: 본문 URL 우선(+5), 참고자료에만(+2). 일반 모드보다 가중치 낮음.
-    if (hasBodyUrl) score += 5;
-    else if (hasCitationOnly) score += 2;
+    if (sentiment === "positive") score += c.brandPositive;
+    if (isStronglyRecommended) score += c.brandStrong;
+    // URL 점수: 본문 URL 우선, 참고자료에만은 약한 신호.
+    if (hasBodyUrl) score += c.brandBodyUrl;
+    else if (hasCitationOnly) score += c.brandCitation;
     return Math.min(score, 100);
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // 일반 검색 (brand 명 없는 키워드 검색) — 기존 다차원 점수.
+  // 일반 검색 (brand 명 없는 키워드 검색) — 다차원 점수.
   // ─────────────────────────────────────────────────────────────────
   if (positions.length === 0) {
     // mentions=0: URL 노출만 약한 신호로 점수 부여
-    //   - 본문에 자사 도메인 URL 등장 → +15 (실제 클릭 경로)
-    //   - 참고자료 패널에만 URL     → +2 (약한 신호)
-    if (hasBodyUrl) return 15;
-    if (hasCitationOnly) return 2;
+    if (hasBodyUrl) return c.genNoMentionBodyUrl;
+    if (hasCitationOnly) return c.genNoMentionCitation;
     return 0;
   }
   positions.sort((a, b) => a - b);
@@ -684,7 +709,8 @@ export function calcVisibility(
   const firstPos = merged[0];
 
   let score = 30; // 기본: 언급 있음
-  if (firstPos < 200) score += 20; // 노출 위치
+  if (firstPos < 200) score += 20; // 노출 위치(상단)
+  else if (c.genMidPos > 0 && firstPos < 500) score += c.genMidPos; // 노출 위치(중단)
   if (mentions >= 3) score += 15; // 반복 언급
   else if (mentions >= 2) score += 8;
 
@@ -693,7 +719,7 @@ export function calcVisibility(
   void hasCitationOnly;
 
   if (sentiment === "positive") score += 15;
-  else if (sentiment === "neutral") score += 5;
+  else if (sentiment === "neutral") score += c.genNeutral;
 
   // 1순위 추천 보너스 — 일반 검색에서 명시적 1위로 콕 집어 추천된 경우
   if (isTopRanked) score += 15;

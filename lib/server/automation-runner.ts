@@ -33,7 +33,6 @@ import {
 } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt } from "@/drizzle/schema";
-import { type PhaseLevel } from "@/lib/server/visibility-phase";
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
@@ -617,30 +616,6 @@ function findMentions(text: string, terms: string[]): string[] {
   return [...found];
 }
 
-/**
- * phaseLevel 별 점수 상수. index = PhaseLevel(0~4). 레벨 0 = 기준 출력.
- * 나머지 점수 항(base·위치·반복·긍정·isTopRanked·cap)은 레벨 무관 고정.
- */
-const PHASE_SCORE: Record<
-  PhaseLevel,
-  {
-    brandPositive: number;
-    brandStrong: number;
-    brandBodyUrl: number;
-    brandCitation: number;
-    genNoMentionBodyUrl: number;
-    genNoMentionCitation: number;
-    genMidPos: number;
-    genNeutral: number;
-  }
-> = {
-  0: { brandPositive: 20, brandStrong: 30, brandBodyUrl: 5, brandCitation: 2, genNoMentionBodyUrl: 15, genNoMentionCitation: 2, genMidPos: 0, genNeutral: 5 },
-  1: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 5, brandCitation: 2, genNoMentionBodyUrl: 15, genNoMentionCitation: 2, genMidPos: 0, genNeutral: 5 },
-  2: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 0, genNeutral: 5 },
-  3: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 10, genNeutral: 5 },
-  4: { brandPositive: 25, brandStrong: 35, brandBodyUrl: 10, brandCitation: 5, genNoMentionBodyUrl: 18, genNoMentionCitation: 6, genMidPos: 10, genNeutral: 8 },
-};
-
 /** 브랜드 용어(본명 + 별칭)의 전체 출현 위치 수집 — 순수. */
 function collectBrandPositions(lower: string, brandTerms: string[]): number[] {
   const positions: number[] = [];
@@ -677,73 +652,9 @@ function mergeMentionPositions(positions: number[]): {
   return { mentions: merged.length, firstPos: merged[0] };
 }
 
-export function calcVisibility(
-  text: string,
-  brandTerms: string[],
-  hasBodyUrl: boolean,
-  hasCitationOnly: boolean,
-  sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
-  isTopRanked: boolean,
-  isStronglyRecommended: boolean,
-  isBrandedQuery: boolean,
-  phaseLevel: PhaseLevel,
-): number {
-  if (!text) return 0;
-  const c = PHASE_SCORE[phaseLevel];
-  const lower = text.toLowerCase();
-  const positions = collectBrandPositions(lower, brandTerms);
-
-  // ─────────────────────────────────────────────────────────────────
-  // brand 명 검색 (예: "매직바디 어때?") — 평가 어조 + URL 노출만 점수.
-  // 언급/위치/반복은 당연한 거라 의미 없음.
-  // ─────────────────────────────────────────────────────────────────
-  if (isBrandedQuery) {
-    if (positions.length === 0) return 0; // 답변에 brand 언급조차 없으면 0
-    let score = 0;
-    if (sentiment === "positive") score += c.brandPositive;
-    if (isStronglyRecommended) score += c.brandStrong;
-    // URL 점수: 본문 URL 우선, 참고자료에만은 약한 신호.
-    if (hasBodyUrl) score += c.brandBodyUrl;
-    else if (hasCitationOnly) score += c.brandCitation;
-    return Math.min(score, 100);
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  // 일반 검색 (brand 명 없는 키워드 검색) — 다차원 점수.
-  // ─────────────────────────────────────────────────────────────────
-  if (positions.length === 0) {
-    // mentions=0: URL 노출만 약한 신호로 점수 부여
-    if (hasBodyUrl) return c.genNoMentionBodyUrl;
-    if (hasCitationOnly) return c.genNoMentionCitation;
-    return 0;
-  }
-
-  const { mentions, firstPos } = mergeMentionPositions(positions);
-
-  let score = 30; // 기본: 언급 있음
-  if (firstPos < 200) score += 20; // 노출 위치(상단)
-  else if (c.genMidPos > 0 && firstPos < 500) score += c.genMidPos; // 노출 위치(중단)
-  if (mentions >= 3) score += 15; // 반복 언급
-  else if (mentions >= 2) score += 8;
-
-  // URL 점수는 mentions=0 케이스에서만 적용 (위쪽 분기에서 처리).
-  void hasBodyUrl;
-  void hasCitationOnly;
-
-  if (sentiment === "positive") score += 15;
-  else if (sentiment === "neutral") score += c.genNeutral;
-
-  // 1순위 추천 보너스 — 일반 검색에서 명시적 1위로 콕 집어 추천된 경우
-  if (isTopRanked) score += 15;
-  void isStronglyRecommended; // brand 명 검색 분기에서만 사용
-
-  return Math.min(score, 100);
-}
-
 /**
- * 현행 수집(신규·수동)이 쓰는 배점. calcVisibility 의 phaseLevel 계열과 독립된
- * 별도 상수 세트(FULL_SCORE)로 계산한다. 분기·병합·cap 구조는 동일.
- * 어떤 조합도 100 을 넘지 않는다(cap 이 정보를 잘라 역산 불변식을 깨지 않도록).
+ * 현행 수집(신규·수동)이 쓰는 배점. FULL_SCORE 상수 세트로 계산한다.
+ * 어떤 조합도 100 을 넘지 않는다(cap 이 최종 점수를 [0,100] 으로 제한).
  */
 const FULL_SCORE = {
   brandPositive: 34,

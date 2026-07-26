@@ -316,7 +316,7 @@ function extractSourcesFromAnswer(answer: string) {
  * Bright Data 가 데이터 미준비 상태에서 돌려주는 placeholder
  * (예: `{ message: "Dataset is not ready yet, try again in 30s" }`)를
  * 정상 답변과 구별한다. 이 placeholder 를 정상 답변으로 저장하면
- * findMentions/calcVisibility 가 가짜 결과를 산출하므로 runAiScraper 에서
+ * findMentions/calcVisibilityFull 가 가짜 결과를 산출하므로 runAiScraper 에서
  * 감지 즉시 throw 해 가짜 INSERT 를 차단한다(plan-v2 결정 1·2).
  *
  * 오탐 방지가 최우선(R2) — 아래 두 조건을 **동시 충족(AND)** 할 때만 true.

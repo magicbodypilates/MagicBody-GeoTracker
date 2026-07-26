@@ -6,8 +6,6 @@ type ProjectSettingsTabProps = {
   onBrandChange: (patch: Partial<BrandConfig>) => void;
   onReset?: () => void;
   onResetResponses?: () => void;
-  /** admin 전용 — 점수 체계 변경 후 기존 응답 점수 재산출. undefined 면 버튼 숨김 */
-  onRecalcVisibility?: () => Promise<void> | void;
 };
 
 export function ProjectSettingsTab({
@@ -15,7 +13,6 @@ export function ProjectSettingsTab({
   onBrandChange,
   onReset,
   onResetResponses,
-  onRecalcVisibility,
 }: ProjectSettingsTabProps) {
   return (
     <div className="space-y-5">
@@ -86,47 +83,6 @@ export function ProjectSettingsTab({
           ok={brand.keywords.trim().length > 0}
         />
       </div>
-
-      {/* admin 전용 — DB 스키마 누락 컬럼 보정 (마이그레이션 누락 시 백업) */}
-      {onRecalcVisibility && (
-        <div className="rounded-lg border border-th-border bg-th-card p-4">
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-muted">DB 스키마 보정</div>
-          <p className="mb-3 text-sm text-th-text-secondary">
-            점수 재산출 시 "Failed query" 에러가 나면 score_version 컬럼이 누락된 것. 한 번 클릭하면 멱등하게 컬럼 추가.
-          </p>
-          <button
-            onClick={async () => {
-              const res = await fetch("/geo-tracker/api/admin/ensure-schema", {
-                method: "POST",
-                credentials: "include",
-              });
-              const text = await res.text();
-              alert(`스키마 보정 결과 (status ${res.status}):\n${text.slice(0, 500)}`);
-            }}
-            className="rounded-lg border border-th-border bg-th-card-alt px-4 py-2 text-sm font-medium text-th-text hover:bg-th-card-hover"
-          >
-            DB 스키마 보정
-          </button>
-        </div>
-      )}
-
-      {/* admin 전용 — 점수 체계 변경 후 기존 응답 점수 재산출 (score_version 멱등성 보장) */}
-      {onRecalcVisibility && (
-        <div className="rounded-lg border border-th-border bg-th-card p-4">
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-muted">점수 재산출</div>
-          <p className="mb-3 text-sm text-th-text-secondary">
-            점수 체계 변경 후 기존 응답들의 visibility_score 를 최신 룰로 다시 계산합니다.
-            한 번 클릭하면 끝까지 자동 진행 (60건씩 batch + LLM 10 동시 호출). 200건 기준 약 1~2분 소요.
-            score_version 마커로 멱등성 보장 — 이미 처리된 응답은 건너뜀.
-          </p>
-          <button
-            onClick={() => void onRecalcVisibility()}
-            className="rounded-lg border border-th-border bg-th-card-alt px-4 py-2 text-sm font-medium text-th-text hover:bg-th-card-hover"
-          >
-            점수 재산출 (자동 반복)
-          </button>
-        </div>
-      )}
 
       {/* 부분 초기화 — 응답 이력만 */}
       {onResetResponses && (

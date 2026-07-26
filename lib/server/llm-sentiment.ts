@@ -351,7 +351,7 @@ async function classifyWithClaude(
 
   try {
     // prompt caching: 시스템 프롬프트는 매 요청 동일 → cache_control 로 90% 비용 절감.
-    // 매직바디 200건 재산출 시 system prompt 만 한 번 캐시에 올라가고 나머지는 재사용.
+    // 다건 분류 시 system prompt 만 한 번 캐시에 올라가고 나머지는 재사용.
     const response = await client.messages.create({
       model: ANTHROPIC_MODEL,
       max_tokens: 100,

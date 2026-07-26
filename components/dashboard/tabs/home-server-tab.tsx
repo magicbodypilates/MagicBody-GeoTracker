@@ -261,21 +261,6 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
     });
   }, [timeseries]);
 
-  // 가시성 차트 Y축 상한 — 값 분포에 맞춰 확대(변화 가독성). 항상 실제 최대값 +
-  // 여유 한 칸 이상이라 과장 왜곡 없음. 20~100 범위로 clamp, 데이터 없으면 40.
-  const visibilityYMax = useMemo(() => {
-    let max = 0;
-    for (const row of chartData) {
-      for (const p of VISIBLE_PROVIDERS) {
-        const v = row[p];
-        if (typeof v === "number" && v > max) max = v;
-      }
-    }
-    if (max <= 0) return 40;
-    const ceil = Math.ceil(max / 10) * 10 + 10;
-    return Math.min(100, Math.max(20, ceil));
-  }, [chartData]);
-
   // 모델별 브랜드 언급률 시계열 (mentionRate 0-100%)
   const mentionChartData = useMemo(() => {
     if (!timeseries) return [];
@@ -486,7 +471,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--th-chart-grid)" />
                   <XAxis dataKey="day" tick={{ fontSize: 10 }} />
                   <YAxis
-                    domain={[0, timeseriesTab === "visibility" ? visibilityYMax : 100]}
+                    domain={[0, 100]}
                     tick={{ fontSize: 10 }}
                     unit={timeseriesTab === "mention" ? "%" : ""}
                     allowDecimals={false}

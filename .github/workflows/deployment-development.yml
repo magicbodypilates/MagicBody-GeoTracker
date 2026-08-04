@@ -93,10 +93,35 @@ jobs:
           envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC
           script: |
             DEPLOY_TAG="dev-${{ github.sha }}"
+            # ── 배포 전 디스크 게이트 (fail-closed) ─────────────────────────────────
+            # 이미지를 내려받기 전에 여유를 확인한다. 부족하면 여기서 배포를 멈춘다.
+            # ⚠️ `A && B || C` 로 쓰면 게이트가 정상 차단(exit 1)해도 || 가 발동해 fallback 으로
+            #    흘러가 통과한다. 그래서 && / || 연쇄를 쓰지 않고 if/else 로만 분기한다.
+            if [ -x /usr/local/bin/mbd-disk-preflight.sh ]; then
+              if /usr/local/bin/mbd-disk-preflight.sh; then
+                :
+              else
+                PF_RC=$?
+                echo "disk preflight blocked this deploy (exit=$PF_RC)" >&2
+                exit "$PF_RC"
+              fi
+            else
+              # 게이트 스크립트가 아직 설치되지 않은 상태 — 임계를 85% 로 강화한 축소 판정.
+              # 측정에 실패하면 통과가 아니라 차단이다.
+              PF_USE=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+              case "$PF_USE" in ''|*[!0-9]*) echo "disk measure failed (preflight missing)" >&2; exit 2 ;; esac
+              if [ "$PF_USE" -ge 85 ]; then
+                echo "root disk ${PF_USE}% >= 85% and preflight script missing — deploy blocked" >&2
+                exit 1
+              fi
+            fi
+            # ────────────────────────────────────────────────────────────────────────
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
             docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
-            nohup sh -c "docker image prune --force >/tmp/docker-prune.log 2>&1" >/dev/null 2>&1 &
+            # 배포 후 이미지 정리 — 서비스별 최신 10벌 유지. 규칙 정본은 서버 /usr/local/bin/mbd-docker-gc.sh
+            # 정리 실패가 배포 실패가 되면 안 되므로 결과는 기록만 하고 배포 결과와 분리한다.
+            nohup sh -c 'if [ -x /usr/local/bin/mbd-docker-gc.sh ]; then KEEP=10 /usr/local/bin/mbd-docker-gc.sh; rc=$?; logger -t mbd-deploy "gc exit=$rc"; else logger -t mbd-deploy "gc script MISSING - fallback prune"; docker image prune --force; fi' >/dev/null 2>&1 &
 
   deploy_manual:
     if: github.event_name == 'workflow_dispatch'
@@ -155,7 +180,32 @@ jobs:
           envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC
           script: |
             DEPLOY_TAG="dev-${{ github.sha }}"
+            # ── 배포 전 디스크 게이트 (fail-closed) ─────────────────────────────────
+            # 이미지를 내려받기 전에 여유를 확인한다. 부족하면 여기서 배포를 멈춘다.
+            # ⚠️ `A && B || C` 로 쓰면 게이트가 정상 차단(exit 1)해도 || 가 발동해 fallback 으로
+            #    흘러가 통과한다. 그래서 && / || 연쇄를 쓰지 않고 if/else 로만 분기한다.
+            if [ -x /usr/local/bin/mbd-disk-preflight.sh ]; then
+              if /usr/local/bin/mbd-disk-preflight.sh; then
+                :
+              else
+                PF_RC=$?
+                echo "disk preflight blocked this deploy (exit=$PF_RC)" >&2
+                exit "$PF_RC"
+              fi
+            else
+              # 게이트 스크립트가 아직 설치되지 않은 상태 — 임계를 85% 로 강화한 축소 판정.
+              # 측정에 실패하면 통과가 아니라 차단이다.
+              PF_USE=$(df -P / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+              case "$PF_USE" in ''|*[!0-9]*) echo "disk measure failed (preflight missing)" >&2; exit 2 ;; esac
+              if [ "$PF_USE" -ge 85 ]; then
+                echo "root disk ${PF_USE}% >= 85% and preflight script missing — deploy blocked" >&2
+                exit 1
+              fi
+            fi
+            # ────────────────────────────────────────────────────────────────────────
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
             docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
-            nohup sh -c "docker image prune --force >/tmp/docker-prune.log 2>&1" >/dev/null 2>&1 &
+            # 배포 후 이미지 정리 — 서비스별 최신 10벌 유지. 규칙 정본은 서버 /usr/local/bin/mbd-docker-gc.sh
+            # 정리 실패가 배포 실패가 되면 안 되므로 결과는 기록만 하고 배포 결과와 분리한다.
+            nohup sh -c 'if [ -x /usr/local/bin/mbd-docker-gc.sh ]; then KEEP=10 /usr/local/bin/mbd-docker-gc.sh; rc=$?; logger -t mbd-deploy "gc exit=$rc"; else logger -t mbd-deploy "gc script MISSING - fallback prune"; docker image prune --force; fi' >/dev/null 2>&1 &

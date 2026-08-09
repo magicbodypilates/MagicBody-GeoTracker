@@ -271,7 +271,9 @@ export const REGULAR_ADMIN_HIDDEN_TABS: readonly TabKey[] = [
   "Payment Stats",
   "Marketing Performance",
   "Attribution",
-  // ⚠️ 이탈자 탭은 이름·전화번호를 표시한다 — 최고관리자 전용에서 절대 빼지 말 것.
+  // ⚠️ "관심 고객" 탭(키는 Abandoners 그대로)은 이름·전화번호를 표시한다 — 최고관리자 전용에서
+  //    절대 빼지 말 것. 하위 구분 3개(결제 전 이탈 / 가입 전 이탈 / 가입 전환) 모두 같은 이유다.
+  //    ⭐ 이 키를 바꾸면 여기 숨김 목록과 저장된 activeTab 이 조용히 깨진다 — 화면 제목만 바꿀 것.
   //    (탭 숨김은 편의일 뿐 인가가 아니다. 진짜 인가는 middleware 401 + route requireAdmin 403
   //     + .NET X-Retarget-Key 404. 그래도 일반관리자에게 노출 자체를 만들지 않는다.)
   "Abandoners",

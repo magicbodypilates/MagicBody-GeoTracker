@@ -236,7 +236,10 @@ function fmtKst(iso: string): string {
 
 /** "yyyy-MM-dd" → "2026. 08. 16." 형태. 빈 값은 "—". */
 function fmtDate(d: string): string {
-  return d ? d.replace(/-/g, ". ") + "." : "—";
+  // 서버가 "yyyy-MM-dd" 대신 전체 시각(ISO)을 줄 때가 있다 — 그대로 두면 화면에
+  //   "2026. 08. 01T00:00:00.000Z." 처럼 기계 표기가 노출된다. 앞 10자만 쓴다.
+  const day = d ? d.slice(0, 10) : "";
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day.replace(/-/g, ". ") + "." : "—";
 }
 
 /** 오늘로부터 N일 전(한국 시간 기준) "yyyy-MM-dd". 직접 지정 칸의 기본값을 만드는 데만 쓴다. */

@@ -2,7 +2,7 @@
  * Phase 5C — 서버 자동화 데이터 기반 홈 대시보드.
  *
  * 구성:
- *  1) 기간 선택 (7/30/90일) + 자동/전체 토글
+ *  1) 기간 선택 (7/30/90일 프리셋 + 직접 선택 구간) + 자동/전체 토글
  *  2) KPI 카드 (평균 가시성 · 언급률 · 공식 인용률 · 표본 수) + 전 주기 대비 delta
  *  3) 자동화 건강성 스트립 (활성 스케줄 · 기간 내 자동 실행 건수)
  *  4) 프로바이더별 일별 가시성 시계열 차트
@@ -11,11 +11,18 @@
  *  7) 데이터 없을 때 안내
  *
  * 데이터 소스: /api/workspaces/[id]/stats/* — 5C 단계에서 신규 추가.
+ *
+ * 조회 구간:
+ *   - 프리셋(7/30/90) 은 기존 그대로 `?days=N` 을 보낸다. 서버의 days 는 "지금으로부터
+ *     N×24시간 전"이라 KST 일자 구간과 경계가 미세하게 다른데, 홈은 처음부터 그 창을 기준으로
+ *     읽혀 온 화면이라 일자 구간으로 바꾸면 지금까지 보던 수치가 달라진다. 그래서 통일하지 않는다.
+ *   - "직접 선택" 은 `?from=YYYY-MM-DD&to=YYYY-MM-DD` (KST 양끝 포함) 만 보낸다. 이때
+ *     `days` 는 함께 보내지 않는다(서버는 from/to 우선이지만 혼동을 남기지 않기 위해).
  */
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -32,6 +39,14 @@ import {
 import type { Provider } from "@/components/dashboard/types";
 import { PROVIDER_LABELS, VISIBLE_PROVIDERS } from "@/components/dashboard/types";
 import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
+import { RangeSelector, type CustomRange } from "@/components/dashboard/range-selector";
+import {
+  applyWindowResult,
+  buildScopeKey,
+  cardLabels,
+  shouldShowHomeBody,
+  type FailureKind,
+} from "@/lib/client/home-failure-policy";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -43,12 +58,6 @@ const PROVIDER_COLORS: Record<Provider, string> = {
   google_ai: "#ea4335",
   grok: "#6b7280",
 };
-
-const PERIOD_PRESETS: { label: string; days: number }[] = [
-  { label: "7일", days: 7 },
-  { label: "30일", days: 30 },
-  { label: "90일", days: 90 },
-];
 
 type SummaryResult = {
   days: number;
@@ -89,6 +98,8 @@ type RankingResult = { top: RankingItem[]; bottom: RankingItem[]; total: number 
 
 type BenchmarkResult = {
   days: number;
+  competitorStatus?: "none" | HeavyStatus;
+  heavyMaxDays?: number;
   brand: { name: string; sampleCount: number; mentionRate: number; citedRate: number };
   competitors: Array<{ name: string; sampleCount: number; mentionRate: number; citedRate: number }>;
 };
@@ -102,8 +113,13 @@ type HeatmapResult = {
   mentionMatrix?: (number | null)[][];
 };
 
+/** 무거운 집계가 계산되지 못한 사유 — 카드에 "계산 불가" 안내를 띄우는 데 쓴다. */
+type HeavyStatus = "ok" | "skipped" | "failed";
+
 type CitationsResult = {
   days: number;
+  status?: HeavyStatus;
+  heavyMaxDays?: number;
   total: number;
   domains: Array<{ domain: string; count: number; category: "brand" | "competitor" | "other" }>;
 };
@@ -155,6 +171,8 @@ type HomeServerTabProps = {
 export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServerTabProps) {
   const [wsId, setWsId] = useState<string | null>(null);
   const [days, setDays] = useState(30);
+  /** 직접 선택 구간. null 이면 프리셋(7/30/90) 모드 */
+  const [customRange, setCustomRange] = useState<CustomRange | null>(null);
   const autoOnly = true; // 홈은 항상 자동화 데이터만 표시
   const [timeseriesTab, setTimeseriesTab] = useState<"visibility" | "mention">("visibility");
   // brand 모드 토글 — 체크박스 아래 모든 분석 카드의 데이터 소스 전환.
@@ -173,6 +191,19 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
   const [branded, setBranded] = useState<BrandedResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
+  /**
+   * 창구별 실패 표시 — 한 API 가 실패해도 나머지 카드는 그대로 두고 그 카드만 내린다.
+   * (fetch 는 이미 Promise.allSettled 라 한 창구 실패가 전체를 죽이지는 않는다.)
+   *
+   *   "stale"   같은 구간을 다시 읽다 실패 — 직전 값을 그대로 두고 "갱신 실패"만 알린다.
+   *   "cleared" 구간이 바뀐 조회에서 실패 — 이전 구간 숫자가 새 구간 값처럼 보이면 안 되므로 비운다.
+   */
+  const [failedCards, setFailedCards] = useState<Record<string, FailureKind>>({});
+  /**
+   * 화면에 지금 표시 중인 값이 어느 조회 조건에서 온 것인지. 실패 시 "같은 구간의 갱신 실패"와
+   * "구간이 바뀐 조회의 실패"를 구분하는 기준이다 (구간 + 데이터 소스 토글).
+   */
+  const loadedScopeRef = useRef<string | null>(null);
 
   // wsId 는 AutomationServerTab / server-store 와 공유 (localStorage 캐시)
   useEffect(() => {
@@ -187,7 +218,14 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
     setError("");
     const auto = autoOnly ? "true" : "false";
     const branded = brandedView ? "true" : "false";
-    const qs = `?days=${days}&auto=${auto}&branded=${branded}`;
+    // 이번 조회가 "화면에 지금 떠 있는 값"과 같은 조건인지 판별할 키.
+    const scopeKey = buildScopeKey({ days, customRange, autoOnly, brandedView });
+    const sameScope = loadedScopeRef.current === scopeKey;
+    // 직접 선택이면 from/to 만, 프리셋이면 기존 days 만 보낸다(둘을 함께 보내지 않는다).
+    const period = customRange
+      ? `from=${customRange.from}&to=${customRange.to}`
+      : `days=${days}`;
+    const qs = `?${period}&auto=${auto}&branded=${branded}`;
     try {
       const settled = await Promise.allSettled([
         fetch(`${BP}/api/workspaces/${wsId}/stats/summary${qs}`, { credentials: "include" }),
@@ -201,21 +239,41 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
         fetch(`${BP}/api/workspaces/${wsId}/stats/branded${qs}`, { credentials: "include" }),
       ]);
       const [sumRes, tsRes, rankRes, benchRes, heatRes, citeRes, provRes, driftRes, brandedRes] = settled;
-      if (sumRes.status === "fulfilled" && sumRes.value.ok) setSummary(await sumRes.value.json());
-      if (tsRes.status === "fulfilled" && tsRes.value.ok) setTimeseries(await tsRes.value.json());
-      if (rankRes.status === "fulfilled" && rankRes.value.ok) setRanking(await rankRes.value.json());
-      if (benchRes.status === "fulfilled" && benchRes.value.ok) setBenchmark(await benchRes.value.json());
-      if (heatRes.status === "fulfilled" && heatRes.value.ok) setHeatmap(await heatRes.value.json());
-      if (citeRes.status === "fulfilled" && citeRes.value.ok) setCitations(await citeRes.value.json());
-      if (provRes.status === "fulfilled" && provRes.value.ok) setProvidersStats(await provRes.value.json());
-      if (driftRes.status === "fulfilled" && driftRes.value.ok) setDrift(await driftRes.value.json());
-      if (brandedRes.status === "fulfilled" && brandedRes.value.ok) setBranded(await brandedRes.value.json());
+      const failed: Record<string, FailureKind> = {};
+      /**
+       * 한 창구의 결과를 반영한다.
+       *
+       * 실패 처리가 조회 조건에 따라 갈린다.
+       *   - 조건이 바뀐 조회에서 실패 → 값을 비운다. 이전 구간의 숫자를 새 구간의 값처럼
+       *     남겨 두면 오해를 부른다.
+       *   - 같은 조건을 다시 읽다 실패(5분 폴링·수동 새로고침) → 직전 값을 그대로 둔다.
+       *     순단·재기동 같은 일시 장애에서 화면이 통째로 비었다 돌아오는 깜빡임을 막는다.
+       */
+      const apply = async <T,>(
+        key: string,
+        r: PromiseSettledResult<Response>,
+        set: (v: T | null) => void,
+      ) => {
+        const kind = await applyWindowResult<T>(r, sameScope, set);
+        if (kind) failed[key] = kind;
+      };
+      await apply<SummaryResult>("summary", sumRes, setSummary);
+      await apply<TimeseriesResult>("timeseries", tsRes, setTimeseries);
+      await apply<RankingResult>("ranking", rankRes, setRanking);
+      await apply<BenchmarkResult>("benchmark", benchRes, setBenchmark);
+      await apply<HeatmapResult>("heatmap", heatRes, setHeatmap);
+      await apply<CitationsResult>("citations", citeRes, setCitations);
+      await apply<ProvidersResult>("providers", provRes, setProvidersStats);
+      await apply<DriftResult>("drift", driftRes, setDrift);
+      await apply<BrandedResult>("branded", brandedRes, setBranded);
+      setFailedCards(failed);
+      loadedScopeRef.current = scopeKey;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [wsId, days, autoOnly, brandedView]);
+  }, [wsId, days, customRange, autoOnly, brandedView]);
 
   async function dismissDriftAlert(alertId: string) {
     try {
@@ -306,26 +364,51 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
   }
 
   const hasData = (summary?.current.sampleCount ?? 0) > 0;
+  /** 현재 조회 구간 표시 — 프리셋이면 "30일", 직접 선택이면 "2026-08-01 ~ 2026-08-21" */
+  const periodLabel = customRange ? `${customRange.from} ~ ${customRange.to}` : `${days}일`;
+  /** 표본 수 카드 등에 붙는 접미사 */
+  const periodSuffix = customRange ? periodLabel : `최근 ${days}일`;
+  /** 무거운 집계를 계산하지 못한 카드에 붙일 안내 문구 */
+  const heavyNotice = (status: string | undefined, maxDays: number | undefined) =>
+    status === "skipped"
+      ? `조회 구간이 ${maxDays ? `${maxDays}일` : "계산 상한"}을 넘어 이 항목은 계산하지 않았습니다. 구간을 좁히면 표시됩니다.`
+      : status === "failed"
+        ? "집계가 시간 안에 끝나지 않았습니다. 구간을 좁혀 다시 조회해 주세요. (나머지 수치는 정상입니다)"
+        : null;
+  const citationsNotice = heavyNotice(citations?.status, citations?.heavyMaxDays);
+  const benchmarkNotice =
+    benchmark?.competitorStatus && benchmark.competitorStatus !== "none"
+      ? heavyNotice(benchmark.competitorStatus, benchmark.heavyMaxDays)
+      : null;
+  const failedList = Object.keys(failedCards);
+  /** 직전 값을 그대로 두고 갱신만 실패한 카드 */
+  const staleList = failedList.filter((k) => failedCards[k] === "stale");
+  /** 조회 조건이 바뀐 요청이 실패해 값을 비운 카드 */
+  const clearedList = failedList.filter((k) => failedCards[k] === "cleared");
+  /**
+   * 본문 표시 조건 — summary 한 창구가 실패해도 나머지 카드는 계속 보여야 한다.
+   * (예전에는 `hasData && summary` 하나로 묶여 있어 summary 실패가 홈 전체를 지웠다.)
+   */
+  const hasAnyCardData = Boolean(
+    timeseries || ranking || benchmark || heatmap || citations || providersStats || branded,
+  );
+  const showBody = shouldShowHomeBody({
+    hasData,
+    summaryFailed: Boolean(failedCards.summary),
+    hasAnyCardData,
+  });
 
   return (
     <div className="space-y-5">
       {/* 기간 · 필터 */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex gap-1 rounded-lg border border-th-border bg-th-card-alt p-1">
-          {PERIOD_PRESETS.map((p) => (
-            <button
-              key={p.days}
-              onClick={() => setDays(p.days)}
-              className={`rounded-md px-3 py-1 text-xs ${
-                days === p.days
-                  ? "bg-th-accent text-th-text-inverse"
-                  : "text-th-text-secondary hover:bg-th-card-hover"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+        <RangeSelector
+          value={days}
+          onChange={setDays}
+          allowCustomRange
+          customRange={customRange}
+          onCustomRangeChange={setCustomRange}
+        />
         <button
           onClick={() => void fetchAll()}
           disabled={busy}
@@ -341,7 +424,24 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
         )}
       </div>
 
-      {!hasData && (
+      {failedList.length > 0 && (
+        <div className="rounded-lg border border-th-danger/40 bg-th-card p-3 text-xs text-th-text-secondary">
+          {clearedList.length > 0 && (
+            <div>
+              일부 항목을 불러오지 못했습니다 ({cardLabels(clearedList)}). 나머지 항목은 정상입니다 —
+              구간을 좁혀 다시 조회해 보세요.
+            </div>
+          )}
+          {staleList.length > 0 && (
+            <div>
+              갱신 실패 ({cardLabels(staleList)}) — 표시 중인 값은 직전 조회 기준입니다. 다음 자동
+              갱신 때 다시 시도합니다.
+            </div>
+          )}
+        </div>
+      )}
+
+      {!hasData && !failedCards.summary && (
         <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-5 text-sm text-th-text">
           <div className="mb-2 text-base font-semibold">📊 아직 수집된 데이터가 없습니다</div>
           <p className="text-th-text-secondary">
@@ -357,7 +457,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
         </div>
       )}
 
-      {hasData && summary && (
+      {showBody && (
         <>
           {/* brand 모드 체크박스 — 한 줄 배치 (박스 제거). 상단 KPI/주요 변동과 무관함을 안내. */}
           <label className="flex cursor-pointer items-center gap-2 text-sm">
@@ -372,8 +472,9 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
             </span>
           </label>
 
-          {/* 일반 모드 KPI 카드 4종 — brand 모드에선 의미 다르므로 숨김 */}
-          {!brandedView && (
+          {/* 일반 모드 KPI 카드 4종 — brand 모드에선 의미 다르므로 숨김.
+              summary 창구만 실패한 구간에서는 이 묶음만 빠지고 나머지 카드는 그대로 남는다. */}
+          {!brandedView && summary && (
             <div className="grid gap-3 sm:grid-cols-4">
               <KpiCard
                 title="평균 가시성"
@@ -416,7 +517,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                 <KpiCard
                   title="표본 수"
                   value={String(branded.sampleCount)}
-                  suffix={`/ 최근 ${days}일`}
+                  suffix={`/ ${periodSuffix}`}
                 />
                 <KpiCard
                   title="긍정 평가율"
@@ -518,7 +619,14 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                 </div>
               )}
 
-              {/* 경쟁사 벤치마크 */}
+              {/* 경쟁사 벤치마크 — 계산하지 못한 구간에서는 사유를 대신 보여 준다 */}
+              {benchmarkNotice && (
+                <div className="rounded-lg border border-th-border bg-th-card p-4">
+                  <h3 className="mb-2 text-base font-semibold text-th-text">경쟁사 언급 비교</h3>
+                  <p className="text-sm text-th-text-muted">계산 불가</p>
+                  <p className="mt-1 text-xs text-th-text-muted">{benchmarkNotice}</p>
+                </div>
+              )}
               {benchmark && benchmark.competitors.length > 0 && (
                 <div className="rounded-lg border border-th-border bg-th-card p-4">
                   <h3 className="mb-2 text-base font-semibold text-th-text">경쟁사 언급 비교</h3>
@@ -549,7 +657,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                     </ResponsiveContainer>
                   </div>
                   <p className="mt-2 text-xs text-th-text-muted">
-                    기간 {days}일 · 전체 AI 응답 중 해당 브랜드/경쟁사가 언급된 비율
+                    기간 {periodLabel} · 전체 AI 응답 중 해당 브랜드/경쟁사가 언급된 비율
                   </p>
                 </div>
               )}
@@ -611,13 +719,20 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
           {/* 프롬프트 × 프로바이더 히트맵 — 항상 전체폭 */}
           {heatmap && heatmap.prompts.length > 0 && (
             <div className="w-full">
-              <HeatmapPanel data={heatmap} days={days} />
+              <HeatmapPanel data={heatmap} periodLabel={periodLabel} />
             </div>
           )}
 
           <div className="grid gap-4 lg:grid-cols-2">
             {/* 인용 출처 분석 */}
             {/* 인용 출처 Top — brand 모드에선 숨김 */}
+            {!brandedView && citationsNotice && (
+              <div className="rounded-lg border border-th-border bg-th-card p-4">
+                <h3 className="mb-2 text-base font-semibold text-th-text">인용 출처 Top</h3>
+                <p className="text-sm text-th-text-muted">계산 불가</p>
+                <p className="mt-1 text-xs text-th-text-muted">{citationsNotice}</p>
+              </div>
+            )}
             {!brandedView && citations && citations.domains.length > 0 && (
               <div className="rounded-lg border border-th-border bg-th-card p-4">
                 <h3 className="mb-2 text-base font-semibold text-th-text">
@@ -649,7 +764,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                   ))}
                 </ul>
                 <p className="mt-2 text-xs text-th-text-muted">
-                  기간 {days}일 · 전체 {citations.total}개 응답 중 언급된 도메인
+                  기간 {periodLabel} · 전체 {citations.total}개 응답 중 언급된 도메인
                 </p>
               </div>
             )}
@@ -711,7 +826,7 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
 }
 
 /** 프롬프트 × 프로바이더 히트맵 */
-function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
+function HeatmapPanel({ data, periodLabel }: { data: HeatmapResult; periodLabel: string }) {
   const [heatTab, setHeatTab] = useState<"visibility" | "mention">("visibility");
   const matrix = heatTab === "visibility" ? data.matrix : (data.mentionMatrix ?? data.matrix);
   const isMention = heatTab === "mention";
@@ -813,8 +928,8 @@ function HeatmapPanel({ data, days }: { data: HeatmapResult; days: number }) {
       </div>
       <p className="mt-1.5 text-xs text-th-text-muted">
         {isMention
-          ? `기간 ${days}일 · 셀 = 해당 프롬프트에서 브랜드가 AI 본문에 언급된 비율 (%)`
-          : `기간 ${days}일 · 셀 = 해당 프롬프트의 해당 모델 평균 가시성 점수 (0-100)`}
+          ? `기간 ${periodLabel} · 셀 = 해당 프롬프트에서 브랜드가 AI 본문에 언급된 비율 (%)`
+          : `기간 ${periodLabel} · 셀 = 해당 프롬프트의 해당 모델 평균 가시성 점수 (0-100)`}
       </p>
     </div>
   );

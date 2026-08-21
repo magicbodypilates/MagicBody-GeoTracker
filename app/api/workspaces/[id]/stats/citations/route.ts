@@ -1,5 +1,11 @@
 /**
  * GET /api/workspaces/[id]/stats/citations?days=30&auto=true&limit=20
+ * GET /api/workspaces/[id]/stats/citations?from=2026-08-01&to=2026-08-21
+ *
+ * 조회 구간: `from`/`to` (KST 일자, 양끝 포함) 가 오면 우선, 없으면 기존 `days` 롤링 윈도우.
+ * 넓은 구간 방어: 이 라우트는 runs 의 citations JSONB 를 통째로 Node 로 읽는다. 구간이
+ *   STATS_HEAVY_MAX_DAYS 를 넘으면 계산하지 않고 status="skipped" 로 알리고, 쿼리가
+ *   실패해도 status="failed" 로 200 을 돌려준다(홈의 다른 카드가 함께 죽지 않게).
  *
  * 인용 출처(citations) 를 도메인 단위로 집계.
  *
@@ -19,7 +25,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { db, schema } from "@/lib/server/db";
+import { db, runStatsQuery, schema } from "@/lib/server/db";
 import { and, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace } from "@/lib/server/branded-query-filter";
@@ -32,15 +38,14 @@ import {
 } from "@/components/dashboard/citation-utils";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
+import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
+import {
+  STATS_HEAVY_MAX_DAYS,
+  exceedsHeavyLimit,
+  statsRangeMeta,
+} from "@/lib/server/stats-guard";
 
 export const dynamic = "force-dynamic";
-
-function parseInt32(v: string | null, def: number, max = 365): number {
-  if (!v) return def;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return def;
-  return Math.min(Math.floor(n), max);
-}
 
 /**
  * URL → 분류 키.
@@ -65,20 +70,32 @@ export async function GET(
   const guard = await assertWorkspaceAccess(id, session);
   if (guard) return guard;
   const sp = req.nextUrl.searchParams;
-  const days = parseInt32(sp.get("days"), 30);
+  const range = parseStatsRange(sp, { defaultDays: 30 });
+  if (isStatsRangeError(range)) {
+    return NextResponse.json({ error: range.error }, { status: 400 });
+  }
   const autoOnly = sp.get("auto") !== "false";
   const limit = Math.min(Number(sp.get("limit") ?? 20), 100);
 
-  const now = new Date();
-  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  // 구간이 계산 상한을 넘으면 무거운 쿼리를 아예 돌리지 않는다(조용한 과소집계 대신 명시적 안내).
+  if (exceedsHeavyLimit(range)) {
+    return NextResponse.json({
+      days: range.days,
+      range: statsRangeMeta(range),
+      status: "skipped",
+      heavyMaxDays: STATS_HEAVY_MAX_DAYS,
+      total: 0,
+      domains: [],
+    });
+  }
 
   // 조건 조립은 공유 helper 로 위임 (계획 H-6 — 조건 복제 제거). 동작·계약 불변.
   const brandedView = sp.get("branded") === "true";
   const brandTerms = await getBrandTermsForWorkspace(id);
   const conditions = buildRunStatsWhere({
     workspaceId: id,
-    fromDate: from,
-    toDate: now,
+    fromDate: range.from,
+    toDate: range.to,
     autoOnly,
     brandTerms,
     branded: brandedView,
@@ -120,10 +137,29 @@ export async function GET(
         : null;
 
     // runs 의 citations JSONB 로드 (키 단위 집계)
-    const runs = await db
-      .select({ citations: schema.runs.citations })
-      .from(schema.runs)
-      .where(and(...conditions));
+    let runs: Array<{ citations: unknown }>;
+    try {
+      runs = await runStatsQuery(async (tx) => {
+        return tx
+          .select({ citations: schema.runs.citations })
+          .from(schema.runs)
+          .where(and(...conditions));
+      });
+    } catch (err) {
+      // 이 카드만 "계산 불가"로 떨어뜨린다 — 홈의 나머지 카드는 정상 표시돼야 한다.
+      console.error(
+        "[/api/workspaces/:id/stats/citations] 인용 로드 실패:",
+        err instanceof Error ? err.message : "unknown",
+      );
+      return NextResponse.json({
+        days: range.days,
+        range: statsRangeMeta(range),
+        status: "failed",
+        heavyMaxDays: STATS_HEAVY_MAX_DAYS,
+        total: 0,
+        domains: [],
+      });
+    }
 
     const keyCounts = new Map<string, number>();
     for (const r of runs) {
@@ -156,7 +192,10 @@ export async function GET(
       .slice(0, limit);
 
     return NextResponse.json({
-      days,
+      days: range.days,
+      range: statsRangeMeta(range),
+      status: "ok",
+      heavyMaxDays: STATS_HEAVY_MAX_DAYS,
       total: runs.length,
       domains,
     });

@@ -1,5 +1,8 @@
 /**
  * GET /api/workspaces/[id]/stats/providers?days=30&auto=true
+ * GET /api/workspaces/[id]/stats/providers?from=2026-08-01&to=2026-08-21
+ *
+ * 조회 구간: `from`/`to` (KST 일자, 양끝 포함) 가 오면 우선, 없으면 기존 `days` 롤링 윈도우.
  *
  * 프로바이더별 신뢰도·성능 지표:
  *  - sampleCount: 실행 건수
@@ -10,19 +13,14 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { db, schema } from "@/lib/server/db";
+import { runStatsQuery, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
+import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
+import { statsRangeMeta } from "@/lib/server/stats-guard";
 
 export const dynamic = "force-dynamic";
-
-function parseInt32(v: string | null, def: number, max = 365): number {
-  if (!v) return def;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return def;
-  return Math.min(Math.floor(n), max);
-}
 
 export async function GET(
   req: NextRequest,
@@ -33,17 +31,18 @@ export async function GET(
   const guard = await assertWorkspaceAccess(id, session);
   if (guard) return guard;
   const sp = req.nextUrl.searchParams;
-  const days = parseInt32(sp.get("days"), 30);
+  const range = parseStatsRange(sp, { defaultDays: 30 });
+  if (isStatsRangeError(range)) {
+    return NextResponse.json({ error: range.error }, { status: 400 });
+  }
+  const { from, to } = range;
   const autoOnly = sp.get("auto") !== "false";
-
-  const now = new Date();
-  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
   // parseQuality/durations 등 low 포함해서 집계해야 신뢰도 알 수 있음
   const conditions = [
     eq(schema.runs.workspaceId, id),
     gte(schema.runs.createdAt, from),
-    lt(schema.runs.createdAt, now),
+    lt(schema.runs.createdAt, to),
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
   const __brandedView = sp.get("branded") === "true";
@@ -52,18 +51,21 @@ export async function GET(
   if (__informational) conditions.push(__informational);
 
   try {
-    const rows = await db
-      .select({
-        provider: schema.runs.provider,
-        sampleCount: sql<number>`count(*)::int`,
-        avgDurationMs: sql<number>`avg(${schema.runs.executionDurationMs})::float`,
-        lowCount: sql<number>`count(*) filter (where ${schema.runs.parseQuality} = 'low')::int`,
-        cachedCount: sql<number>`count(*) filter (where ${schema.runs.isCachedResponse} = true)::int`,
-        avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
-      })
-      .from(schema.runs)
-      .where(and(...conditions))
-      .groupBy(schema.runs.provider);
+    // 넓은 구간에서 서버를 무한정 붙잡지 않도록 statement_timeout 을 건다.
+    const rows = await runStatsQuery(async (tx) => {
+      return tx
+        .select({
+          provider: schema.runs.provider,
+          sampleCount: sql<number>`count(*)::int`,
+          avgDurationMs: sql<number>`avg(${schema.runs.executionDurationMs})::float`,
+          lowCount: sql<number>`count(*) filter (where ${schema.runs.parseQuality} = 'low')::int`,
+          cachedCount: sql<number>`count(*) filter (where ${schema.runs.isCachedResponse} = true)::int`,
+          avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
+        })
+        .from(schema.runs)
+        .where(and(...conditions))
+        .groupBy(schema.runs.provider);
+    });
 
     const providers = rows.map((r) => ({
       provider: r.provider,
@@ -76,7 +78,7 @@ export async function GET(
       avgVisibility: Math.round((r.avgVisibility ?? 0) * 10) / 10,
     }));
 
-    return NextResponse.json({ days, providers });
+    return NextResponse.json({ days: range.days, range: statsRangeMeta(range), providers });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown";
     console.error("[/api/workspaces/:id/stats/providers] 실패:", message);

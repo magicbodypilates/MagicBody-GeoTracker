@@ -1,5 +1,8 @@
 /**
  * GET /api/workspaces/[id]/stats/ranking?days=30&auto=true&metric=visibility&limit=5
+ * GET /api/workspaces/[id]/stats/ranking?from=2026-08-01&to=2026-08-21
+ *
+ * 조회 구간: `from`/`to` (KST 일자, 양끝 포함) 가 오면 우선, 없으면 기존 `days` 롤링 윈도우.
  *
  * 프롬프트별 집계 랭킹 — 상위/하위 5개.
  * 메트릭: visibility | mention_rate | cited_rate
@@ -14,21 +17,16 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { db, schema } from "@/lib/server/db";
+import { runStatsQuery, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
+import { parseStatsRange, parseDaysParam, isStatsRangeError } from "@/lib/server/stats-range";
+import { statsRangeMeta } from "@/lib/server/stats-guard";
 
 export const dynamic = "force-dynamic";
 
 const MIN_SAMPLES = 3;
-
-function parseInt32(v: string | null, def: number, max = 365): number {
-  if (!v) return def;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return def;
-  return Math.min(Math.floor(n), max);
-}
 
 export async function GET(
   req: NextRequest,
@@ -39,13 +37,14 @@ export async function GET(
   const guard = await assertWorkspaceAccess(id, session);
   if (guard) return guard;
   const sp = req.nextUrl.searchParams;
-  const days = parseInt32(sp.get("days"), 30);
-  const limit = Math.min(parseInt32(sp.get("limit"), 5), 20);
+  const range = parseStatsRange(sp, { defaultDays: 30 });
+  if (isStatsRangeError(range)) {
+    return NextResponse.json({ error: range.error }, { status: 400 });
+  }
+  const { from, to } = range;
+  const limit = Math.min(parseDaysParam(sp.get("limit"), 5), 20);
   const metric = (sp.get("metric") ?? "visibility").toLowerCase();
   const autoOnly = sp.get("auto") !== "false";
-
-  const now = new Date();
-  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
   const qualityFilter = or(
     ne(schema.runs.parseQuality, "low"),
@@ -54,7 +53,7 @@ export async function GET(
   const conditions = [
     eq(schema.runs.workspaceId, id),
     gte(schema.runs.createdAt, from),
-    lt(schema.runs.createdAt, now),
+    lt(schema.runs.createdAt, to),
     qualityFilter,
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
@@ -64,17 +63,20 @@ export async function GET(
   if (__informational) conditions.push(__informational);
 
   try {
-    const rows = await db
-      .select({
-        promptText: schema.runs.promptText,
-        sampleCount: sql<number>`count(*)::int`,
-        avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
-        mentionCount: sql<number>`count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0)::int`,
-        citedCount: sql<number>`count(*) filter (where array_length(${schema.runs.citedBrandDomains}, 1) > 0)::int`,
-      })
-      .from(schema.runs)
-      .where(and(...conditions))
-      .groupBy(schema.runs.promptText);
+    // 넓은 구간에서 서버를 무한정 붙잡지 않도록 statement_timeout 을 건다.
+    const rows = await runStatsQuery(async (tx) => {
+      return tx
+        .select({
+          promptText: schema.runs.promptText,
+          sampleCount: sql<number>`count(*)::int`,
+          avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
+          mentionCount: sql<number>`count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0)::int`,
+          citedCount: sql<number>`count(*) filter (where array_length(${schema.runs.citedBrandDomains}, 1) > 0)::int`,
+        })
+        .from(schema.runs)
+        .where(and(...conditions))
+        .groupBy(schema.runs.promptText);
+    });
 
     const rich = rows
       .filter((r) => r.sampleCount >= MIN_SAMPLES)
@@ -100,6 +102,8 @@ export async function GET(
 
     return NextResponse.json({
       metric,
+      days: range.days,
+      range: statsRangeMeta(range),
       minSamples: MIN_SAMPLES,
       total: rich.length,
       top: sortedDesc.slice(0, limit),

@@ -1,5 +1,8 @@
 /**
  * GET /api/workspaces/[id]/stats/heatmap?days=30&auto=true
+ * GET /api/workspaces/[id]/stats/heatmap?from=2026-08-01&to=2026-08-21
+ *
+ * 조회 구간: `from`/`to` (KST 일자, 양끝 포함) 가 오면 우선, 없으면 기존 `days` 롤링 윈도우.
  *
  * 프롬프트 × 프로바이더 행렬 — 각 셀이 평균 가시성 점수.
  *
@@ -15,19 +18,14 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { db, schema } from "@/lib/server/db";
+import { runStatsQuery, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
+import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
+import { statsRangeMeta } from "@/lib/server/stats-guard";
 
 export const dynamic = "force-dynamic";
-
-function parseInt32(v: string | null, def: number, max = 365): number {
-  if (!v) return def;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return def;
-  return Math.min(Math.floor(n), max);
-}
 
 export async function GET(
   req: NextRequest,
@@ -38,11 +36,12 @@ export async function GET(
   const guard = await assertWorkspaceAccess(id, session);
   if (guard) return guard;
   const sp = req.nextUrl.searchParams;
-  const days = parseInt32(sp.get("days"), 30);
+  const range = parseStatsRange(sp, { defaultDays: 30 });
+  if (isStatsRangeError(range)) {
+    return NextResponse.json({ error: range.error }, { status: 400 });
+  }
+  const { from, to } = range;
   const autoOnly = sp.get("auto") !== "false";
-
-  const now = new Date();
-  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
   const qualityFilter = or(
     ne(schema.runs.parseQuality, "low"),
@@ -51,7 +50,7 @@ export async function GET(
   const conditions = [
     eq(schema.runs.workspaceId, id),
     gte(schema.runs.createdAt, from),
-    lt(schema.runs.createdAt, now),
+    lt(schema.runs.createdAt, to),
     qualityFilter,
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
@@ -61,17 +60,20 @@ export async function GET(
   if (__informational) conditions.push(__informational);
 
   try {
-    const rows = await db
-      .select({
-        promptText: schema.runs.promptText,
-        provider: schema.runs.provider,
-        avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
-        sampleCount: sql<number>`count(*)::int`,
-        mentionCount: sql<number>`count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0)::int`,
-      })
-      .from(schema.runs)
-      .where(and(...conditions))
-      .groupBy(schema.runs.promptText, schema.runs.provider);
+    // 넓은 구간에서 서버를 무한정 붙잡지 않도록 statement_timeout 을 건다.
+    const rows = await runStatsQuery(async (tx) => {
+      return tx
+        .select({
+          promptText: schema.runs.promptText,
+          provider: schema.runs.provider,
+          avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::float`,
+          sampleCount: sql<number>`count(*)::int`,
+          mentionCount: sql<number>`count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0)::int`,
+        })
+        .from(schema.runs)
+        .where(and(...conditions))
+        .groupBy(schema.runs.promptText, schema.runs.provider);
+    });
 
     // 결과를 matrix 형태로 변환
     const promptSet = new Set<string>();
@@ -110,7 +112,8 @@ export async function GET(
     );
 
     return NextResponse.json({
-      days,
+      days: range.days,
+      range: statsRangeMeta(range),
       prompts,
       providers,
       matrix,

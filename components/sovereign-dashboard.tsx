@@ -35,6 +35,7 @@ import { HomeServerTab } from "@/components/dashboard/tabs/home-server-tab";
 import { PaymentStatsTab } from "@/components/dashboard/tabs/payment-stats-tab";
 import { Ga4MarketingTab } from "@/components/dashboard/tabs/ga4-marketing-tab";
 import { AttributionTab } from "@/components/dashboard/tabs/attribution-tab";
+import { PageAnalyticsTab } from "@/components/dashboard/tabs/page-analytics-tab";
 import { InterestCustomersTab } from "@/components/dashboard/tabs/interest-customers-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
 import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-tab";
@@ -106,6 +107,15 @@ const tabIcons: Record<TabKey, ReactNode> = {
       <path d="M12 2a10 10 0 1 0 10 10" />
       <path d="M12 12 22 4" />
       <path d="M12 12V2" />
+    </Icon>
+  ),
+  // 페이지·클릭 통계 — 문서 한 장 위에 눌린 자리 하나.
+  "Page Analytics": (
+    <Icon>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+      <circle cx="12" cy="14" r="2" />
+      <path d="M12 16v3" />
     </Icon>
   ),
   // 이탈자 — 나갔다가 돌아오지 않은 사람(사람 + 나가는 화살표).
@@ -295,6 +305,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     tooltip: "실제 결제건에 기록된 유입경로를 채널(구글·메타·네이버·직접·미상)별로 분석합니다(확정·결제건 직접).",
     details:
       "결제 시 함께 기록된 유입경로(utm·클릭ID 존재 여부)를 기준으로 채널별 결제 건수·매출과 결제별 상세를 봅니다. 이 값은 실제 결제건에서 직접 집계한 확정 데이터로, 기능 배포 이후 결제만 포함됩니다. GA4 '마케팅 성과' 탭은 전체 트래픽 기준 추정·기여 집계라 수치가 다르므로 두 값을 더하거나 직접 비교하지 마세요. 광고 표시가 없는 결제는 '직접·미상'으로 묶이며 여기에는 기능 켜기 이전 결제와 직접 방문이 섞여 있습니다. 정규과정은 과정 목록 확정 후 계약금의 10배(실매출)로 환산되며, 확정 전에는 실결제액 기준입니다. 자체취소·방문결제는 추적 한계로 오차가 있을 수 있습니다. 개인정보(클릭ID 원문·이메일·전화)는 표시하지 않으며 클릭ID는 기록 여부(✓/−)만 노출합니다. 최고관리자 전용.",
+  },
+  "Page Analytics": {
+    title: "페이지·클릭 통계",
+    tooltip: "어느 페이지를 많이 보고 그 안에서 무엇을 눌렀는지, 우리 사이트가 직접 센 값으로 봅니다.",
+    details:
+      "바깥 도구를 거치지 않고 사이트가 스스로 센 기록입니다. 로그인하지 않은 방문자도 포함하며 광고 차단 프로그램의 영향을 거의 받지 않습니다. 조회 수는 본 횟수이고 방문 수는 브라우저 탭 기준이라 두 값을 섞어 읽으면 안 됩니다. 오래된 기간은 날짜별 요약 기준으로 바뀌어 방문 수가 날짜별 합계가 되며, 그때는 화면에 그 사실이 함께 표시됩니다. 개인을 알아볼 수 있는 값(회원 번호·이름·연락처·유입 표시)은 저장 자체를 하지 않습니다. 조회 전용이며 파일 내려받기는 제공하지 않습니다. 최고관리자 전용.",
   },
   Abandoners: {
     // ⭐ 표시 제목만 "관심 고객"으로 통합했다(2026-08-09). **탭 키("Abandoners")는 그대로다** —
@@ -2244,6 +2260,12 @@ ${exampleJson}
 
     if (activeTab === "Attribution") {
       return <AttributionTab />;
+    }
+
+    // 페이지·클릭 통계 — 상위 권한 전용(types.ts REGULAR_ADMIN_HIDDEN_TABS 등재).
+    // 탭 숨김은 편의일 뿐이고 진짜 게이트는 서버(middleware 401 · route requireAdmin 403 · .NET 열쇠 404)다.
+    if (activeTab === "Page Analytics") {
+      return <PageAnalyticsTab />;
     }
 
     // ⚠️ 이름·전화번호를 표시하는 화면 — 최고관리자 전용(types.ts REGULAR_ADMIN_HIDDEN_TABS 등재).

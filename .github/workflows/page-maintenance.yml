@@ -1,0 +1,154 @@
+name: Page analytics maintenance (daily)
+
+# 페이지·클릭 통계 유지보수 — 하루 한 번 요약을 만들고, 요약이 끝난 상세만 지운다.
+#   task_id: magicbody-page-click-analytics-2026-08-16 (plan-v2 §3-5(3))
+#
+# 왜 이 워크플로가 필요한가:
+#   상세(cnme_page_event)는 90일만 보관한다. 그 안에 요약이 만들어지지 않으면 그 날짜 원본은
+#   사라지고 **어떤 방법으로도 복원되지 않는다.** "스크립트가 있다"만으로는 실행되지 않으므로
+#   실행 주체를 여기서 명시한다.
+#
+# 무엇을 하나 (API 한 번 호출):
+#   POST /api/Retarget/RunPageMaintenance/
+#     ① 폐기 카운터 flush  ② 밀린 날짜 요약(최대 14일)  ③ 상세 삭제(인터록 · 최대 20만행)
+#     ④ 상세가 사라진 날짜 표시  ⑤ 3년 지난 요약 정리
+#   삭제는 **요약이 끝난 날짜만** 지운다(서버가 보장). 이 워크플로는 방아쇠일 뿐이다.
+#
+# 안전:
+#   - DB 에 직접 붙지 않는다. HTTPS 한 번뿐이라 SQL 방화벽·SSH 키를 건드리지 않는다.
+#   - 응답에는 건수와 날짜만 있다(개인식별자·경로 라벨 없음) — 로그에 그대로 남겨도 안전하다.
+#   - 실패하면 job 이 빨간불이 된다(조용한 실패 금지). 알림은 기존 GitHub Actions 실패 알림 경로를 쓴다.
+#
+# ⚠️ 필요한 저장소 secret 3개 (하나라도 없으면 즉시 실패한다)
+#     RETARGET_API_KEY   — 이미 등록돼 있다(deployment-production.yml 이 쓴다). 불일치면 404.
+#     CMS_API_APP_ID     — .NET ApiKeyMiddleware 의 AppID 헤더. **신규 등록 필요.**
+#     CMS_API_APP_KEY    — 〃 AppKey 헤더. **신규 등록 필요.**
+#   (선택) MB_API_DOMAIN — 기본값 https://api.magicbodypilates.co.kr
+#   ⛔ 값을 워크플로에 직접 적지 말 것.
+
+on:
+  schedule:
+    # 매일 18:30 UTC = KST 03:30 (트래픽이 가장 적은 시간대)
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+    inputs:
+      max_rollup_days:
+        description: '한 번에 요약할 최대 일수(1～14 · 비우면 14)'
+        required: false
+        default: ''
+      skip_delete:
+        description: '삭제를 건너뛰고 요약만 하려면 "yes"'
+        required: false
+        default: 'no'
+
+# 두 실행이 겹치면 같은 날짜를 동시에 요약하게 된다. 직렬화한다
+# (서버에도 즉시 건너뛰기 게이트가 있지만, 여기서 막는 편이 재시도 낭비가 없다).
+concurrency:
+  group: page-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Run page maintenance
+        env:
+          API_DOMAIN: ${{ secrets.MB_API_DOMAIN }}
+          APP_ID: ${{ secrets.CMS_API_APP_ID }}
+          APP_KEY: ${{ secrets.CMS_API_APP_KEY }}
+          RETARGET_KEY: ${{ secrets.RETARGET_API_KEY }}
+          MAX_ROLLUP_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_rollup_days || '' }}
+          SKIP_DELETE: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_delete || 'no' }}
+        run: |
+          set -euo pipefail
+
+          DOMAIN="${API_DOMAIN:-https://api.magicbodypilates.co.kr}"
+
+          # 시크릿 누락을 조용히 넘기지 않는다 — 없으면 여기서 멈춘다.
+          # ⚠️ `[ -z "$X" ] && MISSING=...` 형태를 쓰지 말 것 — 값이 **있을 때** 테스트가 1을 돌려주고
+          #    set -e 가 그 자리에서 스크립트를 끝낸다(정상 경로가 조용히 죽는다). if 블록으로 쓴다.
+          MISSING=""
+          if [ -z "${APP_ID}" ];       then MISSING="${MISSING} CMS_API_APP_ID"; fi
+          if [ -z "${APP_KEY}" ];      then MISSING="${MISSING} CMS_API_APP_KEY"; fi
+          if [ -z "${RETARGET_KEY}" ]; then MISSING="${MISSING} RETARGET_API_KEY"; fi
+          if [ -n "${MISSING}" ]; then
+            echo "저장소 secret 누락 —${MISSING}. 등록 후 다시 실행하세요."
+            exit 1
+          fi
+
+          # 본문 조립 — 입력이 없으면 빈 객체(서버 기본값: 요약 14일 · 삭제 20만행)가 정상 경로다.
+          BODY='{}'
+          if [ "${SKIP_DELETE}" = "yes" ]; then BODY='{"skipDelete":true}'; fi
+          if [ -n "${MAX_ROLLUP_DAYS}" ]; then
+            case "${MAX_ROLLUP_DAYS}" in
+              ''|*[!0-9]*) echo "max_rollup_days 는 숫자여야 합니다: ${MAX_ROLLUP_DAYS}"; exit 1 ;;
+            esac
+            if [ "${SKIP_DELETE}" = "yes" ]; then
+              BODY="{\"skipDelete\":true,\"maxRollupDays\":${MAX_ROLLUP_DAYS}}"
+            else
+              BODY="{\"maxRollupDays\":${MAX_ROLLUP_DAYS}}"
+            fi
+          fi
+          echo "요청 본문: ${BODY}"
+
+          # 헤더는 -H 로만 전달한다(URL·프로세스 목록에 시크릿이 남지 않게).
+          HTTP=$(curl -sS -o response.json -w '%{http_code}' \
+            --max-time 600 --retry 2 --retry-delay 30 --retry-connrefused \
+            -X POST "${DOMAIN}/api/Retarget/RunPageMaintenance/" \
+            -H 'Content-Type: application/json' \
+            -H "AppID: ${APP_ID}" \
+            -H "AppKey: ${APP_KEY}" \
+            -H "X-Retarget-Key: ${RETARGET_KEY}" \
+            -d "${BODY}")
+
+          echo "HTTP ${HTTP}"
+          # 응답에는 건수·날짜만 있다(개인정보 없음) — 그대로 남겨 원인 추적에 쓴다.
+          cat response.json || true
+          echo
+
+          if [ "${HTTP}" = "404" ]; then
+            echo "404 — X-Retarget-Key 불일치이거나 서버에 열쇠가 설정되지 않았습니다(fail-closed)."
+            exit 1
+          fi
+          if [ "${HTTP}" != "200" ]; then
+            echo "HTTP ${HTTP} — 유지보수 호출 실패."
+            exit 1
+          fi
+
+          # ⚠️ .NET 은 업무 오류도 HTTP 200 + success:false 로 돌려준다. 반드시 본문을 본다.
+          if ! jq -e '.success == true' response.json > /dev/null; then
+            echo "success != true — 유지보수가 실패했습니다."
+            jq -r '.respMessage // "메시지 없음"' response.json || true
+            exit 1
+          fi
+
+          jq -r '"요약 \(.datas.rollupDays)일(남은 \(.datas.rollupPendingRemaining)일) · 상세 \(.datas.deletedRows)행 삭제(커트오프 \(.datas.deleteCutoffKst)/\(.datas.deleteCutoffReason)) · 폐기 카운터 \(.datas.dropFlushedRows)건 flush"' response.json
+
+          # ⭐ 조용한 이상 신호를 job 요약에 남긴다(실패시키지는 않는다 — 다음 실행이 이어받는 것이 정상 동작).
+          if jq -e '.datas.deleteCutoffReason == "interlock"' response.json > /dev/null; then
+            echo "::warning::요약이 없는 날짜($(jq -r .datas.blockedByKst response.json))가 삭제를 막고 있습니다. 계속되면 보관 일수를 넘겨 DB 가 늘어납니다."
+          fi
+          if jq -e '.datas.rollupPendingRemaining > 0' response.json > /dev/null; then
+            echo "::warning::요약이 밀려 있습니다(남은 $(jq -r .datas.rollupPendingRemaining response.json)일). 하루 상한(14일) 때문이며 다음 실행이 이어받습니다."
+          fi
+          if jq -e '.datas.dropRestoredRows > 0' response.json > /dev/null; then
+            echo "::warning::폐기 카운터 flush 가 롤백돼 메모리로 되돌아갔습니다. DB 오류를 확인하세요."
+          fi
+          if jq -e '.datas.skippedBusy == true' response.json > /dev/null; then
+            echo "::warning::다른 유지보수 실행과 겹쳐 이번 호출은 아무것도 하지 않았습니다."
+          fi
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK: ${{ secrets.SLACK_APPROVAL_WEBHOOK_URL }}
+        run: |
+          if [ -n "${SLACK}" ]; then
+            curl -sS -X POST -H 'Content-Type: application/json' \
+              --data "{\"text\":\"[페이지 통계] 유지보수 워크플로 실패 — run ${GITHUB_RUN_ID}. 요약이 밀리면 90일 뒤 원본이 사라집니다. 점검 필요.\"}" \
+              "${SLACK}" || true
+          else
+            echo "SLACK_APPROVAL_WEBHOOK_URL secret 미설정 — Slack 경보 생략(로그만)."
+          fi

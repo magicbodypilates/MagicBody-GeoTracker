@@ -15,7 +15,9 @@ import { and } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
   buildBaseConditions,
+  buildCursorCondition,
   buildReportConditions,
+  isCursorTimestamp,
   isInformationalPrompt,
   matchesJob,
   type ScopedWorkspace,
@@ -297,5 +299,42 @@ describe("모든 잡의 base 조건이 예외 없이 조립된다", () => {
         expect(() => render(buildReportConditions(w, prodWorkspaces))).not.toThrow();
       }
     }
+  });
+});
+
+/* ============================================================
+ * 커서 — 마이크로초 해상도
+ * ============================================================ */
+
+describe("buildCursorCondition — 마이크로초 커서", () => {
+  const CURSOR = {
+    createdAtUs: "2026-07-31T12:46:13.011985Z",
+    id: "b40e1939-e006-42d6-afff-9d01ac341f6a",
+  };
+
+  it("시각을 timestamptz 캐스팅 파라미터로 넘긴다 — 값이 잘리지 않는다", () => {
+    const q = dialect.sqlToQuery(buildCursorCondition(CURSOR));
+    expect(q.sql).toContain('"created_at" >');
+    expect(q.sql).toContain("::timestamptz");
+    // 마이크로초 6자리가 파라미터에 그대로 실린다(Date 로 감싸면 여기서 잘린다).
+    expect(q.params).toContain("2026-07-31T12:46:13.011985Z");
+    expect(q.params).toContain(CURSOR.id);
+    expect(q.params.some((p) => p instanceof Date)).toBe(false);
+  });
+
+  it("좌변이 컬럼 원본이라 created_at 인덱스를 쓸 수 있다", () => {
+    const q = dialect.sqlToQuery(buildCursorCondition(CURSOR));
+    // date_trunc 같은 표현식으로 컬럼을 감싸지 않는다.
+    expect(q.sql).not.toContain("date_trunc");
+  });
+
+  it("커서 형식은 마이크로초 6자리만 통과한다", () => {
+    expect(isCursorTimestamp("2026-07-31T12:46:13.011985Z")).toBe(true);
+    // 밀리초까지만 담긴 값은 자기 행을 다시 고르므로 거절한다.
+    expect(isCursorTimestamp("2026-07-31T12:46:13.011Z")).toBe(false);
+    expect(isCursorTimestamp("2026-07-31T12:46:13Z")).toBe(false);
+    expect(isCursorTimestamp("2026-07-31T12:46:13.011985+00:00")).toBe(false);
+    expect(isCursorTimestamp(new Date().toISOString())).toBe(false);
+    expect(isCursorTimestamp(null)).toBe(false);
   });
 });

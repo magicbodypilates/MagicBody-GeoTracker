@@ -37,6 +37,45 @@ const H = vi.hoisted(() => {
 
   const isDate = (v: unknown): v is Date => v instanceof Date;
   const norm = (v: unknown) => (isDate(v) ? v.getTime() : v);
+
+  /* ──────────────────────────────────────────────────────────────
+   * created_at 의 마이크로초 재현
+   *
+   * postgres 의 timestamptz 는 마이크로초 해상도인데 JS `Date` 에는 그 자리가 없다.
+   * 저장소를 Date 로만 채우면 "커서가 밀리초로 잘려 자기 행을 다시 고른다" 는 결함을
+   * 하네스가 **구조적으로 재현할 수 없다**(운영에서만 드러난 이유가 이것이다).
+   * 그래서 행은 선택적으로 `createdAtUs`(마이크로초 텍스트)를 들고, created_at 관련
+   * 비교·정렬·투영은 전부 마이크로초 단위로 한다.
+   * ────────────────────────────────────────────────────────────── */
+  const MICRO_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z$/;
+  const microsOfText = (t: string): number => {
+    const m = MICRO_RE.exec(t);
+    if (!m) return Date.parse(t) * 1000;
+    return Date.parse(`${m[1]}.000Z`) * 1000 + Number(m[2]);
+  };
+  /** 행의 created_at 을 마이크로초 정수로. */
+  const rowMicros = (row: Row): number =>
+    typeof row.createdAtUs === "string"
+      ? microsOfText(row.createdAtUs)
+      : (row.createdAt as Date).getTime() * 1000;
+  /** 행의 created_at 을 마이크로초 텍스트로 (to_char 투영 재현). */
+  const rowMicroText = (row: Row): string =>
+    typeof row.createdAtUs === "string"
+      ? row.createdAtUs
+      : `${(row.createdAt as Date).toISOString().slice(0, -1)}000Z`;
+  /** 비교 대상 값을 마이크로초 정수로 — Date · 마이크로초 텍스트 · `?::timestamptz` 조각. */
+  const valueMicros = (v: unknown): number => {
+    if (isDate(v)) return v.getTime() * 1000;
+    if (typeof v === "string") return microsOfText(v);
+    const frag = v as { __sql?: true; values?: unknown[] };
+    if (frag?.__sql) {
+      const bound = frag.values?.[0];
+      if (typeof bound === "string") return microsOfText(bound);
+      if (isDate(bound)) return bound.getTime() * 1000;
+    }
+    return NaN;
+  };
+  const isCreatedAt = (c: { name?: string } | undefined) => c?.name === "createdAt";
   const cmp = (a: unknown, b: unknown): number => {
     const av = norm(a) as number | string;
     const bv = norm(b) as number | string;
@@ -83,6 +122,25 @@ const H = vi.hoisted(() => {
     }
     const col = pred.col as { name?: string } | undefined;
     const val = pred.val;
+    // created_at 은 밀리초로 뭉개지 않고 마이크로초로 비교한다(커서 정확도의 핵심).
+    if (isCreatedAt(col) && ["eq", "ne", "gt", "gte", "lt", "lte"].includes(pred.op ?? "")) {
+      const a = rowMicros(row);
+      const b = valueMicros(val);
+      switch (pred.op) {
+        case "eq":
+          return a === b;
+        case "ne":
+          return a !== b;
+        case "gt":
+          return a > b;
+        case "gte":
+          return a >= b;
+        case "lt":
+          return a < b;
+        default:
+          return a <= b;
+      }
+    }
     switch (pred.op) {
       case "and":
         return (pred.preds as Pred[]).every((p) => match(row, p));
@@ -116,11 +174,17 @@ const H = vi.hoisted(() => {
     }
   };
 
-  type Proj = Record<string, { __col?: true; __sql?: true; name?: string }>;
+  type Proj = Record<string, { __col?: true; __sql?: true; name?: string; raw?: string }>;
+  /** 집계 투영인가 — to_char 같은 스칼라 sql 투영과 갈라야 한다. */
+  const isAggProj = (v: { __sql?: true; raw?: string } | undefined) =>
+    !!v?.__sql && String(v.raw ?? "").includes("count(");
+
   const projectRow = (row: Row, proj: Proj, aggCount = 0) => {
     const out: Row = {};
     for (const [k, v] of Object.entries(proj)) {
-      if (v && v.__sql) out[k] = aggCount;
+      if (isAggProj(v)) out[k] = aggCount;
+      // 커서 투영(to_char) — 마이크로초 텍스트를 실제로 만들어 준다.
+      else if (v && v.__sql && String(v.raw ?? "").includes("to_char(")) out[k] = rowMicroText(row);
       else if (v && v.__col) out[k] = row[v.name!];
       else out[k] = undefined;
     }
@@ -136,13 +200,16 @@ const H = vi.hoisted(() => {
     limit: number | undefined,
   ) => {
     let rows = store[table.__table as "runs" | "workspaces"].filter((r) => match(r, where));
-    const hasAgg = Object.values(proj).some((v) => v && v.__sql);
+    const hasAgg = Object.values(proj).some((v) => isAggProj(v));
     if (hasAgg) return [projectRow(rows[0] ?? {}, proj, rows.length)];
 
     if (orders.length > 0) {
       rows = [...rows].sort((a, b) => {
         for (const o of orders) {
-          const c = cmp(a[o.col.name!], b[o.col.name!]) * (o.dir === "desc" ? -1 : 1);
+          const c =
+            (isCreatedAt(o.col)
+              ? Math.sign(rowMicros(a) - rowMicros(b))
+              : cmp(a[o.col.name!], b[o.col.name!])) * (o.dir === "desc" ? -1 : 1);
           if (c !== 0) return c;
         }
         return 0;
@@ -276,9 +343,11 @@ const H = vi.hoisted(() => {
   const P = (op: string, extra: Record<string, unknown>) => ({ __pred: true as const, op, ...extra });
   // 태그드 템플릿의 원문을 붙들어 둔다 — `sql`false`` 같은 리터럴 조각을 평가하기 위해서다.
   const sqlTag = Object.assign(
-    (strings?: TemplateStringsArray) => ({
+    (strings?: TemplateStringsArray, ...values: unknown[]) => ({
       __sql: true as const,
       raw: strings ? Array.from(strings).join("") : "",
+      // 보간된 값을 붙들어 둔다 — `${cursorTs}::timestamptz` 같은 조각을 실제로 평가한다.
+      values,
     }),
     {
       join: () => ({ __sql: true as const, raw: "" }),
@@ -389,6 +458,8 @@ type SeedOpts = {
   workspaceId?: string;
   sentiment?: string;
   answer?: string;
+  /** 마이크로초까지 있는 created_at — 실 DB 의 해상도를 재현할 때만 준다. */
+  createdAtUs?: string;
 };
 
 function seedRun(n: number, opts: SeedOpts = {}) {
@@ -405,6 +476,7 @@ function seedRun(n: number, opts: SeedOpts = {}) {
     isAuto: opts.isAuto ?? true,
     parseQuality: "high",
     createdAt: opts.createdAt ?? inWindowAt(n),
+    ...(opts.createdAtUs ? { createdAtUs: opts.createdAtUs } : {}),
   };
   H.store.runs.push(row);
   return row;
@@ -829,6 +901,97 @@ describe("(c)(e) 커서 전진", () => {
     ).json();
     expect(b3.nextCursor.id).toBe(id(3));
     expect(b3.remainingAfterCursor).toBe(0);
+  });
+
+  /* ────────────────────────────────────────────────────────────
+   * 마이크로초 커서 회귀 (운영 dry-run 에서만 드러난 결함)
+   *
+   * 운영 실측: 배치당 감소폭이 100 이 아니라 99 였고, 마지막 1건이 영원히 남아
+   * 배치 상한(1000)에 걸렸다. manifest 가 2,790 줄이 아니라 3,786 줄로 나왔다.
+   *
+   * 원인은 `created_at` 의 마이크로초 자리다. 드라이버가 JS Date 로 옮기며 밀리초로
+   * 자르면 커서가 자기 행보다 작아져 그 행이 다음 배치에 다시 걸린다.
+   * 종전 하네스는 저장소를 Date 로만 채워 이 결함을 **재현할 수 없었다**.
+   * ──────────────────────────────────────────────────────────── */
+  describe("마이크로초 커서 — 배치 경계 중복 없음", () => {
+    /** 같은 밀리초 안에서 마이크로초만 다른 시각. */
+    const usAt = (minutes: number, micros: number) => {
+      const base = inWindowAt(minutes).toISOString().slice(0, -1); // ...T03:mm:00.000
+      return `${base}${String(micros).padStart(3, "0")}Z`;
+    };
+
+    // ⚠️ dry-run 으로 확인한다. apply 모드는 처리한 행의 score_version 이 바뀌어 대상에서
+    //    빠지므로 재선택 중복이 **가려진다**(운영에서도 dry-run 에서만 드러난 이유다).
+    it("마이크로초를 가진 행들을 3배치로 훑어도 id 집합이 정확히 disjoint 하다", async () => {
+      const total = 6;
+      for (let n = 1; n <= total; n += 1) {
+        seedRun(n, { createdAt: inWindowAt(n), createdAtUs: usAt(n, n * 137) });
+      }
+
+      const seen: string[][] = [];
+      let cursor: unknown = null;
+      for (let batch = 0; batch < 3; batch += 1) {
+        const b = await (await POST(post({ job: "v11", batchSize: 2, cursor }))).json();
+        expect(b.processed).toBe(2);
+        seen.push(b.changes.map((c: { id: string }) => c.id));
+        cursor = b.nextCursor;
+        expect(b.remainingAfterCursor).toBe(total - 2 * (batch + 1));
+      }
+
+      const flat = seen.flat();
+      // 중복 0 · 누락 0 — 배치별 집합이 서로 겹치지 않고 전량을 덮는다.
+      expect(new Set(flat).size).toBe(total);
+      expect(flat.sort()).toEqual([1, 2, 3, 4, 5, 6].map((n) => id(n)).sort());
+    });
+
+    it("마지막 행에서 잔여가 0 으로 떨어진다(정체 없음)", async () => {
+      seedRun(1, { createdAt: inWindowAt(1), createdAtUs: usAt(1, 11) });
+      seedRun(2, { createdAt: inWindowAt(2), createdAtUs: usAt(2, 985) });
+
+      const b1 = await (
+        await POST(post({ job: "v11", apply: true, batchSize: 1 }))
+      ).json();
+      expect(b1.remainingAfterCursor).toBe(1);
+      expect(b1.nextCursor.createdAtUs).toBe(usAt(1, 11));
+
+      const b2 = await (
+        await POST(post({ job: "v11", apply: true, batchSize: 1, cursor: b1.nextCursor }))
+      ).json();
+      expect(b2.processed).toBe(1);
+      expect(b2.changes[0].id).toBe(id(2));
+      // 종전 코드에서는 여기가 1 로 굳어 스윕이 끝나지 않았다.
+      expect(b2.remainingAfterCursor).toBe(0);
+    });
+
+    it("dry-run 도 커서가 끝까지 전진한다(행을 바꾸지 않아 잔여가 스스로 줄지 않는다)", async () => {
+      for (let n = 1; n <= 3; n += 1) {
+        seedRun(n, { createdAt: inWindowAt(n), createdAtUs: usAt(n, 999) });
+      }
+
+      let cursor: unknown = null;
+      const ids: string[] = [];
+      for (let batch = 0; batch < 3; batch += 1) {
+        const b = await (await POST(post({ job: "v11", batchSize: 1, cursor }))).json();
+        expect(b.dryRun).toBe(true);
+        expect(b.processed).toBe(1);
+        ids.push(b.changes[0].id);
+        cursor = b.nextCursor;
+      }
+      expect(new Set(ids).size).toBe(3);
+      // dry-run 이라 창 전체 잔여는 그대로지만 커서 뒤 잔여는 0 이어야 끝난다.
+      const lastRemaining = await (
+        await POST(post({ job: "v11", batchSize: 1, cursor }))
+      ).json();
+      expect(lastRemaining.processed).toBe(0);
+      expect(lastRemaining.remainingAfterCursor).toBe(0);
+    });
+
+    it("밀리초까지만 담긴 커서는 거절한다(잘린 커서 재유입 차단)", async () => {
+      const res = await POST(
+        post({ job: "v11", cursor: { createdAtUs: "2026-07-15T03:01:00.000Z", id: id(1) } }),
+      );
+      expect(res.status).toBe(400);
+    });
   });
 
   it("(e) 전량 anomaly 배치에서도 커서가 전진하고 잔여가 감소한다", async () => {

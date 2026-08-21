@@ -118,18 +118,52 @@ export function buildBaseConditions(
 }
 
 /**
+ * 커서 시각의 문자열 형식 — UTC · 마이크로초 6자리 고정.
+ *
+ * ⚠️ 자릿수를 6 으로 **고정**하는 것이 이 형식의 핵심이다. 밀리초까지만 담은 값을 커서로
+ *    받아주면 아래 `buildCursorCondition` 이 자기 자신을 다시 고르는 경로가 되살아난다
+ *    (§ buildCursorCondition 주석). 그래서 느슨하게 받지 않고 정확히 6자리만 통과시킨다.
+ */
+export const CURSOR_TS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+/** 커서 시각 텍스트 형식이 맞는지. */
+export function isCursorTimestamp(value: unknown): value is string {
+  return typeof value === "string" && CURSOR_TS_PATTERN.test(value);
+}
+
+/**
+ * SELECT 절에 넣는 커서 시각 투영.
+ *
+ * `created_at` 은 postgres 에서 **마이크로초** 해상도인데 드라이버가 JS `Date` 로 옮기는
+ * 순간 밀리초로 잘린다(JS Date 에 마이크로초 자리가 없다). 잘린 값을 커서로 쓰면 커서가
+ * 자기 행보다 **작아져** 그 행이 다음 배치에 다시 걸린다. 그래서 커서 전용으로 원래
+ * 해상도를 텍스트로 따로 뽑는다.
+ */
+export const cursorTimestampProjection =
+  sql<string>`to_char(${schema.runs.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+/** `(created_at, id)` 안정 커서 — 시각은 마이크로초 텍스트로 실어 나른다. */
+export type RescoreCursor = { createdAtUs: string; id: string };
+
+/**
  * `(created_at, id)` 안정 커서 — 이 커서보다 뒤에 있는 행만.
  *
- * 행값 비교 `(a,b) > (x,y)` 와 논리적으로 동일한 전개형을 쓴다. 전개형은 drizzle 연산자만으로
- * 표현되어 테스트 하네스가 조건을 실제로 평가할 수 있다(원시 sql 조각은 평가할 수 없다).
+ * 행값 비교 `(a,b) > (x,y)` 와 논리적으로 동일한 전개형을 쓴다.
+ *
+ * ⚠️ 시각을 `Date` 로 받지 않는다. `Date` 는 밀리초까지만 담아 `created_at` 의 마이크로초
+ *    자리를 버리고, 그러면 잘린 커서 < 자기 행의 실제 시각 이 되어 **그 행이 매 배치마다
+ *    다시 선택된다**(배치당 1건 중복 · 마지막 행에서는 잔여가 1 에서 줄지 않아 종료 불능).
+ *    그래서 마이크로초 텍스트를 그대로 파라미터로 넘기고 timestamptz 로 캐스팅해 비교한다.
+ *    비교식의 좌변은 컬럼 원본이므로 `(created_at)` 인덱스도 그대로 쓸 수 있다.
  *
  * 이 정렬에서는 신규 INSERT 가 항상 커서 뒤에 생기므로(created_at = now) 스윕 도중 삽입된
  * 행이 커서 앞으로 끼어들어 누락되는 경로가 구조적으로 없다.
  */
-export function buildCursorCondition(cursor: { createdAt: Date; id: string }): SQL {
+export function buildCursorCondition(cursor: RescoreCursor): SQL {
+  const at = sql`${cursor.createdAtUs}::timestamptz`;
   return or(
-    gt(schema.runs.createdAt, cursor.createdAt),
-    and(eq(schema.runs.createdAt, cursor.createdAt), gt(schema.runs.id, cursor.id)),
+    gt(schema.runs.createdAt, at),
+    and(eq(schema.runs.createdAt, at), gt(schema.runs.id, cursor.id)),
   ) as SQL;
 }
 

@@ -50,6 +50,8 @@ import {
 import {
   buildBaseConditions,
   buildCursorCondition,
+  cursorTimestampProjection,
+  isCursorTimestamp,
   buildReportConditions,
   buildWindowConditions,
   isInformationalPrompt,
@@ -191,7 +193,13 @@ function checkGates(req: NextRequest): GateFailure | null {
  * 입력
  * ============================================================ */
 
-type Cursor = { createdAt: Date; id: string };
+/**
+ * 스윕 커서 — 시각은 **마이크로초 텍스트**다.
+ *
+ * JS `Date` 로 들고 있으면 `created_at` 의 마이크로초 자리가 잘려 커서가 자기 행보다
+ * 작아지고, 그 행이 다음 배치에 다시 걸린다(배치당 1건 중복 · 종료 불능).
+ */
+type Cursor = { createdAtUs: string; id: string };
 
 type ParsedBody = {
   jobId: RescoreJobId;
@@ -224,14 +232,12 @@ function parseBody(raw: unknown): ParsedBody | { error: string } {
   let cursor: Cursor | null = null;
   if (body.cursor !== undefined && body.cursor !== null) {
     const c = body.cursor as Record<string, unknown>;
-    if (typeof c.createdAt !== "string" || typeof c.id !== "string") {
+    // 마이크로초 6자리를 강제한다 — 밀리초까지만 담긴 커서는 자기 행을 다시 고르므로
+    // 관대하게 받아주면 안 된다(형식 정의는 selector 의 CURSOR_TS_PATTERN).
+    if (!isCursorTimestamp(c.createdAtUs) || typeof c.id !== "string" || !UUID_RE.test(c.id)) {
       return { error: "invalid_cursor" };
     }
-    const createdAt = new Date(c.createdAt);
-    if (Number.isNaN(createdAt.getTime()) || !UUID_RE.test(c.id)) {
-      return { error: "invalid_cursor" };
-    }
-    cursor = { createdAt, id: c.id };
+    cursor = { createdAtUs: c.createdAtUs, id: c.id };
   }
 
   let batchSize = DEFAULT_BATCH;
@@ -374,6 +380,8 @@ type TargetRow = {
   scoreVersion: number;
   isAuto: boolean;
   createdAt: Date;
+  /** 커서 전용 — created_at 의 마이크로초 해상도를 잃지 않은 텍스트. */
+  createdAtUs: string;
 };
 
 /**
@@ -667,6 +675,7 @@ export async function POST(req: NextRequest) {
         scoreVersion: schema.runs.scoreVersion,
         isAuto: schema.runs.isAuto,
         createdAt: schema.runs.createdAt,
+        createdAtUs: cursorTimestampProjection,
       })
       .from(schema.runs)
       .where(and(...batchConditions))
@@ -706,7 +715,7 @@ export async function POST(req: NextRequest) {
           mismatchCounts,
           mismatches: mismatches.slice(0, 20),
           nextCursor: cursor
-            ? { createdAt: cursor.createdAt.toISOString(), id: cursor.id }
+            ? { createdAtUs: cursor.createdAtUs, id: cursor.id }
             : null,
         },
         { status: 409 },
@@ -719,7 +728,7 @@ export async function POST(req: NextRequest) {
     let lastVisited: Cursor | null = cursor;
 
     for (const row of targets) {
-      lastVisited = { createdAt: row.createdAt, id: row.id };
+      lastVisited = { createdAtUs: row.createdAtUs, id: row.id };
       const ws = wsById.get(row.workspaceId);
       if (!ws) {
         anomalies.push({ id: row.id, reason: "no-workspace", matchedSets: [] });
@@ -870,7 +879,7 @@ export async function POST(req: NextRequest) {
       remainingAfterCursor,
       residualTotal,
       nextCursor: lastVisited
-        ? { createdAt: lastVisited.createdAt.toISOString(), id: lastVisited.id }
+        ? { createdAtUs: lastVisited.createdAtUs, id: lastVisited.id }
         : null,
       elapsedMs: Date.now() - startedAt,
     });
@@ -884,7 +893,7 @@ export async function POST(req: NextRequest) {
         error: "internal_error",
         job: jobId,
         // 재개 지점 — 이 배치는 트랜잭션 단위로 전량 롤백됐다.
-        nextCursor: cursor ? { createdAt: cursor.createdAt.toISOString(), id: cursor.id } : null,
+        nextCursor: cursor ? { createdAtUs: cursor.createdAtUs, id: cursor.id } : null,
       },
       { status: 500 },
     );

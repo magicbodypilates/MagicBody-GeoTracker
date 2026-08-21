@@ -59,7 +59,7 @@ function usage() {
   log(`사용법:
   node scripts/visibility-rescore.mjs report    --job <${JOB_IDS.join("|")}>
   node scripts/visibility-rescore.mjs preflight --job <${JOB_IDS.join("|")}>
-  node scripts/visibility-rescore.mjs sweep     --job <id> [--apply] [--batch-size N] [--cursor-created ISO --cursor-id UUID]
+  node scripts/visibility-rescore.mjs sweep     --job <id> [--apply] [--batch-size N] [--cursor-created <UTC 마이크로초 6자리> --cursor-id UUID]
   node scripts/visibility-rescore.mjs rollback  --job <id> --manifest <파일명 또는 ${MANIFEST_DIR}/파일명>
   node scripts/visibility-rescore.mjs reconcile --job <id> --manifest <파일명 또는 ${MANIFEST_DIR}/파일명>
   node scripts/visibility-rescore.mjs verify-manifest --job <id> --manifest <경로> --expected <경로> [--show-sample]
@@ -120,7 +120,12 @@ function parseArgs(argv) {
 
   if (cursorCreated || cursorId) {
     if (!cursorCreated || !cursorId) throw new Error("--cursor-created 와 --cursor-id 는 함께 준다");
-    args.cursor = { createdAt: cursorCreated, id: cursorId };
+    // 형식은 라우트와 동일하게 마이크로초 6자리 고정 — 밀리초까지만 담긴 커서는
+    // 자기 행을 다시 고르므로 여기서 먼저 막는다.
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(cursorCreated)) {
+      throw new Error("--cursor-created 는 2026-07-31T12:46:13.011985Z 형태(마이크로초 6자리)여야 한다");
+    }
+    args.cursor = { createdAtUs: cursorCreated, id: cursorId };
   }
   return args;
 }
@@ -296,7 +301,7 @@ async function runSweep(args) {
       log(`[sweep] 실패: ${err instanceof Error ? err.message : "unknown"}`);
       log(
         cursor
-          ? `[sweep] 재개 커서 --cursor-created ${cursor.createdAt} --cursor-id ${cursor.id}`
+          ? `[sweep] 재개 커서 --cursor-created ${cursor.createdAtUs} --cursor-id ${cursor.id}`
           : "[sweep] 재개 커서 없음(처음부터 재시작)",
       );
       // 상세(409 불일치 목록 등)는 파일로만 남긴다 — 로그가 아니라 여기서 본다.
@@ -363,6 +368,25 @@ async function runSweep(args) {
     }
     if (body.processed === 0) {
       log("[sweep] 중단 — 남은 대상이 있다고 보고했으나 배치가 비었다(커서 정체)");
+      out(`SUMMARY ${JSON.stringify(summary({ status: "cursor-stalled", lastCursor: cursor }))}`);
+      return 1;
+    }
+    // ── 정체 감지 ──
+    // 종료 판정을 remainingAfterCursor === 0 하나에만 걸면, 커서가 전진하지 않는 순간
+    // 같은 행을 상한(maxBatches)까지 반복 처리한다. dry-run 은 행을 바꾸지 않아 잔여가
+    // 스스로 줄지 않으므로 커서 전진이 유일한 진행 신호다. 배치가 비지 않았더라도
+    // (processed > 0) 커서가 직전과 같으면 진행이 멈춘 것이므로 즉시 중단한다.
+    const advanced =
+      body.nextCursor !== null &&
+      (cursor === null ||
+        body.nextCursor.createdAtUs !== cursor.createdAtUs ||
+        body.nextCursor.id !== cursor.id);
+    if (!advanced) {
+      log(
+        `[sweep] 중단 — 커서가 전진하지 않았다(정체). 처리=${body.processed} ` +
+          `커서=${cursor ? `${cursor.createdAtUs}/${cursor.id}` : "없음"}`,
+      );
+      out(`SUMMARY ${JSON.stringify(summary({ status: "cursor-stalled", lastCursor: cursor }))}`);
       return 1;
     }
     cursor = body.nextCursor;

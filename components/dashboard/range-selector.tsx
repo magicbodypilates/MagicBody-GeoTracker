@@ -117,7 +117,9 @@ export function RangeSelector({
   }
 
   return (
-    <div className="flex flex-col items-end gap-2">
+    // 날짜 입력 패널은 절대 위치로 띄운다. 흐름에 넣으면 이 영역의 너비·높이가 커져
+    // 위 버튼 줄과 옆 컨트롤(새로고침 등)이 밀린다.
+    <div className="relative flex flex-col items-end gap-2">
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium text-th-text-muted">조회 기간:</span>
         <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-0.5">
@@ -176,7 +178,7 @@ export function RangeSelector({
       )}
 
       {customEnabled && panelOpen && (
-        <div className="flex flex-col gap-2 rounded-lg border border-th-border bg-th-card p-3">
+        <div className="absolute right-0 top-full z-30 mt-2 flex w-max flex-col gap-2 rounded-lg border border-th-border bg-th-card p-3 shadow-lg">
           <div className="flex flex-wrap items-center justify-end gap-2">
             <label className="flex items-center gap-1 text-xs text-th-text-secondary">
               <span>시작일</span>

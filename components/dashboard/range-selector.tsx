@@ -178,8 +178,8 @@ export function RangeSelector({
       )}
 
       {customEnabled && panelOpen && (
-        <div className="absolute right-0 top-full z-30 mt-2 flex w-max flex-col gap-2 rounded-lg border border-th-border bg-th-card p-3 shadow-lg">
-          <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="absolute left-0 top-full z-30 mt-2 flex w-max max-w-[calc(100vw-2rem)] flex-col gap-2 rounded-lg border border-th-border bg-th-card p-3 shadow-lg">
+          <div className="flex flex-wrap items-center justify-start gap-2">
             <label className="flex items-center gap-1 text-xs text-th-text-secondary">
               <span>시작일</span>
               <input
@@ -228,7 +228,7 @@ export function RangeSelector({
             )}
           </div>
           {error && (
-            <div role="alert" className="text-right text-[11px] text-th-danger">
+            <div role="alert" className="text-left text-[11px] text-th-danger">
               {error}
             </div>
           )}

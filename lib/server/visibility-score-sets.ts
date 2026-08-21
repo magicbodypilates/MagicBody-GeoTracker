@@ -12,7 +12,7 @@
  *    기존 세트는 수정하지 않는다.
  */
 
-export type ScoreSetId = "legacy8" | "full10" | "low60" | "v12b";
+export type ScoreSetId = "legacy8" | "full10" | "low60" | "v12b" | "full83";
 
 export type Sentiment = "positive" | "neutral" | "negative" | "not-mentioned";
 
@@ -56,6 +56,9 @@ export type ScoreSet = {
  *   low60   — legacy8 의 각 상수에 같은 계수(0.6)를 적용한 세트. 계수가 균일하므로
  *             응답 사이의 상대 순서가 그대로 보존된다.
  *   v12b    — 현행 수집이 쓰는 세트. 브랜드 분기 상수는 full10 과 동일.
+ *   full83  — full10 의 일반(gen) 분기 상수에 같은 계수(0.83)를 적용해 반올림한 세트.
+ *             계수가 균일하므로 일반 질의 응답 사이의 상대 순서가 보존된다. 브랜드 분기
+ *             상수는 full10 과 동일(이 세트를 쓰는 잡이 브랜드 질의를 대상에서 제외한다).
  *
  * 어떤 세트에서도 분기별 합계가 100 미만이라 cap 이 정보를 잘라 역산 불변식을 깨지 않는다
  * (테스트가 이 성질을 고정한다).
@@ -124,6 +127,22 @@ export const SCORE_SETS: Record<ScoreSetId, ScoreSet> = {
     genPositive: 14,
     genNeutral: 13,
     genTopRanked: 11,
+  },
+  full83: {
+    brandPositive: 34,
+    brandStrong: 48,
+    brandBodyUrl: 15,
+    brandCitation: 8,
+    genNoMentionBodyUrl: 21,
+    genNoMentionCitation: 8,
+    genBase: 25,
+    genFirstPos: 17,
+    genMidPos: 12,
+    genMentions3: 12,
+    genMentions2: 7,
+    genPositive: 15,
+    genNeutral: 10,
+    genTopRanked: 13,
   },
 };
 

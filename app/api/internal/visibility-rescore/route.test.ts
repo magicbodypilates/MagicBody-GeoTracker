@@ -671,7 +671,8 @@ describe("(i) 도달 제어·인증 게이트", () => {
   });
 
   it("없는 잡 id → 400", async () => {
-    expect((await POST(post({ job: "v13" }))).status).toBe(400);
+    expect((await POST(post({ job: "v14" }))).status).toBe(400);
+    expect((await POST(post({ job: "v13t" }))).status).toBe(400);
     expect((await POST(post({}))).status).toBe(400);
     expect((await POST(post({ job: 11 }))).status).toBe(400);
   });
@@ -767,6 +768,21 @@ describe("meta 모드 — DB 접근 없이 잡 정의 반환", () => {
     expect(body.targetVersion).toBe(11);
     expect(body.targetSet).toBe("low60");
     expect(body.jobHash).toBe(jobHash("v11"));
+  });
+
+  it("v13 은 v11 과 같은 창·소스 버전을 쓰고 목표만 다르다", async () => {
+    const body = await (await POST(post({ job: "v13", meta: true }))).json();
+    expect(body.mode).toBe("meta");
+    expect(body.windowFromUtc).toBe(RESCORE_JOBS.v11.fromUtc);
+    expect(body.windowToUtc).toBe(RESCORE_JOBS.v11.toUtc);
+    expect(body.providers).toEqual(["google_ai"]);
+    expect(body.sourceVersions).toEqual([8, 10]);
+    expect(body.informationalOnly).toBe(true);
+    expect(body.workspaceScope).toBe("production");
+    expect(body.targetVersion).toBe(13);
+    expect(body.targetSet).toBe("full83");
+    expect(body.jobHash).toBe(jobHash("v13"));
+    expect(body.jobHash).not.toBe(jobHash("v11"));
   });
 });
 

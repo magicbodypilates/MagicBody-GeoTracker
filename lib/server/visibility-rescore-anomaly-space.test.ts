@@ -57,7 +57,7 @@ function* inputSpace(): Generator<BaseVisibilityInputs> {
   }
 }
 
-const TARGET_SETS: ScoreSetId[] = ["low60", "v12b"];
+const TARGET_SETS: ScoreSetId[] = ["low60", "v12b", "full83"];
 const DECLARED_SETS: ScoreSetId[] = ["legacy8", "full10"];
 
 describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
@@ -124,8 +124,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
     expect(seen).toBeGreaterThan(1000);
   });
 
-  it("두 잡의 소스 버전이 전부 재현 세트에 매핑돼 있다(매핑 누락 시 전량 skip 이 된다)", () => {
-    for (const jobId of ["v11", "v12", "v12t"] as const) {
+  it("모든 잡의 소스 버전이 전부 재현 세트에 매핑돼 있다(매핑 누락 시 전량 skip 이 된다)", () => {
+    for (const jobId of ["v11", "v12", "v12t", "v13"] as const) {
       for (const version of RESCORE_JOBS[jobId].sourceVersions) {
         expect(REPRO_SET_BY_VERSION[version]).toBeDefined();
       }

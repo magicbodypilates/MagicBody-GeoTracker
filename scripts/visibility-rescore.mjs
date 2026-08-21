@@ -47,7 +47,7 @@ const SCORE_MIN = 0;
 const SCORE_MAX = 100;
 
 const MODES = ["report", "preflight", "sweep", "rollback", "reconcile", "verify-manifest"];
-const JOB_IDS = ["v11", "v12", "v12t"];
+const JOB_IDS = ["v11", "v12", "v12t", "v13"];
 /** rollback·reconcile 이 읽는 manifest 는 마운트된 고정 디렉터리 안의 파일만 허용한다. */
 const MANIFEST_DIR = "/app/data/audit";
 const MANIFEST_BASENAME_RE = /^rescore_[A-Za-z0-9_.-]+\.jsonl$/;

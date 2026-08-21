@@ -14,7 +14,7 @@ import { SCORE_SETS, type ScoreSetId } from "@/lib/server/visibility-score-sets"
 /** 운영/비운영 워크스페이스 구분 — UUID 를 코드에 두지 않고 is_production 으로 판정한다. */
 export type WorkspaceScope = "production" | "non-production";
 
-export type RescoreJobId = "v11" | "v12" | "v12t";
+export type RescoreJobId = "v11" | "v12" | "v12t" | "v13";
 
 export type RescoreJob = {
   /** 대상 창 시작(inclusive · timestamptz 비교) */
@@ -41,6 +41,10 @@ export type RescoreJob = {
 const DIAGNOSTIC_SETS: readonly ScoreSetId[] = ["legacy8", "full10"];
 
 export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
+  /**
+   * 과거 실행 원장의 대조·원복에 필요하므로 정의를 남긴다. 이 잡으로 만들어진 manifest 는
+   * 이 정의가 그대로 있어야 rollback·reconcile 이 지문을 맞출 수 있다.
+   */
   v11: {
     fromUtc: "2026-06-25T15:00:00.000Z",
     toUtc: "2026-07-31T15:00:00.000Z",
@@ -77,6 +81,22 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     informationalOnly: false,
     autoOnly: true,
     workspaceScope: "non-production",
+  },
+  /**
+   * v11 과 대상 창·provider·소스 버전이 완전히 동일하고 목표(버전·세트)만 다른 잡.
+   * 대상 정의를 v11 에서 복사해 두 잡이 같은 구간을 가리킨다는 사실을 테스트가 고정한다.
+   */
+  v13: {
+    fromUtc: "2026-06-25T15:00:00.000Z",
+    toUtc: "2026-07-31T15:00:00.000Z",
+    providers: ["google_ai"],
+    sourceVersions: [8, 10],
+    diagnosticSets: DIAGNOSTIC_SETS,
+    targetVersion: 13,
+    targetSet: "full83",
+    informationalOnly: true,
+    autoOnly: true,
+    workspaceScope: "production",
   },
 };
 

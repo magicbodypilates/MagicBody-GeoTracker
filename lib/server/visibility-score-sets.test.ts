@@ -70,7 +70,7 @@ describe("전 세트 × 전 조합 열거: 0..100 이탈 없음", () => {
     { mentions: 5, firstPos: 900 },
   ];
 
-  it("네 세트 모두 어떤 조합에서도 0..100", () => {
+  it("등록된 모든 세트가 어떤 조합에서도 0..100", () => {
     for (const setId of SCORE_SET_IDS) {
       for (const shape of mentionShapes) {
         for (const sentiment of sentiments) {
@@ -121,6 +121,7 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     full10: { brand: 97, gen: 99, noMention: 25 },
     low60: { brand: 33, gen: 57, noMention: 9 },
     v12b: { brand: 97, gen: 99, noMention: 36 },
+    full83: { brand: 97, gen: 82, noMention: 21 },
   };
 
   it("검산표와 정확히 일치", () => {
@@ -157,6 +158,47 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
       brandBodyUrl: f.brandBodyUrl,
       brandCitation: f.brandCitation,
     });
+  });
+
+  it("full83 의 일반 분기 상수 = full10 × 0.83 (반올림 포함) — 계수가 균일해 상대 순서가 보존된다", () => {
+    const f = SCORE_SETS.full10;
+    const s = SCORE_SETS.full83;
+    const genKeys = [
+      "genNoMentionBodyUrl",
+      "genNoMentionCitation",
+      "genBase",
+      "genFirstPos",
+      "genMidPos",
+      "genMentions3",
+      "genMentions2",
+      "genPositive",
+      "genNeutral",
+      "genTopRanked",
+    ] as const;
+    for (const k of genKeys) {
+      expect(s[k]).toBe(Math.round(f[k] * 0.83));
+    }
+  });
+
+  it("full83 의 브랜드 분기 상수는 full10 과 동일", () => {
+    const f = SCORE_SETS.full10;
+    const s = SCORE_SETS.full83;
+    expect({
+      brandPositive: s.brandPositive,
+      brandStrong: s.brandStrong,
+      brandBodyUrl: s.brandBodyUrl,
+      brandCitation: s.brandCitation,
+    }).toEqual({
+      brandPositive: f.brandPositive,
+      brandStrong: f.brandStrong,
+      brandBodyUrl: f.brandBodyUrl,
+      brandCitation: f.brandCitation,
+    });
+  });
+
+  it("full83 의 일반 분기 최대는 100 미만 — cap 이 정보를 자르지 않는다", () => {
+    const s = SCORE_SETS.full83;
+    expect(s.genBase + s.genFirstPos + s.genMentions3 + s.genPositive + s.genTopRanked).toBe(82);
   });
 });
 
@@ -471,6 +513,78 @@ describe("v12b 앵커", () => {
   });
 });
 
+describe("full83 앵커", () => {
+  it("일반 최대(상단·반복3·긍정·1순위): 25+17+12+15+13 = 82", () => {
+    expect(
+      score(
+        {
+          text: "요가원" + "x".repeat(60) + "요가원" + "y".repeat(60) + "요가원",
+          brandTerms: ["요가원"],
+          sentiment: "positive",
+          isTopRanked: true,
+        },
+        "full83",
+      ),
+    ).toBe(82);
+  });
+
+  it("일반 중단·반복3·긍정·1순위: 25+12+12+15+13 = 77", () => {
+    expect(
+      score(
+        {
+          text:
+            "가".repeat(210) +
+            "요가원" +
+            "x".repeat(60) +
+            "요가원" +
+            "y".repeat(60) +
+            "요가원",
+          brandTerms: ["요가원"],
+          sentiment: "positive",
+          isTopRanked: true,
+        },
+        "full83",
+      ),
+    ).toBe(77);
+  });
+
+  it("일반 단일언급·상단·중립: 25+17+10 = 52", () => {
+    expect(
+      score({ text: "요가원 소개", brandTerms: ["요가원"], sentiment: "neutral" }, "full83"),
+    ).toBe(52);
+  });
+
+  it("일반 언급 시 최저(단일·중단·부정): 25+12 = 37", () => {
+    expect(
+      score(
+        { text: "가".repeat(250) + "요가원", brandTerms: ["요가원"], sentiment: "negative" },
+        "full83",
+      ),
+    ).toBe(37);
+  });
+
+  it("일반 언급0: 본문URL 21 · 참고자료만 8 · 둘 다면 본문 21 · 없으면 0", () => {
+    const base = { text: "요가 일반 답변(브랜드 미언급)", brandTerms: ["요가원"] };
+    expect(score({ ...base, hasBodyUrl: true }, "full83")).toBe(21);
+    expect(score({ ...base, hasCitationOnly: true }, "full83")).toBe(8);
+    expect(score({ ...base, hasBodyUrl: true, hasCitationOnly: true }, "full83")).toBe(21);
+    expect(score(base, "full83")).toBe(0);
+  });
+
+  it("브랜드 분기는 full10 과 같은 값을 낸다 — 브랜드 최대 97", () => {
+    const args = {
+      text: "요가원 정말 좋아요",
+      brandTerms: ["요가원"],
+      isBrandedQuery: true,
+      sentiment: "positive" as Sentiment,
+      isStronglyRecommended: true,
+      hasBodyUrl: true,
+    };
+    expect(score(args, "full83")).toBe(97);
+    expect(score(args, "full83")).toBe(score(args, "full10"));
+  });
+});
+
 /* ============================================================
  * ⑤ 텍스트 도출 · 타입 가드
  * ============================================================ */
@@ -497,7 +611,9 @@ describe("deriveMentionInputs / 텍스트 진입점", () => {
   it("isScoreSetId 는 닫힌 집합", () => {
     expect(isScoreSetId("legacy8")).toBe(true);
     expect(isScoreSetId("v12b")).toBe(true);
+    expect(isScoreSetId("full83")).toBe(true);
     expect(isScoreSetId("v13")).toBe(false);
+    expect(isScoreSetId("full84")).toBe(false);
     expect(isScoreSetId(undefined)).toBe(false);
   });
 });

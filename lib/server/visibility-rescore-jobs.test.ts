@@ -31,11 +31,13 @@ function inWindow(iso: string, jobId: RescoreJobId): boolean {
 }
 
 describe("잡 id 는 닫힌 집합", () => {
-  it("등록된 세 잡만 통과", () => {
-    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t"]);
+  it("등록된 네 잡만 통과", () => {
+    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t", "v13"]);
     for (const id of RESCORE_JOB_IDS) expect(isRescoreJobId(id)).toBe(true);
-    expect(isRescoreJobId("v13")).toBe(false);
+    expect(isRescoreJobId("v14")).toBe(false);
+    expect(isRescoreJobId("v13t")).toBe(false);
     expect(isRescoreJobId("V11")).toBe(false);
+    expect(isRescoreJobId("V13")).toBe(false);
     expect(isRescoreJobId("")).toBe(false);
     expect(isRescoreJobId(11)).toBe(false);
     expect(isRescoreJobId(null)).toBe(false);
@@ -77,6 +79,7 @@ describe("잡 정의 불변식", () => {
     expect(REPRO_SET_BY_VERSION).toEqual({ 8: "legacy8", 10: "full10" });
     expect(reproSetForVersion(11)).toBeNull();
     expect(reproSetForVersion(12)).toBeNull();
+    expect(reproSetForVersion(13)).toBeNull();
     expect(reproSetForVersion(112)).toBeNull();
     expect(reproSetForVersion(0)).toBeNull();
   });
@@ -88,10 +91,50 @@ describe("잡 정의 불변식", () => {
     expect(ms(v11.toUtc as string)).toBeLessThanOrEqual(ms(v12.fromUtc));
   });
 
-  it("workspaceScope — 운영 잡 2개 · 카나리 1개", () => {
+  it("workspaceScope — 운영 잡 3개 · 카나리 1개", () => {
     expect(RESCORE_JOBS.v11.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12.workspaceScope).toBe("production");
+    expect(RESCORE_JOBS.v13.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12t.workspaceScope).toBe("non-production");
+  });
+
+  it("targetVersion 은 잡마다 고유하다(원장에서 어느 잡이 쓴 값인지 구분된다)", () => {
+    const byVersion = new Map<number, string[]>();
+    for (const id of RESCORE_JOB_IDS) {
+      const v = RESCORE_JOBS[id].targetVersion;
+      byVersion.set(v, [...(byVersion.get(v) ?? []), id]);
+    }
+    // v12 · v12t 는 스코프만 다른 같은 잡이므로 같은 버전을 공유한다.
+    expect(byVersion.get(12)?.sort()).toEqual(["v12", "v12t"]);
+    expect(byVersion.get(11)).toEqual(["v11"]);
+    expect(byVersion.get(13)).toEqual(["v13"]);
+  });
+
+  /**
+   * v11 과 v13 은 같은 구간을 가리키고 목표만 다르다. 대상 정의가 한쪽에서만 바뀌면
+   * 두 잡이 서로 다른 구간을 보게 되므로 여기서 동일성을 고정한다.
+   */
+  it("v13 은 v11 과 대상 정의가 같고 목표(버전·세트)만 다르다", () => {
+    const a = RESCORE_JOBS.v11;
+    const b = RESCORE_JOBS.v13;
+    const scopeOf = (job: typeof a) => ({
+      fromUtc: job.fromUtc,
+      toUtc: job.toUtc,
+      providers: job.providers,
+      sourceVersions: job.sourceVersions,
+      informationalOnly: job.informationalOnly,
+      autoOnly: job.autoOnly,
+      workspaceScope: job.workspaceScope,
+      diagnosticSets: job.diagnosticSets,
+    });
+    expect(scopeOf(b)).toEqual(scopeOf(a));
+
+    expect(b.targetVersion).toBe(13);
+    expect(b.targetSet).toBe("full83");
+    expect(b.targetVersion).not.toBe(a.targetVersion);
+    expect(b.targetSet).not.toBe(a.targetSet);
+    expect(SCORE_SETS[b.targetSet]).not.toEqual(SCORE_SETS[a.targetSet]);
+    expect(jobHash("v13")).not.toBe(jobHash("v11"));
   });
 
   it("카나리 잡은 운영 잡 v12 와 범위 정의가 동일하다(스코프만 다름)", () => {
@@ -114,6 +157,14 @@ describe("창 경계 — ±1µs (timestamptz 반차 구간)", () => {
     { iso: "2026-07-31T14:59:59.999999Z", job: "v11", expected: true, label: "상한 -1µs" },
     { iso: "2026-07-31T15:00:00.000000Z", job: "v11", expected: false, label: "상한 정확히(제외)" },
     { iso: "2026-07-31T15:00:00.000001Z", job: "v11", expected: false, label: "상한 +1µs" },
+    // v13 하한 — v11 과 같은 창이므로 같은 경계를 독립으로 고정한다
+    { iso: "2026-06-25T14:59:59.999999Z", job: "v13", expected: false, label: "하한 -1µs" },
+    { iso: "2026-06-25T15:00:00.000000Z", job: "v13", expected: true, label: "하한 정확히" },
+    { iso: "2026-06-25T15:00:00.000001Z", job: "v13", expected: true, label: "하한 +1µs" },
+    // v13 상한
+    { iso: "2026-07-31T14:59:59.999999Z", job: "v13", expected: true, label: "상한 -1µs" },
+    { iso: "2026-07-31T15:00:00.000000Z", job: "v13", expected: false, label: "상한 정확히(제외)" },
+    { iso: "2026-07-31T15:00:00.000001Z", job: "v13", expected: false, label: "상한 +1µs" },
     // v12 하한
     { iso: "2026-08-11T14:59:59.999999Z", job: "v12", expected: false, label: "하한 -1µs" },
     { iso: "2026-08-11T15:00:00.000000Z", job: "v12", expected: true, label: "하한 정확히" },
@@ -134,15 +185,15 @@ describe("창 경계 — ±1µs (timestamptz 반차 구간)", () => {
       "2026-08-11T14:59:59.999Z",
     ];
     for (const iso of samples) {
-      expect(inWindow(iso, "v11")).toBe(false);
-      expect(inWindow(iso, "v12")).toBe(false);
-      expect(inWindow(iso, "v12t")).toBe(false);
+      for (const id of RESCORE_JOB_IDS) expect(inWindow(iso, id)).toBe(false);
     }
   });
 
-  it("대상 창 이전 구간은 v11 대상 밖", () => {
-    expect(inWindow("2026-06-25T14:00:00.000Z", "v11")).toBe(false);
-    expect(inWindow("2026-06-01T00:00:00.000Z", "v11")).toBe(false);
+  it("대상 창 이전 구간은 v11 · v13 대상 밖", () => {
+    for (const id of ["v11", "v13"] as RescoreJobId[]) {
+      expect(inWindow("2026-06-25T14:00:00.000Z", id)).toBe(false);
+      expect(inWindow("2026-06-01T00:00:00.000Z", id)).toBe(false);
+    }
   });
 });
 
@@ -202,6 +253,10 @@ describe("검증 창 — 잡 정의에서 파생", () => {
     const others = w[3];
     expect(others.excludeProviders).toEqual(["google_ai"]);
     expect(others.providers).toBeNull();
+  });
+
+  it("v13: 검증 창이 v11 과 완전히 같다(대상 정의가 같으므로)", () => {
+    expect(buildVerificationWindows("v13")).toEqual(buildVerificationWindows("v11"));
   });
 
   it("v12: provider 를 좁히지 않으므로 other-providers 창이 없다", () => {

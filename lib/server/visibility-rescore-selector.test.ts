@@ -169,8 +169,12 @@ describe("isInformationalPrompt", () => {
   });
 });
 
-describe("matchesJob — v11 불변 표본이 전부 미선택", () => {
-  const job = RESCORE_JOBS.v11;
+/**
+ * 불변 표본 — v11 과 v13 은 대상 정의가 같으므로 같은 표본으로 두 잡을 함께 고정한다.
+ * 두 잡이 다른 표본을 쓰면 한쪽 창이 흔들려도 테스트가 알려주지 못한다.
+ */
+describe.each(["v11", "v13"] as const)("matchesJob — %s 불변 표본이 전부 미선택", (jobId) => {
+  const job = RESCORE_JOBS[jobId];
 
   const immutable: { label: string; row: SelectorRow }[] = [
     {
@@ -204,6 +208,7 @@ describe("matchesJob — v11 불변 표본이 전부 미선택", () => {
     { label: "수동 수집 (is_auto=false)", row: row({ isAuto: false }) },
     { label: "이미 11", row: row({ scoreVersion: 11 }) },
     { label: "이미 12", row: row({ scoreVersion: 12 }) },
+    { label: "이미 13", row: row({ scoreVersion: 13 }) },
     { label: "클라이언트 근사 112", row: row({ scoreVersion: 112 }) },
     { label: "버전 0", row: row({ scoreVersion: 0 }) },
     { label: "범위 밖 워크스페이스", row: row({ workspaceId: WS_TEST }) },
@@ -292,8 +297,8 @@ describe("SQL 조건과 JS 판정의 브랜드 별칭 해석 일치 (같은 표�
 });
 
 describe("모든 잡의 base 조건이 예외 없이 조립된다", () => {
-  it("v11 · v12 · v12t", () => {
-    for (const id of ["v11", "v12", "v12t"] as RescoreJobId[]) {
+  it("v11 · v12 · v12t · v13", () => {
+    for (const id of ["v11", "v12", "v12t", "v13"] as RescoreJobId[]) {
       expect(() => render(buildBaseConditions(RESCORE_JOBS[id], prodWorkspaces))).not.toThrow();
       for (const w of buildVerificationWindows(id)) {
         expect(() => render(buildReportConditions(w, prodWorkspaces))).not.toThrow();

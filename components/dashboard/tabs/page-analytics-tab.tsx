@@ -169,6 +169,35 @@ const ERROR_MESSAGES: Record<string, string> = {
   aborted: "",
 };
 
+/**
+ * 수집 폐기 사유 → 사람 말 + 경고 등급.
+ * ⭐ `unknown_route`는 별도 문구(이름 미등록 안내)로 이미 표시하므로 여기서는 다루지 않는다
+ *    (호출부에서 skipReasons 로 제외한다).
+ * incomplete=true 인 사유는 "이 기간 통계가 일부 빠졌습니다"에 해당해 danger 로 강조한다.
+ */
+const DROP_REASON_META: Record<string, { label: string; tone: NoticeTone }> = {
+  switch_off: { tone: "warn", label: "수집이 꺼져 있던 동안의 기록이 없습니다." },
+  rl_session: {
+    tone: "danger",
+    label: "한 분이 짧은 시간에 너무 많이 접속해 이 기간 통계가 일부 빠졌습니다.",
+  },
+  rl_global: {
+    tone: "danger",
+    label: "일시적으로 요청이 몰려 이 기간 통계가 일부 빠졌습니다.",
+  },
+  contract: { tone: "info", label: "형식이 맞지 않는 요청이라 일부 기록이 빠졌습니다." },
+  concurrency: {
+    tone: "danger",
+    label: "정리 작업과 겹쳐 이 기간 통계가 일부 빠졌습니다.",
+  },
+  db_error: {
+    tone: "danger",
+    label: "저장 중 오류로 이 기간 통계가 일부 빠졌습니다.",
+  },
+  bot: { tone: "info", label: "자동 프로그램(봇) 접속은 처음부터 세지 않습니다." },
+  origin: { tone: "info", label: "허용되지 않은 곳에서 온 요청이라 세지 않았습니다." },
+};
+
 /* ── 표시 변환 ───────────────────────────────────────────────────────────── */
 
 function fmtInt(n: number): string {
@@ -302,6 +331,35 @@ function Notice({ tone, children }: { tone: NoticeTone; children: React.ReactNod
       </span>
       <span>{children}</span>
     </p>
+  );
+}
+
+/**
+ * 폐기 사유별 안내 목록 — `unknown_route` 를 제외한 모든 0건 아닌 사유를 보여준다(C-HIGH-2).
+ * 호출부가 `unknown_route`는 이미 별도 문구로 보여주므로 skipReasons 로 제외해서 넘긴다.
+ */
+function DropReasonNotices({
+  dropSummary,
+  skipReasons,
+}: {
+  dropSummary: { reason: string; dropCount: number }[];
+  skipReasons?: string[];
+}) {
+  const skip = new Set(skipReasons ?? []);
+  const rows = dropSummary.filter((d) => d.dropCount > 0 && !skip.has(d.reason));
+  if (rows.length === 0) return null;
+  return (
+    <>
+      {rows.map((d) => {
+        const meta = DROP_REASON_META[d.reason];
+        return (
+          <Notice key={d.reason} tone={meta?.tone ?? "info"}>
+            <strong className="text-th-text">{fmtInt(d.dropCount)}건</strong> —{" "}
+            {meta?.label ?? "알 수 없는 사유로 일부 기록이 빠졌습니다."}
+          </Notice>
+        );
+      })}
+    </>
   );
 }
 
@@ -621,23 +679,27 @@ export function PageAnalyticsTab() {
       </div>
 
       {/* ── 즉시 알려야 할 경고(해당할 때만) ─────────────────────────── */}
-      {stats && (stats.qualityWarning || stats.unknownRouteDrops > 0) && (
-        <div className="space-y-2">
-          {stats.qualityWarning && (
-            <Notice tone="danger">
-              <strong className="text-th-text">숫자 정합성 경고가 있습니다</strong> — 비율이 100%를 넘는 항목이
-              섞여 있습니다. 집계에 문제가 있을 수 있으니 이 화면은 참고만 하시고 알려 주세요.
-            </Notice>
-          )}
-          {stats.unknownRouteDrops > 0 && (
-            <Notice tone="warn">
-              아직 이름을 등록하지 않은 새 페이지에서{" "}
-              <strong className="text-th-text">{fmtInt(stats.unknownRouteDrops)}건</strong>이 집계되지
-              않았습니다. 새로 만든 페이지가 있다면 이름을 등록해야 이 표에 나타납니다.
-            </Notice>
-          )}
-        </div>
-      )}
+      {stats &&
+        (stats.qualityWarning ||
+          stats.unknownRouteDrops > 0 ||
+          stats.dropSummary.some((d) => d.reason !== "unknown_route" && d.dropCount > 0)) && (
+          <div className="space-y-2">
+            {stats.qualityWarning && (
+              <Notice tone="danger">
+                <strong className="text-th-text">숫자 정합성 경고가 있습니다</strong> — 비율이 100%를 넘는 항목이
+                섞여 있습니다. 집계에 문제가 있을 수 있으니 이 화면은 참고만 하시고 알려 주세요.
+              </Notice>
+            )}
+            {stats.unknownRouteDrops > 0 && (
+              <Notice tone="warn">
+                아직 이름을 등록하지 않은 새 페이지에서{" "}
+                <strong className="text-th-text">{fmtInt(stats.unknownRouteDrops)}건</strong>이 집계되지
+                않았습니다. 새로 만든 페이지가 있다면 이름을 등록해야 이 표에 나타납니다.
+              </Notice>
+            )}
+            <DropReasonNotices dropSummary={stats.dropSummary} skipReasons={["unknown_route"]} />
+          </div>
+        )}
 
       {/* ── 요약 카드 4개 ────────────────────────────────────────────── */}
       {!loaded ? (
@@ -966,6 +1028,18 @@ function ClickPanel({
               )}
             </div>
 
+            {/* C-HIGH-1: 클릭 비율이 100%를 넘는 항목이 있으면(서버 qualityWarning) 눈에 띄게 알린다. */}
+            {data.qualityWarning && (
+              <div className="mb-2">
+                <Notice tone="danger">
+                  <strong className="text-th-text">이 화면 클릭 숫자에 정합성 경고가 있습니다</strong> — 아래
+                  표에서 &lsquo;이 화면을 본 방문 중&rsquo; 비율이 100%를 넘는 자리가 있습니다. 본 방문보다
+                  누른 방문이 더 많다는 뜻이라 집계에 문제가 있을 수 있으니, 이 표의 비율은 참고만 하시고
+                  알려 주세요.
+                </Notice>
+              </div>
+            )}
+
             {data.items.length === 0 ? (
               <p className="py-3 text-[11px] text-th-text-muted">
                 이 기간 동안 이 화면에서 눌린 자리가 없습니다. (이름 붙인 자리와 외부로 나간 링크만 셉니다 —
@@ -1267,6 +1341,8 @@ function ReadingNotes({ stats }: { stats: PageStats }) {
             <strong className="text-th-text">{fmtInt(stats.unknownRouteDrops)}건</strong>이 집계되지 않았습니다.
           </Notice>
         )}
+
+        <DropReasonNotices dropSummary={stats.dropSummary} skipReasons={["unknown_route"]} />
 
         {stats.qualityWarning && (
           <Notice tone="danger">

@@ -1,0 +1,123 @@
+name: 가시성 점수 룰 세트 재산출 (수동)
+
+# 수동 트리거 전용. 실행 대상은 이미 배포된 운영 VM 의 앱 컨테이너.
+# 컨테이너 안에서 `node scripts/visibility-rescore.mjs` 를 돌리고, 그 stdout 을
+# VM 의 data/audit/ 아래 파일로 남긴다(= 컨테이너의 /app/data/audit).
+# 대상 범위·소스 버전·목표 세트는 코드 상수라 이 워크플로 입력으로 바꿀 수 없다.
+#
+# ⚠️ 이 저장소는 공개다. 실행 로그도 누구나 읽을 수 있으므로 **결과값을 로그에 인쇄하지
+# 않는다** — stdout 은 서버 파일로 직접 보내고, 로그에는 파일명과 줄 수만 남긴다.
+# 값을 봐야 하면 SSH 로 VM 의 파일을 연다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "재산출 잡"
+        type: choice
+        options: [v12t, v11, v12]
+        default: v12t
+      mode:
+        description: "실행 모드"
+        type: choice
+        options: [report, preflight, dry-run, live, rollback, reconcile]
+        default: report
+      confirm:
+        description: 'live·rollback 은 "yes" 입력 필수'
+        type: string
+        default: "no"
+      manifest:
+        description: "rollback·reconcile 대상 manifest 파일명 (rescore_*.jsonl)"
+        type: string
+        default: ""
+
+# 같은 원장을 두 실행이 나눠 쓰지 않도록 한 번에 하나만 돌린다.
+# 실행 중인 것을 취소하면 스윕이 중간에서 끊기므로 취소하지 않고 큐에 세운다.
+concurrency:
+  group: visibility-rescore
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      # 입력을 셸 명령에 직접 끼워 넣지 않고 환경변수로만 전달한다(주입 방지).
+      JOB: ${{ inputs.job }}
+      MODE: ${{ inputs.mode }}
+      CONFIRM: ${{ inputs.confirm }}
+      MANIFEST: ${{ inputs.manifest }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: 입력 게이트
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            live|rollback)
+              if [ "$CONFIRM" != "yes" ]; then
+                echo "::error::mode=$MODE 는 confirm=yes 가 필요하다"
+                exit 1
+              fi
+              ;;
+          esac
+          case "$MODE" in
+            rollback|reconcile)
+              if ! printf '%s' "$MANIFEST" | grep -Eq '^rescore_[A-Za-z0-9_.-]+\.jsonl$'; then
+                echo "::error::manifest 파일명 규칙 위반 (rescore_*.jsonl 만 허용)"
+                exit 1
+              fi
+              ;;
+            *)
+              if [ -n "$MANIFEST" ]; then
+                echo "::error::mode=$MODE 에는 manifest 를 주지 않는다"
+                exit 1
+              fi
+              ;;
+          esac
+          echo "job=$JOB mode=$MODE 로 진행한다"
+
+      - name: SSH 실행
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AZURE_PROD_HOST }}
+          port: ${{ secrets.AZURE_PROD_PORT }}
+          username: ${{ secrets.AZURE_PROD_USER }}
+          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          timeout: 30s
+          command_timeout: 30m
+          envs: JOB,MODE,MANIFEST,SHA
+          script: |
+            set -euo pipefail
+            cd /datadrive/apps/geo-tracker
+            # 컨테이너의 /app/data 로 마운트되는 디렉터리 — rollback·reconcile 이 여기서 읽는다.
+            mkdir -p data/audit
+
+            # 인자는 배열로 조립해 인용된 채 전달한다(단어 분리·글롭 확장 차단).
+            case "$MODE" in
+              live)      ARGS=(sweep --job "$JOB" --apply) ;;
+              dry-run)   ARGS=(sweep --job "$JOB") ;;
+              rollback)  ARGS=(rollback --job "$JOB" --manifest "$MANIFEST") ;;
+              reconcile) ARGS=(reconcile --job "$JOB" --manifest "$MANIFEST") ;;
+              *)         ARGS=("$MODE" --job "$JOB") ;;
+            esac
+
+            # live 는 직전 dry-run 이 있어야 돌린다(원장 없이 쓰는 실수 방지).
+            if [ "$MODE" = "live" ]; then
+              if [ -z "$(find data/audit -maxdepth 1 -name "rescore_${JOB}_dry-run_*.jsonl" -print -quit)" ]; then
+                echo "::error::job=$JOB 의 dry-run 원장이 없다. dry-run 을 먼저 실행할 것"
+                exit 1
+              fi
+            fi
+
+            TS=$(date +%Y%m%d-%H%M%S)
+            OUT="data/audit/rescore_${JOB}_${MODE}_${TS}.jsonl"
+            # ⚠️ tee 를 쓰지 않는다 — stdout 이 공개 실행 로그로 흘러가면 클라이언트 지표와
+            #    행 단위 원장이 그대로 노출된다. 파일로만 보내고 로그에는 건수만 남긴다.
+            #    파이프가 없으므로 스크립트 실패가 가려지는 문제도 함께 사라진다.
+            docker compose exec -T -e RESCORE_CODE_SHA="$SHA" mbd-geo-tracker \
+              node scripts/visibility-rescore.mjs "${ARGS[@]}" > "$OUT"
+
+            # 서버 내부 절대경로도 로그에 남기지 않는다.
+            echo "결과 파일: $(basename "$OUT") · $(wc -l < "$OUT")줄"
+            echo "값 확인은 VM 의 data/audit/ 에서 직접 연다"

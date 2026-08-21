@@ -35,12 +35,48 @@ export function buildBrandTerms(brandConfig: BrandConfig | null | undefined): st
   return [...set].filter(Boolean);
 }
 
+/**
+ * 수집 경로(automation-runner)가 쓰는 별칭 파싱 — 구분자가 **쉼표 하나**뿐이다.
+ *
+ * 위 buildBrandTerms 와 결과가 갈릴 수 있다(`;`·줄바꿈이 별칭에 있으면). 저장된 점수는
+ * 이 함수의 term 목록으로 계산됐으므로, 그 점수를 역산하는 쪽이 다른 목록을 쓰면 조용히
+ * 어긋난다. 두 함수를 나란히 두어 차이를 눈에 보이게 하고, 재산출 preflight 가 실제
+ * 설정값으로 두 결과의 동일성을 대조한다(다르면 하드 스톱).
+ */
+export function buildCollectionBrandTerms(
+  brandConfig: BrandConfig | null | undefined,
+): string[] {
+  if (!brandConfig) return [];
+  const set = new Set<string>();
+  if (brandConfig.brandName) set.add(brandConfig.brandName.trim());
+  const aliases = brandConfig.brandAliases ?? "";
+  for (const raw of aliases.split(",")) {
+    const trimmed = raw.trim();
+    if (trimmed) set.add(trimmed);
+  }
+  return [...set].filter(Boolean);
+}
+
+/**
+ * LIKE/ILIKE 패턴 안에서 특별한 의미를 갖는 문자를 리터럴로 만든다.
+ *
+ * 별칭은 사용자가 입력하는 값이라 `%`(임의 문자열)·`_`(임의 1글자)가 들어올 수 있고,
+ * 그대로 두면 SQL 은 넓게, JS 의 `includes()` 는 좁게 판정해 두 경로가 갈린다.
+ *
+ * PostgreSQL 의 LIKE 는 **기본 escape 문자가 백슬래시**라 별도 `ESCAPE` 절이 없어도
+ * 아래 치환만으로 리터럴 매칭이 된다(패턴은 바인딩 파라미터로 나가므로 문자열 리터럴
+ * 파싱 설정과도 무관하다). 백슬래시를 먼저 치환해야 이중 치환이 생기지 않는다.
+ */
+export function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 /** runs.promptText 가 brand 별칭 중 하나라도 포함하면 branded */
 export function brandedPromptCondition(brandTerms: string[]): SQL | null {
   const conditions = brandTerms
     .map((t) => t.trim())
     .filter((t) => t.length > 0)
-    .map((t) => ilike(schema.runs.promptText, `%${t}%`));
+    .map((t) => ilike(schema.runs.promptText, `%${escapeLikePattern(t)}%`));
   if (conditions.length === 0) return null;
   return or(...conditions) ?? null;
 }

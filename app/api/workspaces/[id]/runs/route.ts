@@ -128,8 +128,11 @@ export async function POST(
       sources: parsed.sources,
       citations: parsed.citations as never,
       visibilityScore: parsed.visibilityScore,
-      // 신규 응답은 항상 최신 점수 룰 버전 (백필 대상 아님)
-      scoreVersion: 10,
+      // 이 경로는 클라이언트가 계산해 보낸 점수를 그대로 저장한다. 클라이언트는 본문 URL 과
+      // 참고자료를 구분하지 못해 서버 계산과 결과가 다를 수 있으므로, 서버 버전을 그대로
+      // 찍지 않고 "100 + 서버 버전 = 그 버전의 클라이언트 근사" 규약으로 표기한다.
+      // 이 값은 재산출 잡의 소스 버전 목록에 없어 자동으로 대상에서 빠진다.
+      scoreVersion: 112,
       sentiment: parsed.sentiment,
       brandMentions: parsed.brandMentions,
       competitorMentions: parsed.competitorMentions,

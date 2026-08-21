@@ -33,6 +33,19 @@ import {
 } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt } from "@/drizzle/schema";
+import { buildCollectionBrandTerms } from "@/lib/server/branded-query-filter";
+import {
+  calcVisibilityFromText,
+  SCORE_SETS,
+  type ScoreSetId,
+} from "@/lib/server/visibility-score-sets";
+
+/**
+ * 신규 수집이 사용하는 룰 세트와 그 세트를 가리키는 score_version.
+ * 두 값은 반드시 함께 바뀐다(버전이 계산 룰의 provenance 이기 때문).
+ */
+const CURRENT_SCORE_SET_ID: ScoreSetId = "v12b";
+const CURRENT_SCORE_VERSION = 12;
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
@@ -188,7 +201,7 @@ async function executeSchedule(
     .from(schema.competitors)
     .where(eq(schema.competitors.workspaceId, sched.workspaceId));
 
-  const brandTerms = buildTerms(ws.brandConfig.brandName, ws.brandConfig.brandAliases);
+  const brandTerms = buildCollectionBrandTerms(ws.brandConfig);
   const brandWebsites = ws.brandConfig.websites ?? [];
   const competitorTerms = competitors.flatMap((c) => [c.name, ...(c.aliases ?? [])]).filter(Boolean);
   const competitorWebsites = competitors.flatMap((c) => c.websites ?? []);
@@ -381,8 +394,8 @@ async function runOneProviderForPrompt(args: {
         sources: result.sources ?? [],
         citations: citations as never,
         visibilityScore,
-        // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (백필 대상에서 제외)
-        scoreVersion: 10,
+        // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (재산출 대상에서 제외)
+        scoreVersion: CURRENT_SCORE_VERSION,
         sentiment,
         brandMentions,
         competitorMentions,
@@ -593,18 +606,6 @@ async function updateScheduleTiming(sched: Schedule, now: Date) {
  * 본격 Phase 5C 에서 공용 모듈로 정리 예정.
  * ============================================================ */
 
-function buildTerms(brandName: string | undefined, aliases: string | undefined): string[] {
-  const set = new Set<string>();
-  if (brandName) set.add(brandName.trim());
-  if (aliases) {
-    for (const t of aliases.split(",")) {
-      const trimmed = t.trim();
-      if (trimmed) set.add(trimmed);
-    }
-  }
-  return [...set].filter(Boolean);
-}
-
 function findMentions(text: string, terms: string[]): string[] {
   if (!text || terms.length === 0) return [];
   const lower = text.toLowerCase();
@@ -616,63 +617,11 @@ function findMentions(text: string, terms: string[]): string[] {
   return [...found];
 }
 
-/** 브랜드 용어(본명 + 별칭)의 전체 출현 위치 수집 — 순수. */
-function collectBrandPositions(lower: string, brandTerms: string[]): number[] {
-  const positions: number[] = [];
-  for (const t of brandTerms) {
-    const term = t.toLowerCase();
-    if (!term) continue;
-    let from = 0;
-    while (from < lower.length) {
-      const idx = lower.indexOf(term, from);
-      if (idx < 0) break;
-      positions.push(idx);
-      from = idx + term.length;
-    }
-  }
-  return positions;
-}
-
 /**
- * 근접한 위치(50자 이내)는 1회로 merge 후 mentions 수·첫 위치 반환 — 별칭
- * 풀어쓰기 중복 카운트 방지. positions 는 비어있지 않아야 한다(호출부가 보장).
+ * 현행 수집(신규·수동)이 쓰는 배점 — 룰 세트 레지스트리의 v12b 세트에 위임한다.
+ * 계산기·상수는 lib/server/visibility-score-sets.ts 가 단일 정본이며,
+ * 이 래퍼는 기존 호출부 시그니처를 유지하기 위한 얇은 어댑터다.
  */
-function mergeMentionPositions(positions: number[]): {
-  mentions: number;
-  firstPos: number;
-} {
-  const sorted = [...positions].sort((a, b) => a - b);
-  const MERGE_WINDOW = 50;
-  const merged: number[] = [sorted[0]];
-  for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] - merged[merged.length - 1] > MERGE_WINDOW) {
-      merged.push(sorted[i]);
-    }
-  }
-  return { mentions: merged.length, firstPos: merged[0] };
-}
-
-/**
- * 현행 수집(신규·수동)이 쓰는 배점. FULL_SCORE 상수 세트로 계산한다.
- * 어떤 조합도 100 을 넘지 않는다(cap 이 최종 점수를 [0,100] 으로 제한).
- */
-const FULL_SCORE = {
-  brandPositive: 34,
-  brandStrong: 48,
-  brandBodyUrl: 15,
-  brandCitation: 8,
-  genNoMentionBodyUrl: 25,
-  genNoMentionCitation: 10,
-  genBase: 30,
-  genFirstPos: 20,
-  genMidPos: 14,
-  genMentions3: 15,
-  genMentions2: 8,
-  genPositive: 18,
-  genNeutral: 12,
-  genTopRanked: 16,
-} as const;
-
 export function calcVisibilityFull(
   text: string,
   brandTerms: string[],
@@ -683,45 +632,17 @@ export function calcVisibilityFull(
   isStronglyRecommended: boolean,
   isBrandedQuery: boolean,
 ): number {
-  if (!text) return 0;
-  const c = FULL_SCORE;
-  const lower = text.toLowerCase();
-  const positions = collectBrandPositions(lower, brandTerms);
-
-  if (isBrandedQuery) {
-    if (positions.length === 0) return 0;
-    let score = 0;
-    if (sentiment === "positive") score += c.brandPositive;
-    if (isStronglyRecommended) score += c.brandStrong;
-    if (hasBodyUrl) score += c.brandBodyUrl;
-    else if (hasCitationOnly) score += c.brandCitation;
-    return Math.min(score, 100);
-  }
-
-  if (positions.length === 0) {
-    if (hasBodyUrl) return c.genNoMentionBodyUrl;
-    if (hasCitationOnly) return c.genNoMentionCitation;
-    return 0;
-  }
-
-  const { mentions, firstPos } = mergeMentionPositions(positions);
-
-  let score = c.genBase;
-  if (firstPos < 200) score += c.genFirstPos;
-  else if (firstPos < 500) score += c.genMidPos;
-  if (mentions >= 3) score += c.genMentions3;
-  else if (mentions >= 2) score += c.genMentions2;
-
-  void hasBodyUrl;
-  void hasCitationOnly;
-
-  if (sentiment === "positive") score += c.genPositive;
-  else if (sentiment === "neutral") score += c.genNeutral;
-
-  if (isTopRanked) score += c.genTopRanked;
-  void isStronglyRecommended;
-
-  return Math.min(score, 100);
+  return calcVisibilityFromText(
+    text,
+    brandTerms,
+    hasBodyUrl,
+    hasCitationOnly,
+    sentiment,
+    isTopRanked,
+    isStronglyRecommended,
+    isBrandedQuery,
+    SCORE_SETS[CURRENT_SCORE_SET_ID],
+  );
 }
 
 function detectSentiment(

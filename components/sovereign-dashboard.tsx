@@ -1201,7 +1201,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     if (positions.length === 0) {
       // mentions=0: URL 노출만 약한 신호. 클라이언트에선 sources 만 가지고 있어
       // 본문 URL vs 참고자료 구분이 어렵지만, 매칭 자체가 약한 신호로 처리.
-      return hasCitationOnly ? 10 : 0;
+      return hasCitationOnly ? 24 : 0;
     }
 
     // 50자 이내 근접 등장은 1회로 merge
@@ -1216,16 +1216,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const mentions = merged.length;
     const firstPos = merged[0];
 
-    let score = 30;
-    if (firstPos < 200) score += 20;
-    else if (firstPos < 500) score += 14;
-    if (mentions >= 3) score += 15;
-    else if (mentions >= 2) score += 8;
+    let score = 50;
+    if (firstPos < 200) score += 14;
+    else if (firstPos < 500) score += 11;
+    if (mentions >= 3) score += 10;
+    else if (mentions >= 2) score += 5;
 
-    if (sentiment === "positive") score += 18;
-    else if (sentiment === "neutral") score += 12;
+    if (sentiment === "positive") score += 14;
+    else if (sentiment === "neutral") score += 13;
 
-    if (isTopRanked) score += 16;
+    if (isTopRanked) score += 11;
     void isStronglyRecommended; // brand 명 검색 분기 전용
 
     return Math.min(100, score);

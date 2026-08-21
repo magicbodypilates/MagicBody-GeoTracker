@@ -13,6 +13,7 @@
 import { and, eq, gte, lt, ne, or, isNull, type SQL } from "drizzle-orm";
 import { schema } from "@/lib/server/db";
 import { viewModeCondition } from "@/lib/server/branded-query-filter";
+import type { RunMode } from "@/lib/server/stats-range";
 
 export type BuildRunStatsWhereArgs = {
   /** 대상 워크스페이스 id */
@@ -23,6 +24,12 @@ export type BuildRunStatsWhereArgs = {
   toDate: Date;
   /** true 면 isAuto=true 만 (자동 실행). 기본 라우트 기본값과 동일하게 호출부가 결정 */
   autoOnly: boolean;
+  /**
+   * 실행 종류 필터(선택). 지정하면 autoOnly 대신 이 값을 쓴다.
+   *   auto=자동만 / manual=수동만 / all=구분 없음
+   * 미지정(undefined) 이면 기존 autoOnly 동작 그대로 — 기존 호출부 회귀 없음.
+   */
+  runMode?: RunMode;
   /** viewMode 필터용 브랜드 별칭 목록 (getBrandTermsForWorkspace 결과) */
   brandTerms: string[];
   /** true=브랜드 명 검색만 / false=일반 검색만 (viewModeCondition) */
@@ -37,7 +44,7 @@ export type BuildRunStatsWhereArgs = {
  *   2. createdAt >= fromDate
  *   3. createdAt <  toDate
  *   4. parseQuality != 'low' OR parseQuality IS NULL   (저품질 파싱 제외)
- *   5. (autoOnly 면) isAuto = true
+ *   5. (autoOnly 또는 runMode 에 따라) isAuto 필터 — runMode 미지정 시 autoOnly 그대로
  *   6. (viewMode 조건 있으면) informational / branded 필터
  *
  * @returns and(...conditions) 로 감쌀 SQL[] 배열. drizzle .where(and(...arr)) 에 그대로 사용.
@@ -55,7 +62,15 @@ export function buildRunStatsWhere(args: BuildRunStatsWhereArgs): SQL[] {
     qualityFilter as SQL,
   ];
 
-  if (args.autoOnly) conditions.push(eq(schema.runs.isAuto, true));
+  if (args.runMode === undefined) {
+    if (args.autoOnly) conditions.push(eq(schema.runs.isAuto, true));
+  } else if (args.runMode === "auto") {
+    conditions.push(eq(schema.runs.isAuto, true));
+  } else if (args.runMode === "manual") {
+    // is_auto 는 NOT NULL DEFAULT false 이므로 false 비교만으로 수동 전체가 잡힌다.
+    conditions.push(eq(schema.runs.isAuto, false));
+  }
+  // runMode === "all" → 조건 없음
 
   const informational = viewModeCondition(args.brandTerms, args.branded);
   if (informational) conditions.push(informational);

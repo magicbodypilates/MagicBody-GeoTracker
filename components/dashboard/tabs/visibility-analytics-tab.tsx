@@ -1,4 +1,18 @@
-import { useCallback, useMemo, useState } from "react";
+/**
+ * 가시성 분석 탭.
+ *
+ * 집계는 **서버**(/api/workspaces/[id]/stats/overview · /stats/timeseries)가 한다.
+ * 예전에는 브라우저가 runs 원본(응답 본문 포함)을 전부 내려받아 직접 집계했는데,
+ * 90일이면 3만 건 규모라 차트가 채워지기까지 수 분이 걸렸고 그동안 앞 구간이 0 으로 그려져
+ * 오해를 불렀다. 지금은 카드·차트가 집계 응답(수 KB)만 기다린다.
+ *
+ * runs 원본은 **CSV 내려받기 전용**으로만 남는다(원본 행이 필요한 기능). 그래서 직접 선택 구간이
+ * runs 로드 윈도우를 벗어나면 내려받기 범위 안내를 띄운다.
+ */
+
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
   Legend,
@@ -16,8 +30,16 @@ import {
   isUrlMatchingCitedKeys,
 } from "@/components/dashboard/citation-utils";
 import { isBrandedPrompt } from "@/lib/client/branded-prompt";
-import { RangeSelector } from "@/components/dashboard/range-selector";
-import { toKstDateKey, kstRecentDateKeys } from "@/lib/client/date-kst";
+import { RangeSelector, type CustomRange } from "@/components/dashboard/range-selector";
+import { toKstDateKey } from "@/lib/client/date-kst";
+import {
+  sliceRunsByKstRange,
+  buildTrendSeries,
+} from "@/components/dashboard/tabs/visibility-analytics-derive";
+import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
+
+const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const PROVIDER_COLORS: Record<Provider, string> = {
   chatgpt: "#10a37f",
@@ -29,7 +51,11 @@ const PROVIDER_COLORS: Record<Provider, string> = {
 };
 
 type VisibilityAnalyticsTabProps = {
-  data: Array<{ day: string; visibility: number }>;
+  /**
+   * @deprecated 추이는 서버 집계(/stats/timeseries)로 그린다. 기존 호출부 호환을 위해 받기만 하고
+   * 사용하지 않는다 (제거는 호출부 정리와 함께).
+   */
+  data?: Array<{ day: string; visibility: number }>;
   runs: ScrapeRun[];
   brandTerms: string[];
   /** 조회 기간(일) — 7/30/90. 부모(sovereign-dashboard)가 전역 윈도우로 사용 */
@@ -38,11 +64,52 @@ type VisibilityAnalyticsTabProps = {
   onWindowDaysChange?: (days: number) => void;
 };
 
-const SENTIMENT_LABELS: Record<string, string> = {
+const SENTIMENT_KEYS = ["positive", "neutral", "negative", "not-mentioned"] as const;
+type SentimentKey = (typeof SENTIMENT_KEYS)[number];
+
+const SENTIMENT_LABELS: Record<SentimentKey, string> = {
   positive: "긍정",
   neutral: "중립",
   negative: "부정",
   "not-mentioned": "미언급",
+};
+
+type RelatedStatus = "ok" | "skipped" | "omitted" | "failed" | "none";
+
+type OverviewResult = {
+  sampleCount: number;
+  avgVisibility: number;
+  avgVisibilityRaw: number;
+  sentiment: Record<string, number>;
+  brandSignals: { mainMentioned: number; cited: number; related: number | null };
+  relatedStatus?: RelatedStatus;
+  relatedMaxDays?: number;
+  relatedTruncated?: boolean;
+};
+
+/**
+ * 연관 출처 카드 상태 — 폴링 응답(관련 계산 생략)이 와도 마지막 계산값을 유지하려고
+ * overview 와 **분리해서** 들고 있는다(M4).
+ */
+type RelatedSignal = {
+  value: number | null;
+  status: RelatedStatus;
+  truncated: boolean;
+  maxDays?: number;
+};
+
+type SeriesPoint = {
+  date: string;
+  avgVisibility: number;
+  avgVisibilityRaw?: number;
+  mentionRate: number;
+  sampleCount: number;
+};
+
+type TimeseriesResult = {
+  days: string[];
+  providers: Record<string, SeriesPoint[]>;
+  totals?: SeriesPoint[];
 };
 
 function downloadCsv(filename: string, content: string) {
@@ -56,7 +123,6 @@ function downloadCsv(filename: string, content: string) {
 }
 
 export function VisibilityAnalyticsTab({
-  data,
   runs,
   brandTerms,
   windowDays,
@@ -65,28 +131,176 @@ export function VisibilityAnalyticsTab({
   const [dataTab, setDataTab] = useState<"auto" | "manual">("auto");
   // brand 모드 체크박스 — false (기본) = 일반 검색만 / true = brand 명 검색만
   const [brandedView, setBrandedView] = useState(false);
+  /** 직접 선택 구간. null 이면 프리셋(7/30/90) 모드 */
+  const [customRange, setCustomRange] = useState<CustomRange | null>(null);
 
-  // 자동/수동 필터링 + brand 모드 분기.
-  // brandedView=false (기본) 일 때는 brand prompt 제외, true 일 때는 brand prompt 만.
+  const [wsId, setWsId] = useState<string | null>(null);
+  /** 워크스페이스 조회를 마쳤는지 — 없는 경우(데모 페이지 등) 로딩 표시에 갇히지 않게 한다 */
+  const [wsChecked, setWsChecked] = useState(false);
+  const [overview, setOverview] = useState<OverviewResult | null>(null);
+  const [timeseries, setTimeseries] = useState<TimeseriesResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  /** 첫 로드를 마쳤는지 — 이후 갱신은 배너 없이 조용히 진행한다(M3) */
+  const [firstLoadDone, setFirstLoadDone] = useState(false);
+  const [related, setRelated] = useState<RelatedSignal | null>(null);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setWsId(localStorage.getItem(WORKSPACE_ID_KEY));
+      setWsChecked(true);
+    }
+  }, []);
+
+  const presetDays = windowDays ?? 30;
+  // 렌더마다 다시 계산 — 자정을 넘기면 조회 구간도 자연히 따라간다(60초 폴링과 함께 갱신).
+  const todayKey = toKstDateKey(new Date());
+  const presetFromKey = toKstDateKey(new Date(Date.now() - (presetDays - 1) * DAY_MS));
+  /**
+   * 서버 집계 라우트 공통 쿼리스트링.
+   *
+   * 프리셋(7/30/90)도 `days=` 대신 **KST 일자 구간**으로 보낸다. 이 탭이 예전에 보던 창은
+   * "KST 오늘 포함 최근 N일"(runs 로드 윈도우 = kstWindowStartUtcIso) 이었는데,
+   * 서버의 `days=` 는 "지금으로부터 N×24시간 전"이라 경계가 어긋난다. 구간으로 보내면
+   * 전환 전후 수치가 정확히 같아진다.
+   */
+  const queryString = useMemo(() => {
+    const params = new URLSearchParams();
+    if (customRange) {
+      params.set("from", customRange.from);
+      params.set("to", customRange.to);
+    } else {
+      params.set("from", presetFromKey);
+      params.set("to", todayKey);
+    }
+    params.set("runMode", dataTab === "auto" ? "auto" : "manual");
+    params.set("branded", brandedView ? "true" : "false");
+    return `?${params.toString()}`;
+  }, [customRange, presetFromKey, todayKey, dataTab, brandedView]);
+
+  /**
+   * 집계 조회.
+   *
+   * @param includeRelated 연관 출처를 서버에 계산시킬지. 60초 폴링에서는 false 로 보내
+   *   무거운 인용 확장 쿼리를 매분 재실행하지 않는다(M4). 이때 카드는 마지막 계산값을 유지한다.
+   */
+  const fetchAggregates = useCallback(async (includeRelated: boolean) => {
+    if (!wsChecked) return;
+    if (!wsId) {
+      // 워크스페이스가 없다(데모 페이지 등) — 무한 로딩 대신 "데이터 없음" 상태로 둔다.
+      setLoading(false);
+      setFirstLoadDone(true);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    const relatedQs = includeRelated ? "" : "&includeRelated=false";
+    try {
+      const [ovRes, tsRes] = await Promise.all([
+        fetch(`${BP}/api/workspaces/${wsId}/stats/overview${queryString}${relatedQs}`, {
+          credentials: "include",
+        }),
+        fetch(`${BP}/api/workspaces/${wsId}/stats/timeseries${queryString}`, {
+          credentials: "include",
+        }),
+      ]);
+      if (!ovRes.ok) {
+        const body = await ovRes.json().catch(() => ({}));
+        throw new Error(body?.error || `집계 조회 실패 (${ovRes.status})`);
+      }
+      if (!tsRes.ok) {
+        const body = await tsRes.json().catch(() => ({}));
+        throw new Error(body?.error || `추이 조회 실패 (${tsRes.status})`);
+      }
+      const ov: OverviewResult = await ovRes.json();
+      setOverview(ov);
+      setTimeseries(await tsRes.json());
+      // "omitted"(폴링에서 생략) 응답은 카드를 덮어쓰지 않고 직전 계산값을 그대로 둔다.
+      if (ov.relatedStatus !== "omitted") {
+        setRelated({
+          value: ov.brandSignals?.related ?? null,
+          status: ov.relatedStatus ?? "ok",
+          truncated: !!ov.relatedTruncated,
+          maxDays: ov.relatedMaxDays,
+        });
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setOverview(null);
+      setTimeseries(null);
+      setRelated(null);
+    } finally {
+      setLoading(false);
+      setFirstLoadDone(true);
+    }
+  }, [wsId, wsChecked, queryString]);
+
+  // 조회 조건이 바뀌면 연관 출처까지 새로 계산한다.
+  useEffect(() => {
+    void fetchAggregates(true);
+  }, [fetchAggregates]);
+
+  // 조회 조건이 바뀌면 배너를 다시 한 번 보여 준다(구간 전환은 사용자가 기다릴 만한 변화다).
+  useEffect(() => {
+    setFirstLoadDone(false);
+  }, [queryString]);
+
+  // 자동화가 새 실행을 쌓으므로 60초마다 갱신 (전역 runs 재동기화 주기와 동일한 박자).
+  // 폴링에서는 연관 출처를 계산하지 않는다 — 상시 부하를 만들지 않기 위함(M4).
+  useEffect(() => {
+    if (!wsId) return;
+    const t = setInterval(() => void fetchAggregates(false), 60_000);
+    return () => clearInterval(t);
+  }, [wsId, fetchAggregates]);
+
+  /* ----------------------------------------------------------
+   * CSV 내려받기 전용 — runs 원본 기반 (차트·카드는 서버 집계 사용)
+   * -------------------------------------------------------- */
   const filteredRuns = useMemo(() => {
-    const base = dataTab === "auto" ? runs.filter((r) => r.auto === true) : runs.filter((r) => r.auto !== true);
+    const base =
+      dataTab === "auto" ? runs.filter((r) => r.auto === true) : runs.filter((r) => r.auto !== true);
     if (brandTerms.length === 0) return base;
     return brandedView
       ? base.filter((r) => isBrandedPrompt(r.prompt, brandTerms))
       : base.filter((r) => !isBrandedPrompt(r.prompt, brandTerms));
   }, [runs, dataTab, brandTerms, brandedView]);
 
+  /**
+   * CSV 대상 행 — **화면이 보고 있는 구간으로 한 번 더 잘라낸다**(M2).
+   *
+   * runs 는 전역 윈도우(최근 presetDays 일)로 로드되므로, 직접 선택 구간이 그보다 좁으면
+   * 자르지 않을 경우 화면보다 넓은 파일이 내려간다. 잘라내는 기준은 화면·서버와 같은
+   * KST 일자(toKstDateKey)다.
+   */
+  const csvRuns = useMemo(
+    () =>
+      sliceRunsByKstRange(
+        filteredRuns,
+        customRange?.from ?? presetFromKey,
+        customRange?.to ?? todayKey,
+      ),
+    [filteredRuns, customRange, presetFromKey, todayKey],
+  );
+
+  /** 직접 선택 구간이 runs 로드 윈도우를 벗어나면 CSV 범위 안내 */
+  const csvRangeNotice = useMemo(() => {
+    if (!customRange) return null;
+    if (customRange.from < presetFromKey) {
+      return `내려받기는 최근 ${presetDays}일까지만 가능합니다. 그 이전 구간은 화면 집계에만 반영됩니다.`;
+    }
+    return null;
+  }, [customRange, presetDays, presetFromKey]);
+
   const exportRunsCsv = useCallback(() => {
     const header =
       "일시,AI모델,프롬프트,가시성점수,감성,브랜드본문인용,경쟁사본문인용,브랜드공식출처,경쟁사공식출처,브랜드연관출처(건수),출처수\n";
     const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
-    const rows = filteredRuns
+    const rows = csvRuns
       .map((r) => {
         const citedBrandKeys = r.citedBrandDomains ?? [];
         const relatedBrandCount = (r.citations ?? []).filter(
           (c) =>
-            !isUrlMatchingCitedKeys(c.url, citedBrandKeys) &&
-            isRelatedCitation(c, brandTerms),
+            !isUrlMatchingCitedKeys(c.url, citedBrandKeys) && isRelatedCitation(c, brandTerms),
         ).length;
         return [
           r.createdAt,
@@ -103,111 +317,122 @@ export function VisibilityAnalyticsTab({
         ].join(",");
       })
       .join("\n");
-    downloadCsv(`aeo-runs-${new Date().toISOString().slice(0, 10)}.csv`, header + rows);
-  }, [runs, brandTerms]);
+    const fromKey = customRange?.from ?? presetFromKey;
+    const toKey = customRange?.to ?? todayKey;
+    downloadCsv(`aeo-runs-${fromKey}_${toKey}.csv`, header + rows);
+  }, [csvRuns, brandTerms, customRange, presetFromKey, todayKey]);
 
-  // 전체 평균 추이 — filteredRuns(자동/수동 탭) 기준으로 재계산.
-  // 외부에서 전달된 data prop 은 섞인 값이므로 사용하지 않음.
-  const computedTrendData = useMemo(() => {
-    const byDay = new Map<string, { total: number; sum: number }>();
-    filteredRuns.forEach((run) => {
-      // KST 일자로 그룹 — UTC slice(0,10) 은 KST 새벽 데이터를 전날로 밀어버림
-      const day = toKstDateKey(run.createdAt);
-      if (!day) return;
-      const row = byDay.get(day) ?? { total: 0, sum: 0 };
-      row.total += 1;
-      row.sum += run.visibilityScore ?? 0;
-      byDay.set(day, row);
-    });
-    return [...byDay.entries()]
-      .map(([day, { total, sum }]) => ({
-        day,
-        visibility: total > 0 ? Math.round(sum / total) : 0,
-      }))
-      .sort((a, b) => a.day.localeCompare(b.day));
-  }, [filteredRuns]);
+  /* ----------------------------------------------------------
+   * 차트 데이터 — 서버 집계(timeseries) 기반
+   * -------------------------------------------------------- */
+
+  /**
+   * 전체 평균 추이 — 축을 timeseries.days 로 맞추고 실행이 없는 날은 **null**(선 끊김).
+   * 모델별 차트와 같은 규칙이라 두 차트의 빈 구간이 어긋나지 않는다(m7).
+   */
+  const trendData = useMemo(
+    () => (timeseries ? buildTrendSeries(timeseries.days, timeseries.totals) : []),
+    [timeseries],
+  );
+
+  /** 실제로 값이 있는 날 수 — 차트·내보내기 버튼의 "데이터 있음" 판정 */
+  const trendPointCount = useMemo(
+    () => trendData.filter((d) => d.visibility !== null).length,
+    [trendData],
+  );
 
   const exportTrendCsv = useCallback(() => {
     const header = "날짜,평균 가시성 (%)\n";
-    const rows = computedTrendData.map((d) => `${d.day},${d.visibility}`).join("\n");
+    // 값이 없는 날은 파일에도 넣지 않는다(빈 칸을 0 으로 오해하지 않게).
+    const rows = trendData
+      .filter((d) => d.visibility !== null)
+      .map((d) => `${d.day},${d.visibility}`)
+      .join("\n");
     downloadCsv(`aeo-trend-${new Date().toISOString().slice(0, 10)}.csv`, header + rows);
-  }, [computedTrendData]);
+  }, [trendData]);
 
-  // Sentiment distribution — filteredRuns 기준
-  const sentimentCounts = filteredRuns.reduce(
-    (acc, r) => {
-      const s = r.sentiment ?? "neutral";
-      acc[s] = (acc[s] || 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>,
-  );
-
-  const avgVisibility =
-    filteredRuns.length > 0
-      ? Math.round(filteredRuns.reduce((a, r) => a + (r.visibilityScore ?? 0), 0) / filteredRuns.length)
-      : 0;
-
-  // 3종 브랜드 신호 카운트 (① AI 본문 인용 / ② 공식 출처 / ③ 연관 출처)
-  const brandSignalCounts = useMemo(() => {
-    let mainMentioned = 0;
-    let cited = 0;
-    let related = 0;
-    for (const r of filteredRuns) {
-      // 빈 문자열/공백 제외 — false positive 방지
-      if ((r.brandMentions ?? []).some((m) => m && m.trim() !== "")) mainMentioned++;
-      const citedKeys = r.citedBrandDomains ?? [];
-      if (citedKeys.length > 0) cited++;
-      // 연관 출처: 공식 URL 매칭은 아니지만 citation 제목/설명에 브랜드명이 포함
-      const hasRelated = (r.citations ?? []).some(
-        (c) =>
-          !isUrlMatchingCitedKeys(c.url, citedKeys) &&
-          isRelatedCitation(c, brandTerms),
-      );
-      if (hasRelated) related++;
-    }
-    return { mainMentioned, cited, related };
-  }, [filteredRuns, brandTerms]);
-
-  // 모델별 일별 평균 가시성 — filteredRuns 기준.
-  // 축 일수는 선택 기간(windowDays)과 정합. 미지정 시 기존 동작(14일) 유지.
-  const chartDays = windowDays ?? 14;
+  /**
+   * 모델별 일별 평균 — 실행이 없는 날은 **null**(선 끊김).
+   * 0 으로 채우면 "그 날 실제로 0점" 과 구분이 안 돼 앞 구간이 바닥에 붙은 것처럼 보인다.
+   */
   const providerVisibilitySeries = useMemo(() => {
-    // KST 기준 연속 일자 축 (실행 없는 날도 0 으로 채움)
-    const days = kstRecentDateKeys(chartDays);
-    // 일자별 KST 키로 사전 그룹화 — O(n) (이전엔 일자마다 전체 filter 로 O(일수×n))
-    const byDay = new Map<string, ScrapeRun[]>();
-    for (const r of filteredRuns) {
-      const key = toKstDateKey(r.createdAt);
-      if (!key) continue;
-      const arr = byDay.get(key);
-      if (arr) arr.push(r);
-      else byDay.set(key, [r]);
+    if (!timeseries) return [];
+    const byProviderDay = new Map<string, Map<string, number>>();
+    for (const [provider, points] of Object.entries(timeseries.providers ?? {})) {
+      const m = new Map<string, number>();
+      for (const p of points) {
+        m.set(p.date, Math.round(p.avgVisibilityRaw ?? p.avgVisibility));
+      }
+      byProviderDay.set(provider, m);
     }
-    return days.map((day) => {
-      const dayRuns = byDay.get(day) ?? [];
-      const row: Record<string, string | number> = { day: day.slice(5) };
+    return (timeseries.days ?? []).map((day) => {
+      const row: Record<string, string | number | null> = { day: day.slice(5) };
       for (const p of VISIBLE_PROVIDERS) {
-        const pRuns = dayRuns.filter((r) => r.provider === p);
-        row[p] =
-          pRuns.length > 0
-            ? Math.round(
-                pRuns.reduce((s, r) => s + (r.visibilityScore ?? 0), 0) / pRuns.length,
-              )
-            : 0;
+        const v = byProviderDay.get(p)?.get(day);
+        row[p] = v === undefined ? null : v;
       }
       return row;
     });
-  }, [filteredRuns, chartDays]);
+  }, [timeseries]);
 
-  const total = filteredRuns.length || 1;
-  const pct = (n: number) => Math.round((n / total) * 100);
+  const chartDaysLabel = customRange
+    ? `${customRange.from} ~ ${customRange.to}`
+    : `${presetDays}일`;
+
+  const sampleCount = overview?.sampleCount ?? 0;
+  const signals = overview?.brandSignals ?? { mainMentioned: 0, cited: 0, related: 0 };
+  const pct = (n: number) => (sampleCount > 0 ? Math.round((n / sampleCount) * 100) : 0);
+  const sentimentCount = (k: SentimentKey) => overview?.sentiment?.[k] ?? 0;
+
+  /** 값 자리 — 로딩 중에는 0 대신 표시를 비워 오해를 막는다 */
+  const numOrDash = (n: number) => (loading && !overview ? "—" : n.toLocaleString());
+
+  /**
+   * 연관 출처 카드 — 계산하지 못한 경우 숫자 대신 사유를 보여 준다(M1).
+   * 나머지 카드는 그대로 표시되므로 화면이 통째로 비지 않는다.
+   */
+  const relatedValueText =
+    related?.status === "skipped" || related?.status === "failed" || related?.value === null
+      ? "계산 불가"
+      : numOrDash(related?.value ?? 0);
+  const relatedNotice =
+    related?.status === "skipped"
+      ? `조회 구간이 ${related.maxDays ?? 365}일을 넘어 이 구간에서는 연관 출처를 계산하지 않습니다. 구간을 좁히면 표시됩니다.`
+      : related?.status === "failed"
+        ? "연관 출처 집계가 시간 안에 끝나지 않았습니다. 구간을 좁혀 다시 조회해 주세요. (나머지 수치는 정상입니다)"
+        : related?.truncated
+          ? "연관 출처 후보가 조회 상한을 넘어 실제보다 적게 집계됐을 수 있습니다. 구간을 좁혀 조회해 주세요."
+          : null;
 
   return (
-    <div className="space-y-4">
+    <div className="relative space-y-4">
+      {/*
+        갱신 표시(M3) — 최초 로드에만 자리를 차지하는 배너를 띄우고, 이후 60초 폴링 갱신은
+        레이아웃을 밀지 않는 떠 있는 칩으로만 알린다. 예전에는 1분마다 배너가 나타났다 사라지며
+        아래 콘텐츠가 흔들렸다.
+      */}
+      {loading && firstLoadDone && (
+        <div className="pointer-events-none absolute right-0 top-0 z-10 rounded-md border border-th-border bg-th-card px-2 py-0.5 text-[10px] text-th-text-muted">
+          갱신 중…
+        </div>
+      )}
       {windowDays != null && onWindowDaysChange && (
-        <div className="flex justify-end">
-          <RangeSelector value={windowDays} onChange={onWindowDaysChange} />
+        <div className="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => void fetchAggregates(true)}
+            disabled={loading}
+            className="rounded-md border border-th-border px-2.5 py-1 text-xs text-th-text-secondary hover:bg-th-card-hover disabled:opacity-40"
+          >
+            새로고침
+          </button>
+          <RangeSelector
+            value={windowDays}
+            onChange={onWindowDaysChange}
+            allowCustomRange
+            customRange={customRange}
+            onCustomRangeChange={setCustomRange}
+          />
         </div>
       )}
       {/* 자동/수동 탭 */}
@@ -252,7 +477,19 @@ export function VisibilityAnalyticsTab({
         </label>
       </div>
 
-      {filteredRuns.length === 0 && (
+      {loading && !firstLoadDone && (
+        <div className="rounded-lg border border-th-border bg-th-card-alt p-3 text-center text-xs text-th-text-muted">
+          집계를 불러오는 중입니다…
+        </div>
+      )}
+
+      {error && (
+        <div role="alert" className="rounded-lg border border-th-danger/40 bg-th-card p-3 text-sm text-th-danger">
+          집계를 불러오지 못했습니다 — {error}
+        </div>
+      )}
+
+      {!loading && !error && sampleCount === 0 && (
         <div className="rounded-lg border border-th-border bg-th-card-alt p-6 text-center text-sm text-th-text-muted">
           {dataTab === "auto"
             ? brandedView
@@ -279,9 +516,9 @@ export function VisibilityAnalyticsTab({
               AI 본문 인용
             </div>
             <div className="mt-0.5 text-xl font-bold text-th-success">
-              {brandSignalCounts.mainMentioned}
+              {numOrDash(signals.mainMentioned)}
               <span className="ml-1 text-xs font-normal opacity-70">
-                / {filteredRuns.length} ({pct(brandSignalCounts.mainMentioned)}%)
+                / {numOrDash(sampleCount)} ({pct(signals.mainMentioned)}%)
               </span>
             </div>
           </div>
@@ -291,9 +528,9 @@ export function VisibilityAnalyticsTab({
               공식 출처
             </div>
             <div className="mt-0.5 text-xl font-bold text-th-brand-text">
-              {brandSignalCounts.cited}
+              {numOrDash(signals.cited)}
               <span className="ml-1 text-xs font-normal text-th-brand-text/70">
-                / {filteredRuns.length} ({pct(brandSignalCounts.cited)}%)
+                / {numOrDash(sampleCount)} ({pct(signals.cited)}%)
               </span>
             </div>
           </div>
@@ -303,13 +540,18 @@ export function VisibilityAnalyticsTab({
               연관 출처
             </div>
             <div className="mt-0.5 text-xl font-bold text-th-text-secondary">
-              {brandSignalCounts.related}
-              <span className="ml-1 text-xs font-normal text-th-text-muted">
-                / {filteredRuns.length} ({pct(brandSignalCounts.related)}%)
-              </span>
+              {relatedValueText}
+              {related?.value !== null && related?.value !== undefined && (
+                <span className="ml-1 text-xs font-normal text-th-text-muted">
+                  / {numOrDash(sampleCount)} ({pct(related.value)}%)
+                </span>
+              )}
             </div>
           </div>
         </div>
+        {relatedNotice && (
+          <p className="mt-1 text-[11px] text-th-danger">{relatedNotice}</p>
+        )}
       </div>
 
       {/* Summary metrics */}
@@ -317,14 +559,14 @@ export function VisibilityAnalyticsTab({
         <div className="rounded-lg border border-th-border bg-th-card px-3 py-2.5">
           <div className="text-xs uppercase tracking-wider text-th-text-muted">
             평균 가시성
-            <span className="ml-1 text-[10px] normal-case text-th-text-muted">
-              /100
-            </span>
+            <span className="ml-1 text-[10px] normal-case text-th-text-muted">/100</span>
           </div>
-          <div className="mt-0.5 text-xl font-bold text-th-text">{avgVisibility}</div>
+          <div className="mt-0.5 text-xl font-bold text-th-text">
+            {loading && !overview ? "—" : Math.round(overview?.avgVisibilityRaw ?? 0)}
+          </div>
         </div>
-        {(["positive", "neutral", "negative", "not-mentioned"] as const).map((s) => {
-          const colors: Record<string, string> = {
+        {SENTIMENT_KEYS.map((s) => {
+          const colors: Record<SentimentKey, string> = {
             positive: "text-th-success",
             neutral: "text-th-text-accent",
             negative: "text-th-danger",
@@ -332,13 +574,13 @@ export function VisibilityAnalyticsTab({
           };
           return (
             <div key={s} className="rounded-lg border border-th-border bg-th-card px-3 py-2.5">
-              <div className="text-xs uppercase tracking-wider text-th-text-muted">{SENTIMENT_LABELS[s] ?? s}</div>
+              <div className="text-xs uppercase tracking-wider text-th-text-muted">
+                {SENTIMENT_LABELS[s]}
+              </div>
               <div className={`mt-0.5 text-xl font-bold ${colors[s]}`}>
-                {sentimentCounts[s] || 0}
+                {numOrDash(sentimentCount(s))}
                 <span className="ml-1 text-xs font-normal text-th-text-muted">
-                  {filteredRuns.length > 0
-                    ? `(${Math.round(((sentimentCounts[s] || 0) / filteredRuns.length) * 100)}%)`
-                    : ""}
+                  {sampleCount > 0 ? `(${Math.round((sentimentCount(s) / sampleCount) * 100)}%)` : ""}
                 </span>
               </div>
             </div>
@@ -346,15 +588,19 @@ export function VisibilityAnalyticsTab({
         })}
       </div>
 
-      {/* 모델별 평균 가시성 추이 (14일) — 홈에서 이동된 상세 버전 */}
+      {/* 모델별 평균 가시성 추이 */}
       <section className="rounded-lg border border-th-border bg-th-card p-4">
         <div className="mb-3">
-          <h3 className="text-sm font-semibold text-th-text">모델별 평균 가시성 추이 ({chartDays}일)</h3>
+          <h3 className="text-sm font-semibold text-th-text">
+            모델별 평균 가시성 추이 ({chartDaysLabel})
+          </h3>
           <p className="mt-0.5 text-[11px] text-th-text-muted">
-            프로바이더별 일일 평균 visibility score. 실행이 없는 날은 0으로 표시됩니다.
+            프로바이더별 일일 평균 visibility score. 실행이 없는 날은 선이 끊깁니다(0 으로 그리지 않습니다).
           </p>
         </div>
-        {filteredRuns.length === 0 ? (
+        {loading && !timeseries ? (
+          <div className="h-72 animate-pulse rounded-md border border-th-border bg-th-card-alt" />
+        ) : providerVisibilitySeries.length === 0 ? (
           <div className="rounded-md border border-th-border bg-th-card-alt p-6 text-center text-xs text-th-text-muted">
             아직 실행 데이터가 없습니다.
           </div>
@@ -382,6 +628,7 @@ export function VisibilityAnalyticsTab({
                     stroke={PROVIDER_COLORS[p]}
                     strokeWidth={2}
                     dot={false}
+                    connectNulls={false}
                   />
                 ))}
               </LineChart>
@@ -395,19 +642,26 @@ export function VisibilityAnalyticsTab({
         <div className="mb-3">
           <h3 className="text-sm font-semibold text-th-text">전체 평균 가시성 추이</h3>
           <p className="mt-0.5 text-[11px] text-th-text-muted">
-            모든 프로바이더(ChatGPT · Gemini · Google AI · Perplexity) 를 합산한 일별 평균 visibility score. 위 차트의 4개 선을 하루 단위로 평균낸 값입니다.
+            모든 프로바이더(ChatGPT · Gemini · Google AI · Perplexity) 를 합산한 일별 평균 visibility score.
+            실행 건수로 가중한 값이며, 실행이 없는 날은 선이 끊깁니다(0 으로 그리지 않습니다).
           </p>
         </div>
-        {computedTrendData.length === 0 ? (
+        {loading && !timeseries ? (
+          <div className="h-72 animate-pulse rounded-lg border border-th-border bg-th-card-alt" />
+        ) : trendPointCount === 0 ? (
           <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center text-sm text-th-text-secondary">
             아직 추세 데이터가 없습니다. 프롬프트를 실행하면 가시성 추세가 표시됩니다.
           </div>
         ) : (
           <div className="h-72 w-full">
             <ResponsiveContainer>
-              <LineChart data={computedTrendData}>
+              <LineChart data={trendData}>
                 <CartesianGrid stroke="var(--th-chart-grid)" strokeDasharray="3 3" />
-                <XAxis dataKey="day" tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
+                <XAxis
+                  dataKey="day"
+                  tickFormatter={(d: string) => (typeof d === "string" ? d.slice(5) : d)}
+                  tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }}
+                />
                 <YAxis domain={[0, 100]} tick={{ fill: "var(--th-chart-axis)", fontSize: 12 }} />
                 <Tooltip
                   contentStyle={{
@@ -424,6 +678,7 @@ export function VisibilityAnalyticsTab({
                   stroke="var(--th-accent)"
                   strokeWidth={2.5}
                   dot={{ r: 3, fill: "var(--th-accent)" }}
+                  connectNulls={false}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -432,21 +687,24 @@ export function VisibilityAnalyticsTab({
       </section>
 
       {/* Export buttons */}
-      <div className="flex gap-2">
-        <button
-          onClick={exportRunsCsv}
-          disabled={filteredRuns.length === 0}
-          className="bd-chip rounded-lg px-4 py-2 text-sm disabled:opacity-40"
-        >
-          실행 이력 내보내기 (CSV)
-        </button>
-        <button
-          onClick={exportTrendCsv}
-          disabled={computedTrendData.length === 0}
-          className="bd-chip rounded-lg px-4 py-2 text-sm disabled:opacity-40"
-        >
-          추세 데이터 내보내기 (CSV)
-        </button>
+      <div className="space-y-1">
+        <div className="flex gap-2">
+          <button
+            onClick={exportRunsCsv}
+            disabled={csvRuns.length === 0}
+            className="bd-chip rounded-lg px-4 py-2 text-sm disabled:opacity-40"
+          >
+            실행 이력 내보내기 (CSV)
+          </button>
+          <button
+            onClick={exportTrendCsv}
+            disabled={trendPointCount === 0}
+            className="bd-chip rounded-lg px-4 py-2 text-sm disabled:opacity-40"
+          >
+            추세 데이터 내보내기 (CSV)
+          </button>
+        </div>
+        {csvRangeNotice && <p className="text-[11px] text-th-text-muted">{csvRangeNotice}</p>}
       </div>
     </div>
   );

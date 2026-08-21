@@ -1,5 +1,6 @@
 /**
  * GET /api/workspaces/[id]/stats/summary?days=30&auto=true
+ * GET /api/workspaces/[id]/stats/summary?from=2026-08-01&to=2026-08-11
  *
  * 대시보드 상단 KPI 카드용 집계.
  *  - avg_visibility: 기간 내 runs 의 평균 가시성 점수
@@ -10,6 +11,9 @@
  *  - auto_health: 자동 실행 건강성 (실행 예정 대비 실제 실행 비율)
  *
  * 품질 필터: parse_quality='low' 인 runs 는 제외 (집계 신뢰도 확보).
+ *
+ * 조회 구간: `from`/`to` (KST 일자, 양끝 포함) 가 오면 우선, 없으면 기존 `days` 롤링 윈도우.
+ * `previous` 는 항상 "같은 길이의 직전 구간" (from - 구간길이 ~ from).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -20,15 +24,9 @@ import {
   getBrandTermsForWorkspace,
   viewModeCondition,
 } from "@/lib/server/branded-query-filter";
+import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
 
 export const dynamic = "force-dynamic";
-
-function parseInt32(v: string | null, def: number, max = 365): number {
-  if (!v) return def;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return def;
-  return Math.min(Math.floor(n), max);
-}
 
 type AggregateResult = {
   sampleCount: number;
@@ -125,24 +123,36 @@ export async function GET(
   const guard = await assertWorkspaceAccess(id, session);
   if (guard) return guard;
   const sp = req.nextUrl.searchParams;
-  const days = parseInt32(sp.get("days"), 30);
+  const range = parseStatsRange(sp, { defaultDays: 30 });
+  if (isStatsRangeError(range)) {
+    return NextResponse.json({ error: range.error }, { status: 400 });
+  }
   const autoOnly = sp.get("auto") !== "false"; // 기본 true (자동 실행만)
   const brandedView = sp.get("branded") === "true"; // 기본 false (일반 검색만)
 
-  const now = new Date();
-  const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-  const prevFrom = new Date(now.getTime() - 2 * days * 24 * 60 * 60 * 1000);
+  const { from, to, days } = range;
+  // 직전 동일 길이 구간 — days 모드·range 모드 모두 동일 규칙
+  const spanMs = to.getTime() - from.getTime();
+  const prevFrom = new Date(from.getTime() - spanMs);
 
   try {
     const brandTerms = await getBrandTermsForWorkspace(id);
     const [current, previous, health] = await Promise.all([
-      aggregate(id, from, now, autoOnly, brandTerms, brandedView),
+      aggregate(id, from, to, autoOnly, brandTerms, brandedView),
       aggregate(id, prevFrom, from, autoOnly, brandTerms, brandedView),
-      autoHealth(id, from, now),
+      autoHealth(id, from, to),
     ]);
 
     return NextResponse.json({
       days,
+      range: {
+        mode: range.mode,
+        days: range.days,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        fromDate: range.fromDateKey,
+        toDate: range.toDateKey,
+      },
       current,
       previous,
       delta: {

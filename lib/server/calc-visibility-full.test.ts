@@ -1,7 +1,7 @@
 /**
  * calc-visibility-full.test.ts — calcVisibilityFull(신규 수집이 쓰는 배점) 계약.
  *
- * calcVisibilityFull 은 룰 세트 레지스트리의 v12b 세트에 위임하는 얇은 어댑터다.
+ * calcVisibilityFull 은 룰 세트 레지스트리의 v14a 세트에 위임하는 얇은 어댑터다.
  * 이 파일은 "수집 경로가 실제로 어느 세트를 쓰는지"를 앵커로 고정한다 — 세트 정의 자체의
  * 계약은 visibility-score-sets.test.ts 가 덮는다.
  *
@@ -82,7 +82,7 @@ describe("100 초과 없음 — 전 조합 완전 열거", () => {
   });
 });
 
-describe("수집 경로가 쓰는 세트 = v12b (위임 계약)", () => {
+describe("수집 경로가 쓰는 세트 = v14a (위임 계약)", () => {
   const samples = [
     { text: "요가원 좋아요", brandTerms: ["요가원"], sentiment: "positive" as Sentiment },
     {
@@ -102,7 +102,7 @@ describe("수집 경로가 쓰는 세트 = v12b (위임 계약)", () => {
     { text: "브랜드 미언급", brandTerms: ["요가원"], hasCitationOnly: true },
   ];
 
-  it("모든 표본에서 calcVisibilityFull == v12b 세트 직접 계산", () => {
+  it("모든 표본에서 calcVisibilityFull == v14a 세트 직접 계산", () => {
     for (const s of samples) {
       expect(score(s)).toBe(
         calcVisibilityFromText(
@@ -114,7 +114,7 @@ describe("수집 경로가 쓰는 세트 = v12b (위임 계약)", () => {
           s.isTopRanked ?? false,
           s.isStronglyRecommended ?? false,
           s.isBrandedQuery ?? false,
-          SCORE_SETS.v12b,
+          SCORE_SETS.v14a,
         ),
       );
     }
@@ -163,7 +163,7 @@ describe("분기별 최대 경로 앵커(설계값)", () => {
     ).toBe(90);
   });
 
-  it("일반 최대(상단·반복3·긍정·topRanked): 50+14+10+14+11 = 99", () => {
+  it("일반 최대(상단·반복3·긍정·topRanked): 66+9+7+9+8 = 99", () => {
     expect(
       score({
         text: "요가원" + "x".repeat(60) + "요가원" + "y".repeat(60) + "요가원",
@@ -174,7 +174,7 @@ describe("분기별 최대 경로 앵커(설계값)", () => {
     ).toBe(99);
   });
 
-  it("일반 중단(200<=firstPos<500)·반복3·긍정·topRanked: 50+11+10+14+11 = 96", () => {
+  it("일반 중단(200<=firstPos<500)·반복3·긍정·topRanked: 66+7+7+9+8 = 97", () => {
     expect(
       score({
         text:
@@ -188,14 +188,14 @@ describe("분기별 최대 경로 앵커(설계값)", () => {
         sentiment: "positive",
         isTopRanked: true,
       }),
-    ).toBe(96);
+    ).toBe(97);
   });
 
-  it("일반 mentions=0: 본문URL 36, 참고자료만 24, 둘 다면 본문 우선 36", () => {
+  it("일반 mentions=0: 본문URL 55, 참고자료만 45, 둘 다면 본문 우선 55", () => {
     const base = { text: "요가 일반 답변(브랜드 미언급)", brandTerms: ["요가원"] };
-    expect(score({ ...base, hasBodyUrl: true })).toBe(36);
-    expect(score({ ...base, hasCitationOnly: true })).toBe(24);
-    expect(score({ ...base, hasBodyUrl: true, hasCitationOnly: true })).toBe(36);
+    expect(score({ ...base, hasBodyUrl: true })).toBe(55);
+    expect(score({ ...base, hasCitationOnly: true })).toBe(45);
+    expect(score({ ...base, hasBodyUrl: true, hasCitationOnly: true })).toBe(55);
     expect(score({ ...base })).toBe(0);
   });
 });
@@ -209,7 +209,7 @@ describe("경계·엣지", () => {
       score({ text: "관련 없는 답변", brandTerms: ["요가원"], isBrandedQuery: true, sentiment: "positive" }),
     ).toBe(0);
   });
-  it("일반 단일언급·상단·중립: 50 + firstPos 14 + neutral 13 = 77", () => {
-    expect(score({ text: "요가원 소개", brandTerms: ["요가원"], sentiment: "neutral" })).toBe(77);
+  it("일반 단일언급·상단·중립: 66 + firstPos 9 + neutral 8 = 83", () => {
+    expect(score({ text: "요가원 소개", brandTerms: ["요가원"], sentiment: "neutral" })).toBe(83);
   });
 });

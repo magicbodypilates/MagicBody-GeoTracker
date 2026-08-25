@@ -122,6 +122,7 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     low60: { brand: 33, gen: 57, noMention: 9 },
     v12b: { brand: 97, gen: 99, noMention: 36 },
     full83: { brand: 97, gen: 82, noMention: 21 },
+    v14a: { brand: 97, gen: 99, noMention: 55 },
   };
 
   it("검산표와 정확히 일치", () => {
@@ -199,6 +200,64 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
   it("full83 의 일반 분기 최대는 100 미만 — cap 이 정보를 자르지 않는다", () => {
     const s = SCORE_SETS.full83;
     expect(s.genBase + s.genFirstPos + s.genMentions3 + s.genPositive + s.genTopRanked).toBe(82);
+  });
+
+  it("v14a 의 브랜드 분기 상수는 v12b(= full10) 와 동일", () => {
+    const v = SCORE_SETS.v12b;
+    const n = SCORE_SETS.v14a;
+    expect({
+      brandPositive: n.brandPositive,
+      brandStrong: n.brandStrong,
+      brandBodyUrl: n.brandBodyUrl,
+      brandCitation: n.brandCitation,
+    }).toEqual({
+      brandPositive: v.brandPositive,
+      brandStrong: v.brandStrong,
+      brandBodyUrl: v.brandBodyUrl,
+      brandCitation: v.brandCitation,
+    });
+  });
+
+  /**
+   * v14a 의 설계 의도 — 일반 분기 최대는 v12b 와 같은 99 로 두되(역산 불변식의 전제인
+   * "cap 미접촉" 유지), 기본점과 언급 0 분기의 URL 배점을 올려 하한을 끌어올린다.
+   */
+  it("v14a 일반 분기 최대는 99 (100 미만) 이고 언급 시 하한은 기본점 66", () => {
+    const n = SCORE_SETS.v14a;
+    expect(n.genBase + n.genFirstPos + n.genMentions3 + n.genPositive + n.genTopRanked).toBe(99);
+    expect(n.genBase).toBe(66);
+    // 중립·가산 없음 = 언급됐다는 사실만으로 받는 실질 하한
+    expect(n.genBase + n.genNeutral).toBe(74);
+  });
+
+  it("v14a 의 단계 순서: 언급(>=66) > 본문URL(55) > 참고자료(45) > 없음(0)", () => {
+    const n = SCORE_SETS.v14a;
+    expect(n.genBase).toBeGreaterThan(n.genNoMentionBodyUrl);
+    expect(n.genNoMentionBodyUrl).toBeGreaterThan(n.genNoMentionCitation);
+    expect(n.genNoMentionCitation).toBeGreaterThan(0);
+  });
+
+  it("v14a 는 v12b 대비 가산 항목만 낮추고 기본점·URL 배점을 올렸다", () => {
+    const v = SCORE_SETS.v12b;
+    const n = SCORE_SETS.v14a;
+    for (const k of ["genBase", "genNoMentionBodyUrl", "genNoMentionCitation"] as const) {
+      expect(n[k]).toBeGreaterThan(v[k]);
+    }
+    for (const k of [
+      "genFirstPos",
+      "genMidPos",
+      "genMentions3",
+      "genMentions2",
+      "genPositive",
+      "genNeutral",
+      "genTopRanked",
+    ] as const) {
+      expect(n[k]).toBeLessThan(v[k]);
+    }
+    // 가산 항목의 상대 순서는 보존된다(위치 > 중단 · 3회 > 2회 · 긍정 > 중립).
+    expect(n.genFirstPos).toBeGreaterThan(n.genMidPos);
+    expect(n.genMentions3).toBeGreaterThan(n.genMentions2);
+    expect(n.genPositive).toBeGreaterThan(n.genNeutral);
   });
 });
 
@@ -513,6 +572,79 @@ describe("v12b 앵커", () => {
   });
 });
 
+describe("v14a 앵커", () => {
+  it("일반 최대(상단·반복3·긍정·1순위): 66+9+7+9+8 = 99", () => {
+    expect(
+      score(
+        {
+          text: "요가원" + "x".repeat(60) + "요가원" + "y".repeat(60) + "요가원",
+          brandTerms: ["요가원"],
+          sentiment: "positive",
+          isTopRanked: true,
+        },
+        "v14a",
+      ),
+    ).toBe(99);
+  });
+
+  it("일반 언급 시 중립 최저(단일·먼 위치·중립): 66+8 = 74", () => {
+    expect(
+      score(
+        { text: "가".repeat(600) + "요가원", brandTerms: ["요가원"], sentiment: "neutral" },
+        "v14a",
+      ),
+    ).toBe(74);
+  });
+
+  it("일반 언급 시 절대 최저(단일·먼 위치·부정): 66", () => {
+    expect(
+      score(
+        { text: "가".repeat(600) + "요가원", brandTerms: ["요가원"], sentiment: "negative" },
+        "v14a",
+      ),
+    ).toBe(66);
+  });
+
+  it("일반 중단·단일·중립: 66+7+8 = 81", () => {
+    expect(
+      score(
+        { text: "가".repeat(250) + "요가원", brandTerms: ["요가원"], sentiment: "neutral" },
+        "v14a",
+      ),
+    ).toBe(81);
+  });
+
+  it("일반 언급0: 본문URL 55 · 참고자료만 45 · 둘 다면 본문 55 · 없으면 0", () => {
+    const base = { text: "요가 일반 답변(브랜드 미언급)", brandTerms: ["요가원"] };
+    expect(score({ ...base, hasBodyUrl: true }, "v14a")).toBe(55);
+    expect(score({ ...base, hasCitationOnly: true }, "v14a")).toBe(45);
+    expect(score({ ...base, hasBodyUrl: true, hasCitationOnly: true }, "v14a")).toBe(55);
+    expect(score(base, "v14a")).toBe(0);
+  });
+
+  it("브랜드 분기는 v12b 와 같은 값을 낸다 — 브랜드 최대 97", () => {
+    const args = {
+      text: "요가원 정말 좋아요",
+      brandTerms: ["요가원"],
+      isBrandedQuery: true,
+      sentiment: "positive" as Sentiment,
+      isStronglyRecommended: true,
+      hasBodyUrl: true,
+    };
+    expect(score(args, "v14a")).toBe(97);
+    expect(score(args, "v14a")).toBe(score(args, "v12b"));
+  });
+
+  it("브랜드 질의인데 언급 없으면 0 (언급 없음 구간은 건드리지 않는다)", () => {
+    expect(
+      score(
+        { text: "관련 없는 답변", brandTerms: ["요가원"], isBrandedQuery: true, sentiment: "positive" },
+        "v14a",
+      ),
+    ).toBe(0);
+  });
+});
+
 describe("full83 앵커", () => {
   it("일반 최대(상단·반복3·긍정·1순위): 25+17+12+15+13 = 82", () => {
     expect(
@@ -612,6 +744,8 @@ describe("deriveMentionInputs / 텍스트 진입점", () => {
     expect(isScoreSetId("legacy8")).toBe(true);
     expect(isScoreSetId("v12b")).toBe(true);
     expect(isScoreSetId("full83")).toBe(true);
+    expect(isScoreSetId("v14a")).toBe(true);
+    expect(isScoreSetId("v14")).toBe(false);
     expect(isScoreSetId("v13")).toBe(false);
     expect(isScoreSetId("full84")).toBe(false);
     expect(isScoreSetId(undefined)).toBe(false);

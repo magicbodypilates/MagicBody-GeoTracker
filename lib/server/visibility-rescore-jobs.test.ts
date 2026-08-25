@@ -31,11 +31,13 @@ function inWindow(iso: string, jobId: RescoreJobId): boolean {
 }
 
 describe("잡 id 는 닫힌 집합", () => {
-  it("등록된 네 잡만 통과", () => {
-    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t", "v13"]);
+  it("등록된 다섯 잡만 통과", () => {
+    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t", "v13", "v14"]);
     for (const id of RESCORE_JOB_IDS) expect(isRescoreJobId(id)).toBe(true);
-    expect(isRescoreJobId("v14")).toBe(false);
+    expect(isRescoreJobId("v15")).toBe(false);
+    expect(isRescoreJobId("v14t")).toBe(false);
     expect(isRescoreJobId("v13t")).toBe(false);
+    expect(isRescoreJobId("V14")).toBe(false);
     expect(isRescoreJobId("V11")).toBe(false);
     expect(isRescoreJobId("V13")).toBe(false);
     expect(isRescoreJobId("")).toBe(false);
@@ -75,12 +77,15 @@ describe("잡 정의 불변식", () => {
     }
   });
 
-  it("REPRO_SET_BY_VERSION 은 8·10 만 매핑한다(11·12·112 는 재산출 대상 밖)", () => {
-    expect(REPRO_SET_BY_VERSION).toEqual({ 8: "legacy8", 10: "full10" });
+  it("REPRO_SET_BY_VERSION 은 8·10·12 를 매핑한다(11·13·14·112 는 재산출 대상 밖)", () => {
+    expect(REPRO_SET_BY_VERSION).toEqual({ 8: "legacy8", 10: "full10", 12: "v12b" });
+    // 12 는 v14 잡의 소스 버전이라 재현 세트가 반드시 있어야 한다.
+    expect(reproSetForVersion(12)).toBe("v12b");
     expect(reproSetForVersion(11)).toBeNull();
-    expect(reproSetForVersion(12)).toBeNull();
     expect(reproSetForVersion(13)).toBeNull();
+    expect(reproSetForVersion(14)).toBeNull();
     expect(reproSetForVersion(112)).toBeNull();
+    expect(reproSetForVersion(114)).toBeNull();
     expect(reproSetForVersion(0)).toBeNull();
   });
 
@@ -91,10 +96,11 @@ describe("잡 정의 불변식", () => {
     expect(ms(v11.toUtc as string)).toBeLessThanOrEqual(ms(v12.fromUtc));
   });
 
-  it("workspaceScope — 운영 잡 3개 · 카나리 1개", () => {
+  it("workspaceScope — 운영 잡 4개 · 카나리 1개", () => {
     expect(RESCORE_JOBS.v11.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v13.workspaceScope).toBe("production");
+    expect(RESCORE_JOBS.v14.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12t.workspaceScope).toBe("non-production");
   });
 
@@ -108,6 +114,7 @@ describe("잡 정의 불변식", () => {
     expect(byVersion.get(12)?.sort()).toEqual(["v12", "v12t"]);
     expect(byVersion.get(11)).toEqual(["v11"]);
     expect(byVersion.get(13)).toEqual(["v13"]);
+    expect(byVersion.get(14)).toEqual(["v14"]);
   });
 
   /**
@@ -135,6 +142,46 @@ describe("잡 정의 불변식", () => {
     expect(b.targetSet).not.toBe(a.targetSet);
     expect(SCORE_SETS[b.targetSet]).not.toEqual(SCORE_SETS[a.targetSet]);
     expect(jobHash("v13")).not.toBe(jobHash("v11"));
+  });
+
+  /**
+   * v14 는 v12 가 이미 12 로 올려 둔 행 중 대상 창 안의 것만 받는다. provider·informationalOnly
+   * 는 v12 와 같아야 하고(같은 구간을 가리켜야 하므로), 소스 버전·목표·진단 세트만 다르다.
+   */
+  it("v14 는 v12 의 부분 구간이며 소스 버전·목표가 다르다", () => {
+    const a = RESCORE_JOBS.v12;
+    const b = RESCORE_JOBS.v14;
+    // 창을 뺀 나머지 대상 조건은 v12 와 같아야 한다(같은 성격의 행을 가리켜야 하므로).
+    const scopeOf = (job: typeof a) => ({
+      providers: job.providers,
+      informationalOnly: job.informationalOnly,
+      autoOnly: job.autoOnly,
+      workspaceScope: job.workspaceScope,
+    });
+    expect(scopeOf(b)).toEqual(scopeOf(a));
+
+    // 창은 v12 의 진부분집합이다 — 시작이 늦고 끝은 같다(둘 다 상한 없음).
+    expect(new Date(b.fromUtc).getTime()).toBeGreaterThan(new Date(a.fromUtc).getTime());
+    expect(b.toUtc).toBe(a.toUtc);
+    expect(b.fromUtc).toBe("2026-08-23T15:00:00.000Z"); // KST 2026-08-24 00:00
+
+    expect(b.sourceVersions).toEqual([12]);
+    expect(b.sourceVersions).toEqual([a.targetVersion]);
+    expect(b.targetVersion).toBe(14);
+    expect(b.targetSet).toBe("v14a");
+    // 목표 버전이 소스와 겹치지 않아야 재실행이 멱등하다.
+    expect(b.sourceVersions).not.toContain(b.targetVersion);
+    expect(jobHash("v14")).not.toBe(jobHash("v12"));
+  });
+
+  /**
+   * v14 의 진단 세트가 비어 있는 것은 의도다 — 소스 버전 12 를 만든 세트는 v12b 하나뿐이고,
+   * legacy8·full10 을 진단에 넣으면 우연히 같은 합이 나오는 조합에서 cross-set-ambiguous 가
+   * 나 그 행이 조용히 skip 된다. 세부 근거는 visibility-rescore-anomaly-space.test.ts.
+   */
+  it("v14 의 진단 세트는 비어 있다(소스 세트가 하나뿐이라 교차 진단이 무의미)", () => {
+    expect(RESCORE_JOBS.v14.diagnosticSets).toEqual([]);
+    expect(RESCORE_JOBS.v11.diagnosticSets).toEqual(["legacy8", "full10"]);
   });
 
   it("카나리 잡은 운영 잡 v12 와 범위 정의가 동일하다(스코프만 다름)", () => {
@@ -169,6 +216,23 @@ describe("창 경계 — ±1µs (timestamptz 반차 구간)", () => {
     { iso: "2026-08-11T14:59:59.999999Z", job: "v12", expected: false, label: "하한 -1µs" },
     { iso: "2026-08-11T15:00:00.000000Z", job: "v12", expected: true, label: "하한 정확히" },
     { iso: "2026-08-11T15:00:00.000001Z", job: "v12", expected: true, label: "하한 +1µs" },
+    // v14 하한 — v12 보다 좁은 창(KST 8/24 00:00). 경계를 독립으로 고정한다
+    { iso: "2026-08-23T14:59:59.999999Z", job: "v14", expected: false, label: "하한 -1µs" },
+    { iso: "2026-08-23T15:00:00.000000Z", job: "v14", expected: true, label: "하한 정확히" },
+    { iso: "2026-08-23T15:00:00.000001Z", job: "v14", expected: true, label: "하한 +1µs" },
+    // v14 는 v12 구간 중 8/12~8/23 을 건드리지 않는다(그 구간은 버전 12 로 남는다)
+    { iso: "2026-08-11T15:00:00.000000Z", job: "v14", expected: false, label: "v12 하한(=8/12) 미포함" },
+    { iso: "2026-08-23T00:00:00.000000Z", job: "v14", expected: false, label: "8/23 미포함" },
+    // v14 상한 없음 — 이후 시각은 전부 포함
+    { iso: "2026-12-31T23:59:59.999999Z", job: "v14", expected: true, label: "상한 없음(먼 미래)" },
+    // v14 는 v11·v13 구간(6/26~7/31)을 건드리지 않는다
+    { iso: "2026-06-26T00:00:00.000000Z", job: "v14", expected: false, label: "v11·v13 구간" },
+    { iso: "2026-07-30T00:00:00.000000Z", job: "v14", expected: false, label: "v11·v13 구간 끝" },
+    // v14 는 6/25 이전도 건드리지 않는다
+    { iso: "2026-06-01T00:00:00.000000Z", job: "v14", expected: false, label: "6/25 이전" },
+    // 보류 구간(8/1~8/11)도 대상 밖
+    { iso: "2026-08-01T00:00:00.000000Z", job: "v14", expected: false, label: "보류 구간 시작" },
+    { iso: "2026-08-11T14:59:59.999999Z", job: "v14", expected: false, label: "보류 구간 끝" },
   ];
 
   for (const c of cases) {
@@ -206,6 +270,28 @@ describe("jobHash / configFingerprint", () => {
 
   it("jobHash 는 같은 입력에 안정적", () => {
     expect(jobHash("v11")).toBe(jobHash("v11"));
+  });
+
+  /**
+   * 이미 운영에 적용된 잡의 지문 고정 앵커.
+   *
+   * manifest 의 jobHash 가 현재 정의와 다르면 rollback·reconcile 이 그 파일을 거부한다.
+   * 그래서 **새 소스 버전을 등록하는 것만으로 과거 잡의 지문이 흔들리면 안 된다** —
+   * jobHash 는 재현 매핑을 그 잡의 sourceVersions 로 좁혀서 넣어 이 성질을 지킨다.
+   * 아래 값이 바뀌면 그 잡으로 만든 과거 manifest 가 전부 무효가 된다.
+   */
+  it("적용 완료된 잡(v11·v13)의 지문은 고정된다 — 과거 manifest 가 계속 유효", () => {
+    expect(jobHash("v11")).toBe("31f27e90090d");
+    expect(jobHash("v13")).toBe("555add07a5c6");
+  });
+
+  it("잡마다 자기 소스 버전의 재현 세트만 지문에 들어간다", () => {
+    // v14 는 소스가 12 하나뿐이므로 legacy8·full10 이 바뀌어도 지문이 흔들리지 않는다.
+    expect(RESCORE_JOBS.v14.sourceVersions).toEqual([12]);
+    expect(RESCORE_JOBS.v11.sourceVersions).toEqual([8, 10]);
+    // 소스 버전 집합이 다르면 지문도 다르다.
+    expect(jobHash("v14")).not.toBe(jobHash("v11"));
+    expect(jobHash("v14")).not.toBe(jobHash("v13"));
   });
 
   it("configFingerprint 는 순서에 무관하고 내용이 바뀌면 달라진다", () => {
@@ -257,6 +343,13 @@ describe("검증 창 — 잡 정의에서 파생", () => {
 
   it("v13: 검증 창이 v11 과 완전히 같다(대상 정의가 같으므로)", () => {
     expect(buildVerificationWindows("v13")).toEqual(buildVerificationWindows("v11"));
+  });
+
+  it("v14: 대상 창이 v12 보다 늦게 시작하고 끝은 같다", () => {
+    const a = buildVerificationWindows("v12").find((x) => x.key === "target")!;
+    const b = buildVerificationWindows("v14").find((x) => x.key === "target")!;
+    expect(ms(b.fromUtc as string)).toBeGreaterThan(ms(a.fromUtc as string));
+    expect(b.toUtc).toBe(a.toUtc);
   });
 
   it("v12: provider 를 좁히지 않으므로 other-providers 창이 없다", () => {

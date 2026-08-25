@@ -44,8 +44,8 @@ import {
  * 신규 수집이 사용하는 룰 세트와 그 세트를 가리키는 score_version.
  * 두 값은 반드시 함께 바뀐다(버전이 계산 룰의 provenance 이기 때문).
  */
-const CURRENT_SCORE_SET_ID: ScoreSetId = "v12b";
-const CURRENT_SCORE_VERSION = 12;
+const CURRENT_SCORE_SET_ID: ScoreSetId = "v14a";
+const CURRENT_SCORE_VERSION = 14;
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
@@ -618,7 +618,7 @@ function findMentions(text: string, terms: string[]): string[] {
 }
 
 /**
- * 현행 수집(신규·수동)이 쓰는 배점 — 룰 세트 레지스트리의 v12b 세트에 위임한다.
+ * 현행 수집(신규·수동)이 쓰는 배점 — 룰 세트 레지스트리의 v14a 세트에 위임한다.
  * 계산기·상수는 lib/server/visibility-score-sets.ts 가 단일 정본이며,
  * 이 래퍼는 기존 호출부 시그니처를 유지하기 위한 얇은 어댑터다.
  */

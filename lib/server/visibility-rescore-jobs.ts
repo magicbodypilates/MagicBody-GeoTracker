@@ -14,7 +14,7 @@ import { SCORE_SETS, type ScoreSetId } from "@/lib/server/visibility-score-sets"
 /** 운영/비운영 워크스페이스 구분 — UUID 를 코드에 두지 않고 is_production 으로 판정한다. */
 export type WorkspaceScope = "production" | "non-production";
 
-export type RescoreJobId = "v11" | "v12" | "v12t" | "v13";
+export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14";
 
 export type RescoreJob = {
   /** 대상 창 시작(inclusive · timestamptz 비교) */
@@ -98,6 +98,32 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     autoOnly: true,
     workspaceScope: "production",
   },
+  /**
+   * v12 가 이미 12 로 올려 둔 행 중 **대상 창 안의 행만** 받아 v14a 세트로 다시 계산한다.
+   * 대상 창은 v12 보다 좁다(v12 는 KST 8/12~, 이 잡은 KST 8/24~). 그 사이 구간은 12 로 남는다.
+   * 소스 버전 12 의 재현 세트(v12b)는 REPRO_SET_BY_VERSION 에 등록돼 있어야 한다.
+   *
+   * ⚠️ diagnosticSets 가 빈 목록인 이유 — 소스 버전이 12 하나뿐이고, score_version 12 를
+   *    쓴 경로(수집 · v12 재산출)는 둘 다 v12b 세트다. 즉 선언 세트가 곧 유일한 후보라
+   *    교차 진단이 잡아낼 "다른 룰이 만든 점수" 자체가 존재하지 않는다. 반면 legacy8·full10
+   *    을 진단 세트로 넣으면 우연히 같은 합이 나오는 조합(예: 저장 64 = v12b 50+14 =
+   *    full10 30+18+16)에서 cross-set-ambiguous 가 나 그 행이 조용히 skip 된다. 재현 자체가
+   *    안 되는 행은 여전히 no-candidate 로 걸러지므로 안전망은 유지된다.
+   *    (visibility-rescore-anomaly-space.test.ts 가 이 두 성질을 전수로 고정한다.)
+   */
+  v14: {
+    // KST 2026-08-24 00:00 이후만 대상. 그 이전(8/12~8/23)은 기존 세트 결과를 유지한다.
+    fromUtc: "2026-08-23T15:00:00.000Z",
+    toUtc: null,
+    providers: null,
+    sourceVersions: [12],
+    diagnosticSets: [],
+    targetVersion: 14,
+    targetSet: "v14a",
+    informationalOnly: false,
+    autoOnly: true,
+    workspaceScope: "production",
+  },
 };
 
 export const RESCORE_JOB_IDS = Object.keys(RESCORE_JOBS) as RescoreJobId[];
@@ -120,6 +146,7 @@ export function isRescoreJobId(value: unknown): value is RescoreJobId {
 export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   8: "legacy8",
   10: "full10",
+  12: "v12b",
 };
 
 export function reproSetForVersion(version: number): ScoreSetId | null {
@@ -127,10 +154,14 @@ export function reproSetForVersion(version: number): ScoreSetId | null {
 }
 
 /**
- * 잡 정의 + 목표 세트 상수 + 재현 매핑의 지문.
+ * 잡 정의 + 목표 세트 상수 + **그 잡이 실제로 쓰는** 재현 매핑의 지문.
  *
  * audit manifest 에 박아 두고, rollback·reconcile 이 "이 파일이 이 잡에서 나온 것인지"를
  * 확인하는 데 쓴다. 정의가 한 글자라도 바뀌면 값이 달라진다.
+ *
+ * ⚠️ 재현 매핑은 **잡의 sourceVersions 로 좁혀서** 넣는다. 전체 매핑을 넣으면 새 소스 버전을
+ *    등록하는 것만으로 무관한 과거 잡의 지문까지 흔들려 그 잡의 manifest 가 rollback 에서
+ *    거부된다. 좁힌 값은 그 잡의 계산 입력을 그대로 담으므로 지문의 목적도 유지된다.
  */
 export function jobHash(jobId: RescoreJobId): string {
   const job = RESCORE_JOBS[jobId];
@@ -139,7 +170,16 @@ export function jobHash(jobId: RescoreJobId): string {
     job,
     targetSet: SCORE_SETS[job.targetSet],
     reproSets: Object.fromEntries(
-      Object.entries(REPRO_SET_BY_VERSION).map(([v, setId]) => [v, SCORE_SETS[setId]]),
+      [...job.sourceVersions]
+        .sort((a, b) => a - b)
+        .map((v) => {
+          const setId = reproSetForVersion(v);
+          if (setId === null) {
+            // 잡 정의 오류 — 이 상태로 지문을 만들면 "재현 불가"가 감사 파일에 숨는다.
+            throw new Error(`재현 세트가 없는 소스 버전: ${jobId} / ${v}`);
+          }
+          return [v, SCORE_SETS[setId]];
+        }),
     ),
   };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);

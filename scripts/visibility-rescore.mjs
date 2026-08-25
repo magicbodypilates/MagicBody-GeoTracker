@@ -2,7 +2,7 @@
  * 기간별 점수 룰 세트 재산출 — 운영 실행 스크립트.
  *
  * 사용 (앱 컨테이너 안에서):
- *   node scripts/visibility-rescore.mjs <mode> --job <v11|v12|v12t> [옵션]
+ *   node scripts/visibility-rescore.mjs <mode> --job <v11|v12|v12t|v13|v14> [옵션]
  *
  * 모드
  *   report          검증 창별 평균(변경 없음)
@@ -47,7 +47,7 @@ const SCORE_MIN = 0;
 const SCORE_MAX = 100;
 
 const MODES = ["report", "preflight", "sweep", "rollback", "reconcile", "verify-manifest"];
-const JOB_IDS = ["v11", "v12", "v12t", "v13"];
+const JOB_IDS = ["v11", "v12", "v12t", "v13", "v14"];
 /** rollback·reconcile 이 읽는 manifest 는 마운트된 고정 디렉터리 안의 파일만 허용한다. */
 const MANIFEST_DIR = "/app/data/audit";
 const MANIFEST_BASENAME_RE = /^rescore_[A-Za-z0-9_.-]+\.jsonl$/;

@@ -12,7 +12,7 @@
  *    기존 세트는 수정하지 않는다.
  */
 
-export type ScoreSetId = "legacy8" | "full10" | "low60" | "v12b" | "full83";
+export type ScoreSetId = "legacy8" | "full10" | "low60" | "v12b" | "full83" | "v14a";
 
 export type Sentiment = "positive" | "neutral" | "negative" | "not-mentioned";
 
@@ -55,10 +55,14 @@ export type ScoreSet = {
  *   full10  — score_version 10 으로 저장된 행을 만든 세트.
  *   low60   — legacy8 의 각 상수에 같은 계수(0.6)를 적용한 세트. 계수가 균일하므로
  *             응답 사이의 상대 순서가 그대로 보존된다.
- *   v12b    — 현행 수집이 쓰는 세트. 브랜드 분기 상수는 full10 과 동일.
+ *   v12b    — score_version 12 로 저장된 행을 만든 세트. 브랜드 분기 상수는 full10 과 동일.
  *   full83  — full10 의 일반(gen) 분기 상수에 같은 계수(0.83)를 적용해 반올림한 세트.
  *             계수가 균일하므로 일반 질의 응답 사이의 상대 순서가 보존된다. 브랜드 분기
  *             상수는 full10 과 동일(이 세트를 쓰는 잡이 브랜드 질의를 대상에서 제외한다).
+ *   v14a    — 현행 수집이 쓰는 세트. v12b 대비 일반(gen) 분기만 조정했고 브랜드 분기
+ *             상수는 v12b(= full10)와 동일하다. 언급 기본점과 URL 노출 배점을 올리고
+ *             가산 항목을 낮춰, 일반 분기 최대(99)와 언급 0 분기(55/45/0)의 상대 위치는
+ *             유지하면서 "언급됐다 / URL 만 노출됐다" 두 상태의 하한을 끌어올린다.
  *
  * 어떤 세트에서도 분기별 합계가 100 미만이라 cap 이 정보를 잘라 역산 불변식을 깨지 않는다
  * (테스트가 이 성질을 고정한다).
@@ -143,6 +147,22 @@ export const SCORE_SETS: Record<ScoreSetId, ScoreSet> = {
     genPositive: 15,
     genNeutral: 10,
     genTopRanked: 13,
+  },
+  v14a: {
+    brandPositive: 34,
+    brandStrong: 48,
+    brandBodyUrl: 15,
+    brandCitation: 8,
+    genNoMentionBodyUrl: 55,
+    genNoMentionCitation: 45,
+    genBase: 66,
+    genFirstPos: 9,
+    genMidPos: 7,
+    genMentions3: 7,
+    genMentions2: 3,
+    genPositive: 9,
+    genNeutral: 8,
+    genTopRanked: 8,
   },
 };
 

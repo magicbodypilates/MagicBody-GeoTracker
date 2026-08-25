@@ -209,7 +209,9 @@ describe.each(["v11", "v13"] as const)("matchesJob — %s 불변 표본이 전�
     { label: "이미 11", row: row({ scoreVersion: 11 }) },
     { label: "이미 12", row: row({ scoreVersion: 12 }) },
     { label: "이미 13", row: row({ scoreVersion: 13 }) },
+    { label: "이미 14", row: row({ scoreVersion: 14 }) },
     { label: "클라이언트 근사 112", row: row({ scoreVersion: 112 }) },
+    { label: "클라이언트 근사 114", row: row({ scoreVersion: 114 }) },
     { label: "버전 0", row: row({ scoreVersion: 0 }) },
     { label: "범위 밖 워크스페이스", row: row({ workspaceId: WS_TEST }) },
   ];
@@ -271,6 +273,60 @@ describe("matchesJob — v12 · v12t 범위", () => {
         testWorkspaces,
       ),
     ).toBe(false);
+  });
+});
+
+describe("matchesJob — v14 범위 (v12 가 올려 둔 버전 12 행만)", () => {
+  const job = RESCORE_JOBS.v14;
+  const inWindow = row({
+    createdAt: new Date("2026-08-24T03:00:00.000Z"), // KST 8/24 12:00 — v14 창 안
+    scoreVersion: 12,
+  });
+
+  it("창 안 · 자동 · 버전 12 면 provider·브랜드 질의와 무관하게 선택", () => {
+    expect(matchesJob(inWindow, job, prodWorkspaces)).toBe(true);
+    for (const provider of ["google_ai", "gemini", "perplexity", "chatgpt"]) {
+      expect(matchesJob({ ...inWindow, provider }, job, prodWorkspaces)).toBe(true);
+    }
+    expect(
+      matchesJob({ ...inWindow, promptText: "매직바디 어때" }, job, prodWorkspaces),
+    ).toBe(true);
+  });
+
+  it("불변 표본 — 버전·수집 방식·워크스페이스", () => {
+    for (const scoreVersion of [8, 10, 11, 13, 14, 112, 114, 0]) {
+      expect(matchesJob({ ...inWindow, scoreVersion }, job, prodWorkspaces)).toBe(false);
+    }
+    expect(matchesJob({ ...inWindow, isAuto: false }, job, prodWorkspaces)).toBe(false);
+    expect(
+      matchesJob({ ...inWindow, workspaceId: WS_TEST }, job, prodWorkspaces),
+    ).toBe(false);
+  });
+
+  it("불변 표본 — 대상 창 밖의 구간은 전부 미선택", () => {
+    const outside = [
+      "2026-06-20T03:00:00.000Z", // 6/25 이전
+      "2026-06-26T03:00:00.000Z", // v11·v13 구간
+      "2026-07-30T03:00:00.000Z", // v11·v13 구간
+      "2026-08-05T03:00:00.000Z", // 보류 구간
+      "2026-08-11T14:59:00.000Z", // 보류 구간 끝
+      "2026-08-11T15:00:00.000Z", // v12 하한 — v14 대상 아님
+      "2026-08-15T03:00:00.000Z", // 8/12~8/23 — 버전 12 로 남긴다
+      "2026-08-23T14:59:59.999Z", // v14 하한 -1ms
+    ];
+    for (const iso of outside) {
+      expect(
+        matchesJob({ ...inWindow, createdAt: new Date(iso) }, job, prodWorkspaces),
+      ).toBe(false);
+    }
+    // 하한 정확히는 포함 (KST 2026-08-24 00:00)
+    expect(
+      matchesJob(
+        { ...inWindow, createdAt: new Date("2026-08-23T15:00:00.000Z") },
+        job,
+        prodWorkspaces,
+      ),
+    ).toBe(true);
   });
 });
 

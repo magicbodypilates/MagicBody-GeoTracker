@@ -97,6 +97,99 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
     expect([...statuses.keys()]).toEqual(["resolved"]);
   });
 
+  /**
+   * v14 잡의 실제 조합 — 선언 세트 v12b · 진단 세트 없음 · 목표 v14a.
+   *
+   * 이 잡이 고르는 행은 score_version 12 뿐이고, 12 를 쓴 경로(수집 · v12 재산출)는 둘 다
+   * v12b 다. 즉 선언 세트가 곧 유일한 후보이므로 입력 전수에서 항상 resolved 여야 한다.
+   * 하나라도 resolved 가 아니면 그 행은 점수가 안 바뀐 채 남아 원장이 버전 12·14 로 갈린다.
+   */
+  it("v14 잡 조합(v12b → v14a · 진단 없음)은 입력 전수에서 항상 resolved", () => {
+    const job = RESCORE_JOBS.v14;
+    let checked = 0;
+    for (const base of inputSpace()) {
+      for (const flags of RANKING_COMBOS) {
+        const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v12b);
+        const res = resolveWithDiagnostics({
+          base,
+          storedScore,
+          declaredSetId: "v12b",
+          diagnosticSetIds: job.diagnosticSets,
+          targetSetId: job.targetSet,
+        });
+        if (res.status !== "resolved") {
+          throw new Error(
+            `${res.status} 발생 — stored=${storedScore} base=${JSON.stringify(base)}`,
+          );
+        }
+        expect(res.targetScore).not.toBeNull();
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
+  });
+
+  /**
+   * v14 의 diagnosticSets 가 비어 있는 **근거**를 수치로 고정한다.
+   *
+   * legacy8·full10 을 진단에 넣으면 우연히 같은 합이 나오는 조합에서 cross-set-ambiguous 가
+   * 발생하고, 라우트는 그런 행을 skip 하므로 점수가 안 바뀐 채 남는다. 예: 저장 64 는
+   * v12b 로 50(기본)+14(긍정) = 64 (1순위 아님) 이고, full10 으로도 30+18+16 = 64
+   * (1순위) 라 목표가 75 / 83 으로 갈린다. 진단을 비우면 이 오탐이 사라진다.
+   */
+  it("legacy8·full10 을 진단에 넣으면 오탐(cross-set-ambiguous)이 실제로 발생한다", () => {
+    let falsePositives = 0;
+    for (const base of inputSpace()) {
+      for (const flags of RANKING_COMBOS) {
+        const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v12b);
+        const res = resolveWithDiagnostics({
+          base,
+          storedScore,
+          declaredSetId: "v12b",
+          diagnosticSetIds: DIAGNOSTIC_SETS,
+          targetSetId: "v14a",
+        });
+        if (res.status === "cross-set-ambiguous") falsePositives += 1;
+      }
+    }
+    expect(falsePositives).toBeGreaterThan(0);
+
+    // 구체 사례 — 저장 64 · 먼 위치 · 긍정 · 단일 언급
+    const base: BaseVisibilityInputs = {
+      mentions: 1,
+      firstPos: 500,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "positive",
+      isBrandedQuery: false,
+    };
+    expect(
+      calcVisibilityWithSet(
+        { ...base, isTopRanked: false, isStronglyRecommended: false },
+        SCORE_SETS.v12b,
+      ),
+    ).toBe(64);
+    expect(
+      resolveWithDiagnostics({
+        base,
+        storedScore: 64,
+        declaredSetId: "v12b",
+        diagnosticSetIds: DIAGNOSTIC_SETS,
+        targetSetId: "v14a",
+      }).status,
+    ).toBe("cross-set-ambiguous");
+    // 같은 행이 v14 잡의 실제 설정(진단 없음)에서는 정상 해소된다.
+    expect(
+      resolveWithDiagnostics({
+        base,
+        storedScore: 64,
+        declaredSetId: "v12b",
+        diagnosticSetIds: RESCORE_JOBS.v14.diagnosticSets,
+        targetSetId: "v14a",
+      }),
+    ).toMatchObject({ status: "resolved", targetScore: 75 });
+  });
+
   it("재현되지 않는 저장 점수는 no-candidate 로만 분류된다(목표 점수 없음)", () => {
     let seen = 0;
     for (const base of inputSpace()) {
@@ -125,7 +218,7 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
   });
 
   it("모든 잡의 소스 버전이 전부 재현 세트에 매핑돼 있다(매핑 누락 시 전량 skip 이 된다)", () => {
-    for (const jobId of ["v11", "v12", "v12t", "v13"] as const) {
+    for (const jobId of ["v11", "v12", "v12t", "v13", "v14"] as const) {
       for (const version of RESCORE_JOBS[jobId].sourceVersions) {
         expect(REPRO_SET_BY_VERSION[version]).toBeDefined();
       }

@@ -671,7 +671,8 @@ describe("(i) 도달 제어·인증 게이트", () => {
   });
 
   it("없는 잡 id → 400", async () => {
-    expect((await POST(post({ job: "v14" }))).status).toBe(400);
+    expect((await POST(post({ job: "v15" }))).status).toBe(400);
+    expect((await POST(post({ job: "v14t" }))).status).toBe(400);
     expect((await POST(post({ job: "v13t" }))).status).toBe(400);
     expect((await POST(post({}))).status).toBe(400);
     expect((await POST(post({ job: 11 }))).status).toBe(400);

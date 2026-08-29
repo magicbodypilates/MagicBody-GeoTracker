@@ -6,7 +6,7 @@
  * 실측 오염 616건(perplexity 545 · google_ai 59 · chatgpt 8 · gemini 4).
  */
 import { describe, it, expect } from "vitest";
-import { isAnswerLikeString, normalizeAnswer, PARSE_FAILURE_MARKER } from "./brightdata-scraper";
+import { isAnswerLikeString, normalizeAnswer, buildInputRecord, PARSE_FAILURE_MARKER } from "./brightdata-scraper";
 
 describe("isAnswerLikeString — 메타 문자열을 답변으로 오인하지 않는다", () => {
   it("ISO 타임스탬프 전체는 답변이 아니다 (실제 오염 값)", () => {
@@ -69,5 +69,25 @@ describe("normalizeAnswer — 답변 없는 레코드에서 메타 필드를 집
   it("답변이 response_raw 에만 있어도 찾아낸다 (필드 목록 공유 회귀 방지)", () => {
     const text = "그록 형식 응답이지만 실제로 사용 가능한 정상 한국어 답변입니다.";
     expect(normalizeAnswer({ response_raw: text, timestamp: "2026-08-29T12:42:24.424Z" })).toBe(text);
+  });
+});
+
+describe("buildInputRecord — 지역값(country) 전송 규칙", () => {
+  it("Perplexity 는 country 를 그대로 보낸다 (한국 결과 확보 우선)", () => {
+    const rec = buildInputRecord("perplexity", "필라테스 강사 자격증", "KR");
+    expect(rec.country).toBe("KR");
+  });
+
+  it("Perplexity 는 country 가 비면 키 자체를 넣지 않는다 (fallback 재시도용)", () => {
+    const rec = buildInputRecord("perplexity", "필라테스 강사 자격증", undefined);
+    expect("country" in rec).toBe(false);
+  });
+
+  it("Google AI 의 country 전송은 이번 수정으로 바뀌지 않았다", () => {
+    expect(buildInputRecord("google_ai", "질문", "KR").country).toBe("KR");
+  });
+
+  it("ChatGPT 는 country 를 지원하지 않으므로 보내지 않는다", () => {
+    expect("country" in buildInputRecord("chatgpt", "질문", "KR")).toBe(false);
   });
 });

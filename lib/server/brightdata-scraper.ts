@@ -62,7 +62,7 @@ const providerBaseUrl: Record<Provider, string> = {
   grok: "https://grok.com/",
 };
 
-function buildInputRecord(
+export function buildInputRecord(
   provider: Provider,
   prompt: string,
   country?: string,
@@ -77,14 +77,14 @@ function buildInputRecord(
     case "chatgpt":
       return { url, prompt, web_search: false, additional_prompt: "" };
     case "perplexity": {
-      // country 를 보내지 않는다 (2026-08-29 실측 근거).
-      // country="KR" 을 붙이면 Bright Data 가 동기 응답 대신 비동기 스냅샷 경로로 빠지고,
-      // 그 결과가 `Crawler error: waiting for selector ... timeout 30000ms exceeded` 로 실패한다
-      // (= 답변 필드 없이 error 만 담긴 레코드). 반면 country 없이 보내면 동기 응답으로
-      // 정상 답변을 받는다(실측 2/2 성공 · 298자·232자, 한국어 답변 + 한국 사이트 출처).
-      // 프롬프트가 한국어면 한국 맥락 결과가 나오므로 GEO 추적 목적에는 영향이 없다.
-      // Bright Data 가 Perplexity 스크래퍼를 고치면 country 재도입을 재검토한다.
-      return { url, prompt, index: 1 };
+      // country 는 그대로 보낸다 — 한국 로케일 결과 확보가 우선이다(2026-05-07 c2a4e6a 결정).
+      // 다만 2026-08-29 현재 Bright Data Perplexity 스크래퍼가 country 지정 시
+      // `Crawler error: waiting for selector ... timeout 30000ms exceeded` 로 실패한다.
+      // 그래서 실패했을 때만 runAiScraper 가 country 없이 1회 재시도한다(§ PERPLEXITY_COUNTRY_FALLBACK).
+      // 스크래퍼가 복구되면 재시도 없이 한국 결과를 그대로 받게 된다.
+      const rec: Record<string, unknown> = { url, prompt, index: 1 };
+      if (countryValue) rec.country = countryValue;
+      return rec;
     }
     case "gemini":
       return { url, prompt, index: 1 };
@@ -442,6 +442,30 @@ const DEEP_EXTRACT_EXCLUDED_KEYS = new Set([
 // 답변으로 볼 수 없는 형태의 문자열(타임스탬프·URL 단독·숫자/식별자 단독)을 거부한다.
 export const PARSE_FAILURE_MARKER = "[응답 파싱 실패 —";
 
+/**
+ * § PERPLEXITY_COUNTRY_FALLBACK 상태 (2026-08-29)
+ *
+ * 한국 로케일 결과 확보가 우선이라 Perplexity 에도 country 를 계속 보낸다.
+ * 다만 Bright Data 스크래퍼가 country 지정 시 선택자 타임아웃으로 실패하는 기간에는
+ * 매 요청마다 "실패(≈5분) → 재시도(≈5분)" 를 반복하면 tick 총시간이 2배가 된다
+ * (22 프롬프트 × 최대 900s 로 이미 빠듯하다).
+ *
+ * 그래서 첫 실패를 확인하면 그 시각을 기록해 두고, 이후 요청은 country 를 생략해 바로 보낸다.
+ * SUPPRESS_MS 가 지나면 다시 country 로 시도해 스크래퍼 복구를 자동으로 감지한다.
+ * 프로세스 재시작(배포) 시에도 초기화되므로 배포 직후엔 항상 country 를 먼저 시도한다.
+ */
+const COUNTRY_FALLBACK_SUPPRESS_MS = 6 * 60 * 60 * 1000; // 6시간 = 자동 조사 1주기
+const globalForFallback = globalThis as unknown as {
+  __perplexityCountryFailedAt?: number;
+};
+function shouldSkipPerplexityCountry(): boolean {
+  const at = globalForFallback.__perplexityCountryFailedAt;
+  return typeof at === "number" && Date.now() - at < COUNTRY_FALLBACK_SUPPRESS_MS;
+}
+function markPerplexityCountryFailed(): void {
+  globalForFallback.__perplexityCountryFailedAt = Date.now();
+}
+
 // 답변이 담길 수 있는 필드 — normalizeAnswer 추출과 크롤러 오류 가드가 **같은 목록**을 쓴다.
 // 두 곳이 벌어지면(가드 3개 vs 추출 9개) 가드가 진짜 답변을 못 보고 정상 run 을 버린다(검수 지적 반영).
 const ANSWER_CANDIDATE_KEYS = [
@@ -665,7 +689,11 @@ export async function runAiScraper(
     }
   }
 
-  const inputRecord = buildInputRecord(parsed, request.prompt, request.country);
+  // § PERPLEXITY_COUNTRY_FALLBACK — 최근에 country 로 실패했다면 곧바로 생략하고 요청한다.
+  // (매 요청마다 "실패 5분 + 재시도 5분" 을 반복해 tick 시간이 2배가 되는 것을 막는다)
+  const effectiveCountry =
+    parsed === "perplexity" && shouldSkipPerplexityCountry() ? undefined : request.country;
+  const inputRecord = buildInputRecord(parsed, request.prompt, effectiveCountry);
 
   const scrapeResponse = await fetch(
     `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
@@ -730,6 +758,21 @@ export async function runAiScraper(
     return false;
   });
   if (crawlerError && !hasAnswerField) {
+    // § PERPLEXITY_COUNTRY_FALLBACK (2026-08-29)
+    // Perplexity 는 country 를 지정하면 Bright Data 스크래퍼가 선택자 타임아웃으로 실패한다.
+    // 한국 결과 확보가 우선이라 country 를 계속 보내되, 이 실패에 한해 country 없이 1회 재시도한다.
+    // (country 없이도 한국어 프롬프트면 한국 사이트 출처가 나오는 것을 실측 확인 — naver/tistory 등)
+    // 스크래퍼가 복구되면 첫 시도가 성공하므로 재시도 자체가 사라진다.
+    // effectiveCountry 기준으로 판단한다 — 실제로 country 를 보냈을 때만 재시도한다.
+    // (request.country 로 판단하면 억제 중에도 재귀가 돌아 무한 재시도가 된다)
+    if (parsed === "perplexity" && effectiveCountry) {
+      markPerplexityCountryFailed();
+      console.warn(
+        `[PERPLEXITY_COUNTRY_FALLBACK] country=${request.country} 실패 → country 없이 재시도합니다. ` +
+          `이후 ${COUNTRY_FALLBACK_SUPPRESS_MS / 3600000}시간 동안은 country 를 생략해 바로 요청합니다.`,
+      );
+      return runAiScraper({ ...request, country: undefined, forceRefresh: true });
+    }
     throw new Error(
       `[CRAWLER_ERROR] Bright Data 수집 실패 (provider=${parsed}): ${String(crawlerError).slice(0, 300)}`,
     );

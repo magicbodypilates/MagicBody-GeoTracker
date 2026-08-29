@@ -77,9 +77,14 @@ function buildInputRecord(
     case "chatgpt":
       return { url, prompt, web_search: false, additional_prompt: "" };
     case "perplexity": {
-      const rec: Record<string, unknown> = { url, prompt, index: 1 };
-      if (countryValue) rec.country = countryValue;
-      return rec;
+      // country 를 보내지 않는다 (2026-08-29 실측 근거).
+      // country="KR" 을 붙이면 Bright Data 가 동기 응답 대신 비동기 스냅샷 경로로 빠지고,
+      // 그 결과가 `Crawler error: waiting for selector ... timeout 30000ms exceeded` 로 실패한다
+      // (= 답변 필드 없이 error 만 담긴 레코드). 반면 country 없이 보내면 동기 응답으로
+      // 정상 답변을 받는다(실측 2/2 성공 · 298자·232자, 한국어 답변 + 한국 사이트 출처).
+      // 프롬프트가 한국어면 한국 맥락 결과가 나오므로 GEO 추적 목적에는 영향이 없다.
+      // Bright Data 가 Perplexity 스크래퍼를 고치면 country 재도입을 재검토한다.
+      return { url, prompt, index: 1 };
     }
     case "gemini":
       return { url, prompt, index: 1 };
@@ -399,18 +404,77 @@ export function isNotReadyPayload(record: unknown): boolean {
   });
 }
 
-function normalizeAnswer(rawRecord: Record<string, unknown>) {
-  const answerCandidates = [
-    rawRecord.answer_text,           // Bright Data primary field
-    rawRecord.answer_text_markdown,  // Markdown variant (Perplexity, Grok, Copilot)
-    rawRecord.answer,                // Legacy / fallback
-    rawRecord.response_raw,          // Grok raw response
-    rawRecord.response,
-    rawRecord.output,
-    rawRecord.result,
-    rawRecord.text,
-    rawRecord.content,
-  ];
+// deep fallback 이 답변으로 오인하면 안 되는 메타 필드.
+// Bright Data 응답에는 url(69자)·prompt·timestamp(24자) 같은 20자 초과 문자열이 항상 들어 있어,
+// 답변 필드가 비었을 때 이들이 답변으로 채택돼 "실패가 정상처럼" 저장되는 사고가 있었다
+// (2026-08-29 진단 — perplexity 545건·google_ai 59건 등 616건이 timestamp 문자열로 기록됨).
+const DEEP_EXTRACT_EXCLUDED_KEYS = new Set([
+  "url",
+  "prompt",
+  "timestamp",
+  "index",
+  "input",
+  "answer_html",
+  "source_html",
+  "answer_section_html",
+  "web_search_query",
+  "related_prompts",
+  "links_attached",
+  "citations",
+  "sources",
+  "is_shopping_data",
+  "shopping_data",
+  "exported_markdown",
+  "snapshot_id",
+  "dataset_id",
+  // 상태·오류 필드 — 안내 문구가 답변으로 채택되면 실패가 정상처럼 저장된다.
+  // (명시 키 목록에서는 message 만 제외돼 있었고 무차별 재귀에서는 걸러지지 않았다.)
+  "error",
+  "error_code",
+  "message",
+  "warning",
+  "warning_code",
+  "status",
+  "detail",
+  "note",
+]);
+
+// 답변으로 볼 수 없는 형태의 문자열(타임스탬프·URL 단독·숫자/식별자 단독)을 거부한다.
+export const PARSE_FAILURE_MARKER = "[응답 파싱 실패 —";
+
+// 답변이 담길 수 있는 필드 — normalizeAnswer 추출과 크롤러 오류 가드가 **같은 목록**을 쓴다.
+// 두 곳이 벌어지면(가드 3개 vs 추출 9개) 가드가 진짜 답변을 못 보고 정상 run 을 버린다(검수 지적 반영).
+const ANSWER_CANDIDATE_KEYS = [
+  "answer_text",           // Bright Data primary field
+  "answer_text_markdown",  // Markdown variant (Perplexity, Grok, Copilot)
+  "answer",                // Legacy / fallback
+  "response_raw",          // Grok raw response
+  "response",
+  "output",
+  "result",
+  "text",
+  "content",
+] as const;
+
+// 문자열 "전체"가 타임스탬프일 때만 거부한다. 끝 앵커가 없으면
+// "2026-08-29T09:00 현재 …" 처럼 시각으로 시작하는 정상 답변까지 오탈락한다(검수 지적 반영).
+const ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+const BARE_URL_RE = /^https?:\/\/\S*$/i;
+const BARE_TOKEN_RE = /^[\w.:/-]+$/;
+
+export function isAnswerLikeString(value: string): boolean {
+  const s = value.trim();
+  if (s.length <= 20) return false;
+  if (ISO_TIMESTAMP_RE.test(s)) return false;
+  if (BARE_URL_RE.test(s)) return false;
+  // 공백이 전혀 없는 단일 토큰(식별자·경로 등)은 답변이 아니다.
+  if (BARE_TOKEN_RE.test(s) && !/\s/.test(s)) return false;
+  return true;
+}
+
+export function normalizeAnswer(rawRecord: Record<string, unknown>) {
+  const answerCandidates = ANSWER_CANDIDATE_KEYS.map((key) => rawRecord[key]);
 
   for (const item of answerCandidates) {
     if (typeof item === "string" && item.trim()) {
@@ -421,7 +485,9 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
   // Deep extraction: look inside nested objects/arrays for text content
   function extractDeepText(obj: unknown, depth: number): string | null {
     if (depth > 3) return null;
-    if (typeof obj === "string" && obj.trim().length > 20) return obj.trim();
+    if (typeof obj === "string") {
+      return isAnswerLikeString(obj) ? obj.trim() : null;
+    }
     if (Array.isArray(obj)) {
       for (const entry of obj) {
         const found = extractDeepText(entry, depth + 1);
@@ -435,12 +501,13 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
       // body/summary/description 은 정상 답변 deep fallback 가능성이 있어 유지 —
       // 주 방어선은 isNotReadyPayload detector 다(plan-v2 결정 3, 회귀 위험 최소화).
       for (const key of ["answer_text", "answer_text_markdown", "answer", "response_raw", "response", "output", "result", "text", "content", "body", "summary", "description"]) {
-        if (typeof record[key] === "string" && (record[key] as string).trim().length > 20) {
+        if (typeof record[key] === "string" && isAnswerLikeString(record[key] as string)) {
           return (record[key] as string).trim();
         }
       }
-      // Recurse into any value
-      for (const val of Object.values(record)) {
+      // Recurse into any value — 단 메타 필드(url·prompt·timestamp 등)는 건너뛴다.
+      for (const [key, val] of Object.entries(record)) {
+        if (DEEP_EXTRACT_EXCLUDED_KEYS.has(key.toLowerCase())) continue;
         const found = extractDeepText(val, depth + 1);
         if (found) return found;
       }
@@ -457,7 +524,7 @@ function normalizeAnswer(rawRecord: Record<string, unknown>) {
   // answer에 유입되어 findMentions/calcVisibilityScore가 가짜 mention=true로 판정.
   // 파싱 실패는 정직하게 공백 메시지로 기록한다.
   const keyList = Object.keys(rawRecord).slice(0, 20).join(", ");
-  return `[응답 파싱 실패 — 확인 가능한 최상위 키: ${keyList}]`;
+  return `${PARSE_FAILURE_MARKER} 확인 가능한 최상위 키: ${keyList}]`;
 }
 
 /**
@@ -642,12 +709,48 @@ export async function runAiScraper(
     throw new Error(`[NOT_READY] Bright Data placeholder (provider=${parsed})`);
   }
 
+  // Bright Data 크롤러 오류 감지 (2026-08-29 추가).
+  // 스크래퍼가 페이지에서 답변 영역을 못 찾으면 답변 필드 없이 `error`/`error_code` 만 담긴
+  // 레코드를 돌려준다(예: "Crawler error: waiting for selector ... timeout 30000ms exceeded").
+  // 이 문구는 NOT_READY_PATTERN 에 걸리지 않아 not-ready 검출을 통과했고, 그 결과 deep fallback 이
+  // timestamp 를 답변으로 채택해 가짜 정상 run 이 쌓였다. 답변이 없는 상태에서 오류 필드가 있으면
+  // 즉시 실패로 처리해 run 을 저장하지 않는다(다음 tick 에서 자연 재시도).
+  const crawlerError = rawRecord.error ?? rawRecord.error_code;
+  const hasAnswerField = ANSWER_CANDIDATE_KEYS.some((key) => {
+    const value = rawRecord[key];
+    if (typeof value === "string") return value.trim().length > 0;
+    if (Array.isArray(value)) {
+      return value.some((entry) =>
+        typeof entry === "string" ? entry.trim().length > 0 : entry != null,
+      );
+    }
+    if (value && typeof value === "object") {
+      return Object.keys(value as Record<string, unknown>).length > 0;
+    }
+    return false;
+  });
+  if (crawlerError && !hasAnswerField) {
+    throw new Error(
+      `[CRAWLER_ERROR] Bright Data 수집 실패 (provider=${parsed}): ${String(crawlerError).slice(0, 300)}`,
+    );
+  }
+
   const sanitizedPayload = stripAnswerHtml(payload);
   const sanitizedFirst = Array.isArray(sanitizedPayload)
     ? sanitizedPayload[0]
     : (sanitizedPayload as Record<string, unknown>);
   const record = (sanitizedFirst ?? {}) as Record<string, unknown>;
   const answer = normalizeAnswer(record);
+
+  // 파싱 실패는 run 으로 저장하지 않는다 (2026-08-29).
+  // 예전에는 실패 메시지를 answer 에 담아 그대로 저장했는데, 그러면 답변이 없는데도
+  // 정상 run 으로 집계돼 가시성 0점이 평균을 끌어내린다. throw 하면 automation-runner 가
+  // ProviderFailure 로 기록하고 다음 tick 에서 자연 재시도된다(not-ready 와 동일 처리).
+  if (answer.startsWith(PARSE_FAILURE_MARKER)) {
+    throw new Error(
+      `[PARSE_FAILURE] 답변 필드를 찾지 못했다 (provider=${parsed}) — ${answer}`,
+    );
+  }
 
   // Extract sources from answer text
   const textSources = extractSourcesFromAnswer(answer);

@@ -1,3 +1,12 @@
+# =============================================================================
+# 배포 목적지 주의 (2026-09-11 신설)
+#   접속 정보 AZURE_PROD_HOST / _PORT / _USER / _SSH_KEY 는 **운영 서버(애저) 전용**이다.
+#   다른 서버로 보내려고 이 칸의 값을 덮어쓰지 마라.
+#     2026-09-07 덮어쓰기로 운영 서버로 배포할 길이 사라졌고,
+#     2026-09-10 배포가 성공 표시를 받고도 운영이 아닌 곳으로 갔다.
+#   새 서버(벌쳐)로 보낼 때는 VULTR_PROD_* 칸과 아래 workflow_dispatch 의
+#   destination 선택을 쓴다. main 에 올리면 항상 운영 서버로 간다.
+# =============================================================================
 name: Deployment to production
 
 on:
@@ -21,6 +30,20 @@ on:
       - ".github/workflows/**"
       - "deploy/**"
   workflow_dispatch:
+    inputs:
+      destination:
+        description: "배포 목적지 - 기본값은 운영 서버(애저). 새 서버로 보낼 때만 vultr-new 로 바꾼다"
+        type: choice
+        required: false
+        default: azure-production
+        options:
+          - azure-production
+          - vultr-new
+      dry_run:
+        description: "확인만 하고 배포하지 않음 - 목적지만 로그에 찍고 종료"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: geotracker-production-deploy-${{ github.ref }}
@@ -34,8 +57,56 @@ env:
   IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/magicbody-geo-tracker
 
 jobs:
+  # -- 배포 목적지를 먼저 밝히고 기록에 남긴다 (2026-09-11 신설) ------------------
+  #   목적지 해석 규칙: 입력값이 **정확히 'vultr-new'** 일 때만 새 서버다.
+  #   빈 값 - main push - 오타 - API 호출 등 그 밖의 모든 경우는 **운영 서버(애저)** 로 간다.
+  #   아무 생각 없이 눌러도 운영으로 가게 하는 것이 이 표현식의 목적이다.
+  announce_destination:
+    name: "배포 목적지 확인"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "목적지 해석 + 접속 정보 존재 확인 (fail-closed)"
+        env:
+          DEST_INPUT: ${{ github.event.inputs.destination }}
+          DEST_PREFIX: ${{ github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD' }}
+          DEST_LABEL: ${{ github.event.inputs.destination == 'vultr-new' && '새 서버(벌쳐 서울)' || '운영 서버(애저)' }}
+          DEST_HOST: ${{ secrets[format('{0}_HOST', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          DEST_PORT: ${{ secrets[format('{0}_PORT', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          DEST_USER: ${{ secrets[format('{0}_USER', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          DEST_KEY: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -eu
+          echo "=================================================================="
+          echo "  배포 목적지 : ${DEST_LABEL}"
+          echo "  접속 정보 칸 : ${DEST_PREFIX}_HOST / _PORT / _USER / _SSH_KEY"
+          echo "  실행 방식   : ${GITHUB_EVENT_NAME} (선택값 '${DEST_INPUT:-없음/기본값 운영}')"
+          echo "  확인만 하기 : ${DRY_RUN:-false}"
+          echo "=================================================================="
+          MISSING=""
+          [ -n "${DEST_HOST:-}" ] || MISSING="${MISSING} ${DEST_PREFIX}_HOST"
+          [ -n "${DEST_PORT:-}" ] || MISSING="${MISSING} ${DEST_PREFIX}_PORT"
+          [ -n "${DEST_USER:-}" ] || MISSING="${MISSING} ${DEST_PREFIX}_USER"
+          [ -n "${DEST_KEY:-}" ]  || MISSING="${MISSING} ${DEST_PREFIX}_SSH_KEY"
+          if [ -n "${MISSING}" ]; then
+            echo "::error::접속 정보가 비어 있어 배포를 중단한다(fail-closed):${MISSING}"
+            exit 1
+          fi
+          {
+            echo "## 배포 목적지 - ${DEST_LABEL}"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "|---|---|"
+            echo "| 목적지 | ${DEST_LABEL} |"
+            echo "| 접속 정보 칸 | ${DEST_PREFIX}_* |"
+            echo "| 실행 방식 | ${GITHUB_EVENT_NAME} |"
+            echo "| 선택값 | ${DEST_INPUT:-없음 (기본값 운영)} |"
+            echo "| 확인만 하기 | ${DRY_RUN:-false} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy_auto:
-    if: github.event_name != 'workflow_dispatch'
+    needs: announce_destination
+    if: github.event_name != 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -75,9 +146,11 @@ jobs:
           docker push ${IMAGE_REPO_LC}:${CACHE_TAG}
           echo "IMAGE_REPO_LC=${IMAGE_REPO_LC}" >> $GITHUB_ENV
 
-      - name: SSH to Azure VM and deploy
+      - name: SSH to target server and deploy
         uses: appleboy/ssh-action@master
         env:
+          # 배포 로그에 목적지를 남기기 위해 서버로 함께 넘긴다(아래 envs 목록에도 있어야 도달한다).
+          DEPLOY_DEST_PREFIX: ${{ github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD' }}
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
           ENV_FILE: "/datadrive/apps/geo-tracker/.env"
@@ -94,14 +167,15 @@ jobs:
           #     cms-api 가 호출 자체를 막고(32자 검사) 화면은 "서버 설정 오류"를 띄운다(fail-closed).
           RETARGET_API_KEY: ${{ secrets.RETARGET_API_KEY }}
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets[format('{0}_HOST', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          port: ${{ secrets[format('{0}_PORT', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          username: ${{ secrets[format('{0}_USER', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          key: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
           timeout: 30s
           command_timeout: 20m
-          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
+          envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
           script: |
+            echo "[deploy target] secrets=${DEPLOY_DEST_PREFIX}_*  server=$(hostname)"
             set -eu
             DEPLOY_TAG="prod-${{ github.sha }}"
 
@@ -158,7 +232,8 @@ jobs:
             nohup sh -c 'if [ -x /usr/local/bin/mbd-docker-gc.sh ]; then KEEP=10 /usr/local/bin/mbd-docker-gc.sh; rc=$?; logger -t mbd-deploy "gc exit=$rc"; else logger -t mbd-deploy "gc script MISSING - fallback prune"; docker image prune --force; fi' >/dev/null 2>&1 &
 
   deploy_manual:
-    if: github.event_name == 'workflow_dispatch'
+    needs: announce_destination
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -199,9 +274,11 @@ jobs:
           docker push ${IMAGE_REPO_LC}:${CACHE_TAG}
           echo "IMAGE_REPO_LC=${IMAGE_REPO_LC}" >> $GITHUB_ENV
 
-      - name: SSH to Azure VM and deploy
+      - name: SSH to target server and deploy
         uses: appleboy/ssh-action@master
         env:
+          # 배포 로그에 목적지를 남기기 위해 서버로 함께 넘긴다(아래 envs 목록에도 있어야 도달한다).
+          DEPLOY_DEST_PREFIX: ${{ github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD' }}
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
           ENV_FILE: "/datadrive/apps/geo-tracker/.env"
@@ -218,14 +295,15 @@ jobs:
           #     cms-api 가 호출 자체를 막고(32자 검사) 화면은 "서버 설정 오류"를 띄운다(fail-closed).
           RETARGET_API_KEY: ${{ secrets.RETARGET_API_KEY }}
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets[format('{0}_HOST', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          port: ${{ secrets[format('{0}_PORT', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          username: ${{ secrets[format('{0}_USER', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
+          key: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
           timeout: 30s
           command_timeout: 20m
-          envs: FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
+          envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
           script: |
+            echo "[deploy target] secrets=${DEPLOY_DEST_PREFIX}_*  server=$(hostname)"
             set -eu
             DEPLOY_TAG="prod-${{ github.sha }}"
 

@@ -8,9 +8,10 @@
  *   1. resolveScoringProfile(계획 v2 §4-5 D8′) — 워크스페이스가 지금 쓰는 세트·버전·
  *      유튜브 판정 적용 여부를 전부 결정한다. 잘못되면 전체 수집 경로의 점수 계약이 깨진다.
  *   2. resolveCitationJudgment(계획 geotracker-youtube-press-scoring-260923 §4-1·§4-2·
- *      §4-5, 독립 검수 지적 반영) — runOneProviderForPrompt 안에서 소유 유튜브 인용 병합 +
- *      언론 인용 증거를 계산해 runs INSERT 컬럼 4개(hasCitationOnly 는 컬럼이 아니라
- *      calcVisibilityFull 입력)를 만드는 블록. 실제 수집 배선에서 유일한 테스트 사각지대였다.
+ *      §4-5 + 2026-09-23 3차 개정 — 제3자 인용 판정 재설계) — runOneProviderForPrompt 안에서
+ *      소유 유튜브 인용 병합 + 제3자 인용 증거(언론·블로그·소셜)를 계산해 runs INSERT 컬럼
+ *      5개(hasCitationOnly 는 컬럼이 아니라 calcVisibilityFull 입력)를 만드는 블록. 실제
+ *      수집 배선에서 유일한 테스트 사각지대였다.
  *
  * 순수 · DB 무의존.
  */
@@ -216,7 +217,7 @@ describe("resolveCitationJudgment — hasCitationOnly (참고자료에만 등장
   });
 });
 
-describe("resolveCitationJudgment — 언론 인용 증거 (2026-09-23 개정: 브랜드 언급 + 우리 소유 아님, 스위치와 무관하게 항상 계산)", () => {
+describe("resolveCitationJudgment — 제3자 인용 증거: 언론 (2026-09-23 3차 개정: 브랜드 언급 + 우리 소유 아님 + 비소셜 호스트, 스위치와 무관하게 항상 계산)", () => {
   it("제목에 브랜드 용어가 있는 제3자 인용 → hasPressCitation=true, citedPressDomains 에 도메인 기록", () => {
     const r = resolveCitationJudgment(
       baseJudgmentInput({
@@ -225,6 +226,7 @@ describe("resolveCitationJudgment — 언론 인용 증거 (2026-09-23 개정: �
     );
     expect(r.hasPressCitation).toBe(true);
     expect(r.citedPressDomains).toEqual(["press-wire.example"]);
+    expect(r.citedSocialDomains).toEqual([]);
   });
 
   it("설명에만 브랜드 용어가 있어도 매칭된다(제목·설명 구분 없음 — 구 allowlist 판정과 차이점)", () => {
@@ -264,7 +266,7 @@ describe("resolveCitationJudgment — 언론 인용 증거 (2026-09-23 개정: �
     expect(r.citedPressDomains).toEqual([]);
   });
 
-  it("스위치가 꺼져 있어도(v14a) 소유 유튜브 영상 인용은 언론 증거에서 제외된다 — citedOwnedVideoIds 는 비어도 이중계산은 막힌다", () => {
+  it("스위치가 꺼져 있어도(v14a) 소유 유튜브 영상 인용은 언론·소셜 증거에서 제외된다 — citedOwnedVideoIds 는 비어도 이중계산은 막힌다", () => {
     const r = resolveCitationJudgment(
       baseJudgmentInput({
         citations: [
@@ -276,27 +278,12 @@ describe("resolveCitationJudgment — 언론 인용 증거 (2026-09-23 개정: �
     );
     // 스위치가 꺼져 있으므로 점수용 필드는 그대로 빈 배열(기존 계약 유지).
     expect(r.citedOwnedVideoIds).toEqual([]);
-    // 그러나 언론 증거 계산은 ownedVideoIds 를 그대로 받아 우리 영상을 걸러낸다 — automation-runner.ts
-    // 가 executeSchedule 에서 ownedVideoIds 를 스위치와 무관하게 항상 로드하도록 바뀐 이유다.
+    // 그러나 제3자 인용 증거 계산은 ownedVideoIds 를 그대로 받아 우리 영상을 걸러낸다 —
+    // automation-runner.ts 가 executeSchedule 에서 ownedVideoIds 를 스위치와 무관하게 항상
+    // 로드하도록 바뀐 이유다.
     expect(r.hasPressCitation).toBe(false);
     expect(r.citedPressDomains).toEqual([]);
-  });
-
-  it("소유가 아닌 다른 유튜브 영상 인용도 소셜 플랫폼이라 언론 증거에서 제외된다(2026-09-23 2차 개정 — 검수 반영)", () => {
-    // 1차 개정 직후에는 브랜드 언급만 있으면 언론 증거로 잡혔다(구 behavior: hasPressCitation
-    // true, citedPressDomains ["youtube.com"]). press-domain-match.ts 가 소셜 플랫폼
-    // (SOCIAL_PLATFORM_DOMAINS)을 소유 판정보다 먼저 통째로 제외하도록 바뀌어, 소유 여부와
-    // 무관하게 false 다 — 유튜브 영상은 우리 것이든 남의 것이든 언론사가 아니다.
-    const r = resolveCitationJudgment(
-      baseJudgmentInput({
-        citations: [
-          citation({ url: `https://www.youtube.com/watch?v=${OTHER_VIDEO_ID}`, title: "매직테스트 리뷰" }),
-        ],
-        ownedVideoIds: new Set([OWNED_VIDEO_ID]), // 다른 영상만 소유
-      }),
-    );
-    expect(r.hasPressCitation).toBe(false);
-    expect(r.citedPressDomains).toEqual([]);
+    expect(r.citedSocialDomains).toEqual([]);
   });
 
   it("스위치가 꺼져 있어도(v14a) 언론 증거는 그대로 계산된다 — 배점은 0 이라 점수에 영향 없지만 증거는 쌓인다", () => {
@@ -311,13 +298,69 @@ describe("resolveCitationJudgment — 언론 인용 증거 (2026-09-23 개정: �
   });
 });
 
+describe("resolveCitationJudgment — 제3자 인용 증거: 블로그·소셜 추천 (2026-09-23 3차 개정 — 직전 개정의 통째 제외를 되돌림)", () => {
+  it("⭐ 핵심 변경 — 소유가 아닌 유튜브 영상 인용은 더는 통째로 버려지지 않고 citedSocialDomains 에 남는다", () => {
+    // 직전 개정(2차)에서는 소셜 플랫폼(SOCIAL_PLATFORM_DOMAINS)을 소유 판정보다 먼저 통째로
+    // 제외해 hasPressCitation=false·citedPressDomains=[] 이면서 어느 증거 컬럼에도 안 남았다.
+    // 이번 3차 개정은 언론이 아니라 "블로그·소셜 추천"으로 분류해 citedSocialDomains 에
+    // 남긴다 — 점수(hasPressCitation)에는 여전히 영향이 없다(배점 대상이 아니므로).
+    const r = resolveCitationJudgment(
+      baseJudgmentInput({
+        citations: [
+          citation({ url: `https://www.youtube.com/watch?v=${OTHER_VIDEO_ID}`, title: "매직테스트 리뷰" }),
+        ],
+        ownedVideoIds: new Set([OWNED_VIDEO_ID]), // 다른 영상만 소유
+      }),
+    );
+    expect(r.hasPressCitation).toBe(false);
+    expect(r.citedPressDomains).toEqual([]);
+    expect(r.citedSocialDomains).toEqual(["youtube.com"]);
+  });
+
+  it("남의 소셜 게시물(인스타그램 등)은 브랜드 언급이 있으면 citedSocialDomains 에 남는다(언론과 별도 집계)", () => {
+    const r = resolveCitationJudgment(
+      baseJudgmentInput({
+        citations: [
+          citation({ url: "https://www.instagram.com/p/CxAbCdEfGhI/", title: "매직테스트 후기 게시물" }),
+        ],
+      }),
+    );
+    expect(r.hasPressCitation).toBe(false);
+    expect(r.citedPressDomains).toEqual([]);
+    expect(r.citedSocialDomains).toEqual(["instagram.com"]);
+  });
+
+  it("우리 소유 유튜브 영상 인용은 소셜 증거에서도 제외된다(중복 계산 방지)", () => {
+    const r = resolveCitationJudgment(
+      baseJudgmentInput({
+        citations: [
+          citation({ url: `https://www.youtube.com/watch?v=${OWNED_VIDEO_ID}`, title: "매직테스트 영상" }),
+        ],
+        ownedVideoIds: new Set([OWNED_VIDEO_ID]),
+      }),
+    );
+    expect(r.citedSocialDomains).toEqual([]);
+  });
+
+  it("스위치가 꺼져 있어도(v14a) 소셜 증거는 그대로 계산된다 — 배점 대상이 아니므로 점수에 영향 없지만 증거는 쌓인다", () => {
+    const r = resolveCitationJudgment(
+      baseJudgmentInput({
+        citations: [citation({ url: "https://www.instagram.com/p/AbCdEfGhIjK/", title: "매직테스트 추천" })],
+        scoringProfile: SCORING_PROFILES.v14a,
+      }),
+    );
+    expect(r.citedSocialDomains).toEqual(["instagram.com"]);
+  });
+});
+
 describe("resolveCitationJudgment — 종합 배선 시나리오 (실제 runOneProviderForPrompt 혼합 입력)", () => {
-  it("브랜드 도메인 인용 + 소유 유튜브 인용 + 언론 인용이 섞여 있어도 네 필드가 각각 독립적으로 계산된다(v15a)", () => {
+  it("브랜드 도메인 인용 + 소유 유튜브 인용 + 언론 인용 + 블로그·소셜 인용이 섞여 있어도 필드가 각각 독립적으로 계산된다(v15a)", () => {
     const r = resolveCitationJudgment(
       baseJudgmentInput({
         citations: [
           citation({ url: `https://www.youtube.com/watch?v=${OWNED_VIDEO_ID}` }),
           citation({ url: "https://press-wire.example/a", title: "매직테스트 소식" }),
+          citation({ url: "https://www.instagram.com/p/CxAbCdEfGhI/", title: "매직테스트 추천 게시물" }),
         ],
         scoringProfile: SCORING_PROFILES.v15a,
         ownedVideoIds: new Set([OWNED_VIDEO_ID]),
@@ -329,12 +372,21 @@ describe("resolveCitationJudgment — 종합 배선 시나리오 (실제 runOneP
     expect(r.hasCitationOnly).toBe(true); // 브랜드 도메인 인용만으로도 이미 true
     expect(r.hasPressCitation).toBe(true);
     expect(r.citedPressDomains).toEqual(["press-wire.example"]);
+    expect(r.citedSocialDomains).toEqual(["instagram.com"]);
+    expect(r.hasSocialCitation).toBe(true);
   });
 
-  it("INSERT 컬럼 4개 형태 계약 — 반환 객체가 정확히 이 네 키만 갖는다", () => {
+  it("INSERT 컬럼 3개 + calcVisibilityFull 입력 3개 = 6개 키 계약 — 반환 객체가 정확히 이 여섯 키만 갖는다", () => {
     const r = resolveCitationJudgment(baseJudgmentInput());
     expect(Object.keys(r).sort()).toEqual(
-      ["citedOwnedVideoIds", "citedPressDomains", "hasCitationOnly", "hasPressCitation"].sort(),
+      [
+        "citedOwnedVideoIds",
+        "citedPressDomains",
+        "citedSocialDomains",
+        "hasSocialCitation",
+        "hasCitationOnly",
+        "hasPressCitation",
+      ].sort(),
     );
   });
 });

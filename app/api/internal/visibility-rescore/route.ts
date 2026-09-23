@@ -66,7 +66,7 @@ import {
 import { deriveMentionInputs, type Sentiment } from "@/lib/server/visibility-score-sets";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
-import { collectPressEvidence } from "@/lib/server/press-domain-match";
+import { collectThirdPartyCitationEvidence } from "@/lib/server/press-domain-match";
 
 export const dynamic = "force-dynamic";
 
@@ -386,6 +386,13 @@ type TargetRow = {
   createdAt: Date;
   /** 커서 전용 — created_at 의 마이크로초 해상도를 잃지 않은 텍스트. */
   createdAtUs: string;
+  /**
+   * 저장된 증거 컬럼(2026-09-23 제3자 인용 판정 재설계) — job.reproFromStoredEvidence 인
+   * 잡(v16)만 읽는다. 그 외 잡은 이 세 필드를 쓰지 않는다(citations 에서 다시 판정한다).
+   */
+  citedOwnedVideoIds: string[];
+  citedPressDomains: string[];
+  citedSocialDomains: string[];
 };
 
 /**
@@ -439,6 +446,8 @@ type NewJudgmentResult = {
   base: BaseVisibilityInputs;
   citedOwnedVideoIds: string[];
   citedPressDomains: string[];
+  /** 블로그·소셜 추천 증거 — 제3자 인용 판정 재설계(2026-09-23). 배점 없음(백필 전용). */
+  citedSocialDomains: string[];
 };
 
 /**
@@ -491,10 +500,16 @@ function deriveNewJudgmentRowInputs(
   const hasCitationOnly =
     !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
 
-  // 2026-09-23 개정 — 매체 도메인 allowlist 대신 "브랜드 언급 + 우리 소유 아님"으로 판정한다
-  // (press-domain-match.ts). ownedVideoIds 는 이 함수가 applyOwnedCitationJudgment 잡에서만
-  // 호출되므로 이미 위에서 실제로 조회된 값이다.
-  const pressEvidence = collectPressEvidence(citations, ws.websites, ownedVideoIds, ws.brandTerms);
+  // 제3자 인용 증거(언론 게재 · 블로그·소셜 추천) — 2026-09-23 3차 개정: "브랜드 언급 +
+  // 우리 소유 아님"인 인용을 호스트가 소셜 플랫폼인지로 나눠 둘 다 남긴다(press-domain-
+  // match.ts). ownedVideoIds 는 이 함수가 applyOwnedCitationJudgment 잡에서만 호출되므로
+  // 이미 위에서 실제로 조회된 값이다.
+  const thirdPartyEvidence = collectThirdPartyCitationEvidence(
+    citations,
+    ws.websites,
+    ownedVideoIds,
+    ws.brandTerms,
+  );
 
   const isBrandedQuery = !isInformationalPrompt(row.promptText, ws.brandTerms);
 
@@ -510,10 +525,124 @@ function deriveNewJudgmentRowInputs(
       hasCitationOnly,
       sentiment: row.sentiment as Sentiment,
       isBrandedQuery,
-      hasPressCitation: pressEvidence.hasMatch,
+      hasPressCitation: thirdPartyEvidence.hasPressMatch,
+      hasSocialCitation: thirdPartyEvidence.hasSocialMatch,
     },
     citedOwnedVideoIds,
-    citedPressDomains: pressEvidence.evidence,
+    citedPressDomains: thirdPartyEvidence.pressDomains,
+    citedSocialDomains: thirdPartyEvidence.socialDomains,
+  };
+}
+
+/**
+ * 저장된 증거로만 만드는 입력(계획 §5 v16 · reproFromStoredEvidence 전용) — reproBase·
+ * targetBase 둘 다 이 함수 하나로 만든다(같은 객체). job v16 은 이미 새 판정(소유 유튜브
+ * 인용 folding)으로 계산된 행(소스 버전 15)을 다루므로, deriveRowInputs(옛 판정)도
+ * deriveNewJudgmentRowInputs(citations·소유 목록에서 다시 판정)도 맞지 않는다 — 후자를 쓰면
+ * 소유 영상 목록이 v15 채점 시점 이후 바뀐 경우 그때와 다른 판정이 나올 수 있다(위험 ⓔ).
+ *
+ * hasBodyUrl·citedBrandDomains(→hasCitationOnly 의 한 갈래)는 텍스트·웹사이트 설정에서
+ * 다시 계산한다 — 이건 기존 모든 잡(v11~v15)이 이미 하는 것과 같은 재계산이라 새 위험이
+ * 아니다("소유 영상 목록"만 주기적으로 바뀌는 값이라 저장 증거로 고정할 대상이다).
+ *
+ * ⛔ 2026-09-24 결함 수정 — citedOwnedVideoIds·citedPressDomains·citedSocialDomains 세
+ * 증거 컬럼을 전부 "저장값 그대로 읽기"로 처리했던 최초 구현은 v16 재산출의 목적 자체를
+ * 무효화했다. cited_social_domains 는 이번 판(마이그레이션 0007)에서 새로 만든 컬럼이라
+ * v16 소스 행(score_version 15) 중 마이그레이션 이전에 이미 채점된 기존 행은 DEFAULT
+ * '{}' 로 저장값이 통째로 비어 있고, 그 행이 채점된 시점(v15)의 판정은 소셜 플랫폼을
+ * 통째로 제외하던 2차 개정(press-domain-match.ts 의 옛 evaluatePressCitation)이라 "이
+ * 인용이 소셜 추천이었다"는 사실 자체가 어디에도 저장돼 있지 않다 — 저장값을 그대로
+ * 읽으면 그런 행에서는 블로거·소셜 추천이 영원히 0건으로만 나와 이번 재설계(3차 개정)가
+ * 되살리려던 신호가 조용히 죽는다.
+ *
+ * 그래서 citedSocialDomains 만 "저장값이 있으면 그대로, 비어 있으면 row.citations 에서
+ * 다시 분류" 로 처리한다(아래 코드) — citedPressDomains 처럼 무조건 저장값만 읽지 않는
+ * 이유다. 저장값 우선인 이유는 실제로 값이 있는 행(마이그레이션 **이후** 이 컬럼까지
+ * 채워서 채점된 행)에서 재분류가 그 값과 달라질 이유가 없기 때문이지, 재분류를 우회하기
+ * 위해서가 아니다 — 재분류는 비어 있을 때만 켜지는 구제 경로다.
+ *
+ * citedOwnedVideoIds·citedPressDomains 는 예외 없이 저장값 그대로 읽는다 —
+ * citedOwnedVideoIds 는 위 문단의 근거(라이브 목록 드리프트 회피)가 그대로 성립하고,
+ * citedPressDomains 는 2차 개정의 "언론=true" 판정 술어(브랜드 언급 + 우리 소유 아님 +
+ * 소셜 호스트 아님)가 3차 개정의 "press" 분류 술어와 순서만 다를 뿐 완전히 같아
+ * (evaluatePressCitation ↔ classifyThirdPartyCitation 대조 확인) 저장값이 이미 정확하고,
+ * 애초에 이 컬럼은 마이그레이션 이전 행에도 이미 있었다(cited_social_domains 만 신설).
+ *
+ * 재분류는 라이브 소유 영상 목록을 새로 조회하지 않는다 — 바로 아래에서 저장값 그대로
+ * 읽은 citedOwnedVideoIds 를 집합으로 바꿔 분류 함수에 그대로 넘긴다. 그 값은 "이 행
+ * 자신의 인용 중 소유로 판정된 영상 번호"만 담고 있으므로(automation-runner.ts 의
+ * resolveCitationJudgment 가 저장한 값 그대로), 같은 행의 인용을 재분류할 때 소유 판정은
+ * v15 채점 시점과 수학적으로 동일하게 재현되면서 언론/소셜 분류만 새 규칙(3차 개정)으로
+ * 갱신된다 — 라이브 목록을 조회했다면 그 사이(주 2회 동기화) 목록이 바뀐 행에서 오분류가
+ * 생겼을 것이다(deriveNewJudgmentRowInputs 를 쓰지 않는 이유와 같은 위험 ⓔ).
+ *
+ * v16a 는 이번 판에서 targetBase 로만 쓰이지만, reproBase 쪽 선언 세트(v15a)는 값이 있는
+ * 신호를 그대로 받아도 안전하다 — v15a 의 genNoMentionPress·brandPress·genNoMentionSocial·
+ * brandSocial 이 전부 0(미지정)이라 신호의 참/거짓과 무관하게 기여가 0이기 때문이다.
+ */
+function deriveStoredEvidenceRowInputs(
+  row: TargetRow,
+  ws: ScopedWorkspaceFull,
+): { base: BaseVisibilityInputs } {
+  const answerText = row.answer ?? "";
+  const answerLower = answerText.toLowerCase();
+
+  const brandTargets = ws.websites
+    .map((url) => normalizeTargetKey(url))
+    .filter((k): k is { host: string; seg: string } => k !== null);
+
+  const hasBodyUrl = brandTargets.some((t) => {
+    if (SOCIAL_PLATFORM_DOMAINS.has(t.host)) {
+      if (!t.seg) return false;
+      return answerLower.includes(t.host) && answerLower.includes(t.seg);
+    }
+    return answerLower.includes(t.host);
+  });
+
+  const citations = (row.citations ?? []) as Citation[];
+  const citedBrandDomains = matchCitationDomains(citations, ws.websites);
+
+  // ⭐ 소유 영상·언론 증거는 재계산하지 않고 이 행에 이미 저장된 값을 그대로 쓴다(근거는
+  // 위 함수 docblock의 2026-09-24 결함 수정 문단).
+  const citedOwnedVideoIds = row.citedOwnedVideoIds ?? [];
+  const citedPressDomains = row.citedPressDomains ?? [];
+
+  // ⛔ citedSocialDomains 만 예외 — cited_social_domains 는 이번 마이그레이션에서 새로
+  // 생긴 컬럼이라 마이그레이션 이전에 이미 채점된 행은 저장값이 통째로 비어 있다. 저장값이
+  // 있으면(정상 채점된 행) 그대로 믿고, 비어 있을 때만 row.citations 에서 다시 분류한다
+  // (근거는 위 함수 docblock의 2026-09-24 결함 수정 문단). 재분류는 라이브 소유 목록 대신
+  // 방금 읽은 citedOwnedVideoIds 를 집합으로 써서 드리프트를 피한다.
+  const storedSocialDomains = row.citedSocialDomains ?? [];
+  const citedSocialDomains =
+    storedSocialDomains.length > 0
+      ? storedSocialDomains
+      : collectThirdPartyCitationEvidence(
+          citations,
+          ws.websites,
+          new Set(citedOwnedVideoIds),
+          ws.brandTerms,
+        ).socialDomains;
+
+  const hasCitationOnly =
+    !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
+
+  const isBrandedQuery = !isInformationalPrompt(row.promptText, ws.brandTerms);
+
+  const { mentions, firstPos } = answerText
+    ? deriveMentionInputs(answerText, ws.brandTerms)
+    : { mentions: 0, firstPos: -1 };
+
+  return {
+    base: {
+      mentions,
+      firstPos,
+      hasBodyUrl,
+      hasCitationOnly,
+      sentiment: row.sentiment as Sentiment,
+      isBrandedQuery,
+      hasPressCitation: citedPressDomains.length > 0,
+      hasSocialCitation: citedSocialDomains.length > 0,
+    },
   };
 }
 
@@ -543,6 +672,7 @@ type Change = {
    */
   citedOwnedVideoIds?: string[];
   citedPressDomains?: string[];
+  citedSocialDomains?: string[];
 };
 
 function metaPayload(jobId: RescoreJobId) {
@@ -772,6 +902,11 @@ export async function POST(req: NextRequest) {
         isAuto: schema.runs.isAuto,
         createdAt: schema.runs.createdAt,
         createdAtUs: cursorTimestampProjection,
+        // v16(reproFromStoredEvidence) 전용 — 다른 잡은 이 세 필드를 읽지 않는다. 모든 잡이
+        // 같은 쿼리를 공유하므로 조건부로 넣지 않고 항상 함께 가져온다(작은 text[] 3개).
+        citedOwnedVideoIds: schema.runs.citedOwnedVideoIds,
+        citedPressDomains: schema.runs.citedPressDomains,
+        citedSocialDomains: schema.runs.citedSocialDomains,
       })
       .from(schema.runs)
       .where(and(...batchConditions))
@@ -849,24 +984,44 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      // ⛔ D0(계획 §3-3) — reproBase 는 "그때 저장된 점수를 실제로 만든" 옛 판정, targetBase
-      // 는 job.applyOwnedCitationJudgment 가 true 일 때만 새 판정으로 갈라진다. 그 외 잡은
-      // targetBase === reproBase(같은 객체)라 D0 수정 이전과 동작이 완전히 같다.
-      const reproBase = deriveRowInputs(row, ws);
-      let targetBase = reproBase;
-      let newEvidence: { citedOwnedVideoIds: string[]; citedPressDomains: string[] } | null =
-        null;
-      if (job.applyOwnedCitationJudgment) {
-        const judged = deriveNewJudgmentRowInputs(
-          row,
-          ws,
-          ownedVideoIdsByWorkspace.get(ws.id) ?? new Set<string>(),
-        );
-        targetBase = judged.base;
-        newEvidence = {
-          citedOwnedVideoIds: judged.citedOwnedVideoIds,
-          citedPressDomains: judged.citedPressDomains,
-        };
+      // ⛔ D0(계획 §3-3) — reproBase 는 "그때 저장된 점수를 실제로 만든" 판정, targetBase 는
+      // job 성격에 따라 셋 중 하나로 갈라진다:
+      //   1. job.reproFromStoredEvidence(v16) — 저장된 증거 컬럼에서 reproBase·targetBase
+      //      **둘 다** 같은 함수로 만든다(deriveStoredEvidenceRowInputs). 이 잡의 소스 행은
+      //      이미 새 판정으로 계산돼 있어 옛 판정(deriveRowInputs)을 쓰면 안 맞는다.
+      //   2. job.applyOwnedCitationJudgment(v15) — reproBase 는 옛 판정, targetBase 만
+      //      citations·소유 목록에서 새로 판정한다(deriveNewJudgmentRowInputs).
+      //   3. 그 외(v11~v14) — targetBase === reproBase(같은 객체). D0 수정 이전과 동일.
+      let reproBase: BaseVisibilityInputs;
+      let targetBase: BaseVisibilityInputs;
+      let newEvidence: {
+        citedOwnedVideoIds: string[];
+        citedPressDomains: string[];
+        citedSocialDomains: string[];
+      } | null = null;
+      if (job.reproFromStoredEvidence) {
+        const stored = deriveStoredEvidenceRowInputs(row, ws);
+        reproBase = stored.base;
+        targetBase = stored.base;
+        // newEvidence 는 null 로 둔다 — v16 은 증거를 다시 계산하지 않고 이미 저장된 값을
+        // 그대로 재사용하므로, UPDATE SET 절에서 증거 컬럼을 건드릴 필요가 없다(아래 §
+        // 적용 로직이 newEvidence undefined 필드를 SET 에서 자동으로 뺀다).
+      } else {
+        reproBase = deriveRowInputs(row, ws);
+        targetBase = reproBase;
+        if (job.applyOwnedCitationJudgment) {
+          const judged = deriveNewJudgmentRowInputs(
+            row,
+            ws,
+            ownedVideoIdsByWorkspace.get(ws.id) ?? new Set<string>(),
+          );
+          targetBase = judged.base;
+          newEvidence = {
+            citedOwnedVideoIds: judged.citedOwnedVideoIds,
+            citedPressDomains: judged.citedPressDomains,
+            citedSocialDomains: judged.citedSocialDomains,
+          };
+        }
       }
 
       let resolution;
@@ -934,6 +1089,9 @@ export async function POST(req: NextRequest) {
               ...(change.citedPressDomains !== undefined
                 ? { citedPressDomains: change.citedPressDomains }
                 : {}),
+              ...(change.citedSocialDomains !== undefined
+                ? { citedSocialDomains: change.citedSocialDomains }
+                : {}),
             })
             .where(
               and(
@@ -960,6 +1118,7 @@ export async function POST(req: NextRequest) {
             toVersion: change.toVersion,
             citedOwnedVideoIds: change.citedOwnedVideoIds,
             citedPressDomains: change.citedPressDomains,
+            citedSocialDomains: change.citedSocialDomains,
           });
         }
       });
@@ -978,6 +1137,7 @@ export async function POST(req: NextRequest) {
             toVersion,
             citedOwnedVideoIds,
             citedPressDomains,
+            citedSocialDomains,
           }) => ({
             id,
             kstDate,
@@ -989,6 +1149,7 @@ export async function POST(req: NextRequest) {
             toVersion,
             citedOwnedVideoIds,
             citedPressDomains,
+            citedSocialDomains,
           }),
         )
       : applied;

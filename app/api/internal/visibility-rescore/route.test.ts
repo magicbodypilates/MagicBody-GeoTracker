@@ -341,6 +341,9 @@ const H = vi.hoisted(() => {
       "isAuto",
       "parseQuality",
       "createdAt",
+      "citedOwnedVideoIds",
+      "citedPressDomains",
+      "citedSocialDomains",
     ]),
     workspaces: mkTable("workspaces", ["id", "brandConfig", "isProduction"]),
     // __table 은 store 의 프로퍼티 키(camelCase)와 일치해야 한다 — runSelect/updateBuilder 가
@@ -473,6 +476,13 @@ type SeedOpts = {
   createdAtUs?: string;
   /** v15(소유 유튜브·언론) 테스트 전용 — 기본은 빈 배열. */
   citations?: { url?: string | null; domain?: string | null; title?: string | null; description?: string | null }[];
+  /**
+   * v16(reproFromStoredEvidence) 테스트 전용 — "그때 이미 저장된 증거"를 직접 시드한다.
+   * 기본은 빈 배열(DB NOT NULL DEFAULT '{}' 와 동일 계약).
+   */
+  citedOwnedVideoIds?: string[];
+  citedPressDomains?: string[];
+  citedSocialDomains?: string[];
 };
 
 function seedRun(n: number, opts: SeedOpts = {}) {
@@ -489,6 +499,9 @@ function seedRun(n: number, opts: SeedOpts = {}) {
     isAuto: opts.isAuto ?? true,
     parseQuality: "high",
     createdAt: opts.createdAt ?? inWindowAt(n),
+    citedOwnedVideoIds: opts.citedOwnedVideoIds ?? [],
+    citedPressDomains: opts.citedPressDomains ?? [],
+    citedSocialDomains: opts.citedSocialDomains ?? [],
     ...(opts.createdAtUs ? { createdAtUs: opts.createdAtUs } : {}),
   };
   H.store.runs.push(row);
@@ -697,8 +710,9 @@ describe("(i) 도달 제어·인증 게이트", () => {
   });
 
   it("없는 잡 id → 400", async () => {
-    // ⛔ D0-b(계획 §5 Step 6) — v15 는 이제 등록된 잡이다. 존재하지 않는 잡 id 예시는 v16 으로.
-    expect((await POST(post({ job: "v16" }))).status).toBe(400);
+    // ⛔ D0-b(계획 §5 Step 6) — v15 는 이제 등록된 잡이다. 2026-09-23 개정으로 v16 도
+    // 등록됐다. 존재하지 않는 잡 id 예시는 v17 으로.
+    expect((await POST(post({ job: "v17" }))).status).toBe(400);
     expect((await POST(post({ job: "v14t" }))).status).toBe(400);
     expect((await POST(post({ job: "v13t" }))).status).toBe(400);
     expect((await POST(post({ job: "v15t" }))).status).toBe(400);
@@ -1552,6 +1566,7 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(r.scoreVersion).toBe(15);
     expect(r.citedOwnedVideoIds).toEqual([]);
     expect(r.citedPressDomains).toEqual([]);
+    expect(r.citedSocialDomains).toEqual([]);
   });
 
   it("소유 유튜브 영상 인용 — hasCitationOnly 로 접혀 점수가 45 로 뛰고 증거가 백필된다", async () => {
@@ -1572,6 +1587,7 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(change.after).toBe(45); // v14a·v15a genNoMentionCitation
     expect(change.citedOwnedVideoIds).toEqual([OWNED_ID]);
     expect(change.citedPressDomains).toEqual([]);
+    expect(change.citedSocialDomains).toEqual([]);
 
     // apply 로도 동일하게 적용되는지 별도 확인
     const applied = await (await POST(post({ job: "v15", apply: true, batchSize: 200 }))).json();
@@ -1614,18 +1630,45 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(b.changes[0].after).toBe(0); // 배점 0 — 점수 불변(계획 D4′)
     expect(b.changes[0].citedOwnedVideoIds).toEqual([]);
     expect(b.changes[0].citedPressDomains).toEqual(["press-wire.example"]);
+    expect(b.changes[0].citedSocialDomains).toEqual([]);
   });
 
-  it("브랜드 언급이 없는 인용은 어떤 도메인이든 증거로 남지 않는다", async () => {
+  it("⭐ 3차 개정 — 블로그·소셜 추천(제3자) 인용도 증거로 백필되지만 배점이 0 이라 점수는 안 바뀐다", async () => {
+    // 직전(2차) 개정에서는 소셜 플랫폼을 통째로 제외해 이 시나리오가 citedPressDomains·
+    // citedSocialDomains 어느 쪽에도 안 남았다. 3차 개정은 "블로그·소셜 추천"으로 분류해
+    // citedSocialDomains 에 남긴다 — 언론과 같은 이유로 배점은 여전히 0 이다.
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v15At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [
+        { url: "https://www.instagram.com/p/AbCdEfGhIjK/", title: "요가원 추천 게시물", description: null },
+      ],
+    });
+
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.changes[0].before).toBe(0);
+    expect(b.changes[0].after).toBe(0); // 배점 0 — 점수 불변
+    expect(b.changes[0].citedOwnedVideoIds).toEqual([]);
+    expect(b.changes[0].citedPressDomains).toEqual([]);
+    expect(b.changes[0].citedSocialDomains).toEqual(["instagram.com"]);
+  });
+
+  it("브랜드 언급이 없는 인용은 어떤 도메인이든 증거로 남지 않는다(언론·소셜 둘 다)", async () => {
     seedRun(1, {
       version: 14,
       score: 0,
       createdAt: v15At(1),
       answer: "무관한 답변",
-      citations: [{ url: "https://some-outlet.example/a", title: "브랜드와 무관한 기사" }],
+      citations: [
+        { url: "https://some-outlet.example/a", title: "브랜드와 무관한 기사" },
+        { url: "https://www.instagram.com/p/UnrelatedPost/", title: "브랜드와 무관한 게시물" },
+      ],
     });
     const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
     expect(b.changes[0].citedPressDomains).toEqual([]);
+    expect(b.changes[0].citedSocialDomains).toEqual([]);
   });
 
   it("우리 공식 웹사이트 인용은 브랜드 언급이 있어도 언론 증거에서 제외된다(중복 계산 방지)", async () => {
@@ -1651,9 +1694,10 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(b.anomalies).toHaveLength(0);
     expect(b.changes[0].after).toBe(45); // v15a 도 같은 이유로 동일 — 점수는 바뀌지 않는다
     expect(b.changes[0].citedPressDomains).toEqual([]);
+    expect(b.changes[0].citedSocialDomains).toEqual([]);
   });
 
-  it("소유 유튜브 영상 인용은 citedOwnedVideoIds 로 잡히고 citedPressDomains 로는 이중 계산되지 않는다", async () => {
+  it("소유 유튜브 영상 인용은 citedOwnedVideoIds 로 잡히고 citedPressDomains·citedSocialDomains 로는 이중 계산되지 않는다", async () => {
     seedOwnedVideo(WS_PROD, OWNED_ID);
     seedRun(1, {
       version: 14,
@@ -1661,13 +1705,15 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
       createdAt: v15At(1),
       answer: "무관한 답변(브랜드 미언급)",
       citations: [
-        { url: `https://youtu.be/${OWNED_ID}`, title: "요가원 소개 영상" }, // 우리 영상 — 언론 증거 제외 대상
-        { url: "https://press-wire.example/a", title: "요가원 관련 보도" }, // 제3자 — 언론 증거로 남아야 함
+        { url: `https://youtu.be/${OWNED_ID}`, title: "요가원 소개 영상" }, // 우리 영상 — 언론·소셜 증거 제외 대상
+        { url: "https://press-wire.example/a", title: "요가원 관련 보도" }, // 제3자 언론 — 남아야 함
+        { url: "https://www.instagram.com/p/AbCdEfGhIjK/", title: "요가원 추천 게시물" }, // 제3자 소셜 — 남아야 함
       ],
     });
     const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
     expect(b.changes[0].citedOwnedVideoIds).toEqual([OWNED_ID]);
     expect(b.changes[0].citedPressDomains).toEqual(["press-wire.example"]);
+    expect(b.changes[0].citedSocialDomains).toEqual(["instagram.com"]);
   });
 
   it("응답에 cfgFingerprint·ownedVideoFingerprint 가 실린다(v15 만 소유 영상 지문 계산)", async () => {
@@ -1696,6 +1742,7 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(b.changes[0].after).toBe(0); // 소유 영상이 있어도 v14 는 절대 반영하지 않는다
     expect(b.changes[0].citedOwnedVideoIds).toBeUndefined();
     expect(b.changes[0].citedPressDomains).toBeUndefined();
+    expect(b.changes[0].citedSocialDomains).toBeUndefined();
     expect(b.ownedVideoFingerprint).toBeNull();
   });
 
@@ -1712,6 +1759,222 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     for (const keys of H.updateSetKeys) {
       expect(keys).not.toContain("citedOwnedVideoIds");
       expect(keys).not.toContain("citedPressDomains");
+      expect(keys).not.toContain("citedSocialDomains");
     }
+  });
+});
+
+/* ============================================================
+ * v16 잡 — 2026-09-23 제3자 인용 판정 재설계(사장님 배점 확정)
+ *
+ * v15 와 달리 v16 의 소스 행(버전 15)은 **이미 새 판정으로 계산돼 있다.** 이 블록의 핵심은
+ * (a) 저장된 증거 컬럼만으로 v15a 재현·v16a 목표를 계산하고 (b) 소유 영상 목록이 그 사이
+ * 바뀌어도(주 2회 동기화) 영향받지 않으며 (c) 언론·소셜 배점(35)이 실제로 반영되고
+ * (d) 증거 컬럼 자체는 다시 쓰지 않는지를 검증한다.
+ * ============================================================ */
+
+describe("v16 잡 — 소스 버전 15 하나 · v15a → v16a(reproFromStoredEvidence)", () => {
+  // v15 와 완전히 같은 창(대상 창 하한 KST 2026-09-21 00:00).
+  const v16At = (m: number) => new Date(new Date("2026-09-21T03:00:00.000Z").getTime() + m * 60_000);
+  const OWNED_ID = "dQw4w9WgXcQ";
+
+  it("meta: 소스 버전 15 · 목표 v16a · jobHash 가 v15 와 다르다(D0-b 회귀 없음)", async () => {
+    const body = await (await POST(post({ job: "v16", meta: true }))).json();
+    expect(body.mode).toBe("meta");
+    expect(body.sourceVersions).toEqual([15]);
+    expect(body.targetVersion).toBe(16);
+    expect(body.targetSet).toBe("v16a");
+    expect(body.jobHash).toBe(jobHash("v16"));
+    expect(body.jobHash).not.toBe(jobHash("v15"));
+  });
+
+  it("증거가 전혀 없으면 점수는 그대로(0)지만 버전만 16으로 전진한다", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0,
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+    });
+    const b = await (await POST(post({ job: "v16", apply: true, batchSize: 200 }))).json();
+    expect(b.processed).toBe(1);
+    expect(b.updated).toBe(1);
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(0);
+    expect(r.scoreVersion).toBe(16);
+  });
+
+  it("저장된 언론 증거만 있으면 v16a 배점(35)이 실제로 반영된다(v15a 에선 0 이었다)", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0, // v15a 시점: 언론 배점 0 이라 증거가 있어도 점수는 0 이었다.
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedPressDomains: ["press-wire.example"], // v15 채점 시점에 이미 저장된 증거.
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(0);
+    expect(b.changes[0].after).toBe(35); // v16a.genNoMentionPress
+  });
+
+  it("저장된 소셜 증거만 있으면 v16a 배점(35)이 실제로 반영된다", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0,
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedSocialDomains: ["instagram.com"],
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(0);
+    expect(b.changes[0].after).toBe(35); // v16a.genNoMentionSocial
+  });
+
+  it("우리 채널 인용(citedOwnedVideoIds)만 있으면 점수는 그대로 45 — 배점을 건드리지 않았다", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 45, // v15a.genNoMentionCitation — v15 채점 시점에 이미 이 값으로 저장됨.
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedOwnedVideoIds: [OWNED_ID],
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(45);
+    expect(b.changes[0].after).toBe(45); // "우리 채널 인용 45점, 기존 그대로" — 사장님 지시
+  });
+
+  /**
+   * ⭐⭐ 핵심 — 소유 영상 목록 드리프트 안전성(위험 ⓔ의 실제 검증).
+   *
+   * v15 가 이 행을 채점한 시점에는 OWNED_ID 가 소유 목록에 있어 citedOwnedVideoIds 로
+   * 저장됐다(그래서 storedScore=45). 그런데 이 테스트는 seedOwnedVideo 를 **호출하지
+   * 않는다** — v16 이 지금 돌 때는 그 영상이 더는 "라이브" 소유 목록에 없는 상황을
+   * 시뮬레이션한다(주 2회 동기화 사이 비활성화·목록 갱신 등). deriveNewJudgmentRowInputs
+   * (citations·라이브 목록에서 다시 판정)를 썼다면 hasCitationOnly 가 false 로 뒤집혀
+   * v15a 재현이 0 을 만들고, storedScore(45) 와 어긋나 no-candidate 가 됐을 것이다.
+   * deriveStoredEvidenceRowInputs 는 저장된 citedOwnedVideoIds 를 그대로 읽으므로 목록이
+   * 바뀌어도 재현이 깨지지 않는다 — 이 테스트가 그 사실을 직접 증명한다.
+   */
+  it("소유 영상 목록이 v15 채점 이후 바뀌어도(테스트에서 재등록하지 않음) 재현이 깨지지 않는다", async () => {
+    // seedOwnedVideo(WS_PROD, OWNED_ID) 를 의도적으로 호출하지 않는다.
+    seedRun(1, {
+      version: 15,
+      score: 45,
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedOwnedVideoIds: [OWNED_ID], // v15 채점 시점의 저장된 증거만 있다.
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0); // no-candidate 가 아니다 — 라이브 목록과 무관하게 재현된다.
+    expect(b.changes[0].before).toBe(45);
+    expect(b.changes[0].after).toBe(45);
+  });
+
+  it("소유 영상 + 언론 증거가 섞여 있어도 각각 올바르게 반영된다(45 는 그대로, 언론은 없던 배점이 생김)", async () => {
+    // 본문 URL 없음 + 브랜드 도메인 인용 없음 + 소유 영상 인용 있음 → hasCitationOnly=true
+    // → v15a·v16a 모두 genNoMentionCitation(45) 분기로 먼저 빠진다(우선순위: URL > 인용 >
+    // 언론/소셜, calcVisibilityWithSet 참조) — 언론 증거가 있어도 45 를 넘어서지 않는다.
+    seedRun(1, {
+      version: 15,
+      score: 45,
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedOwnedVideoIds: [OWNED_ID],
+      citedPressDomains: ["press-wire.example"],
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].after).toBe(45); // 참고자료(45) 가 언론(35) 보다 우선
+  });
+
+  it("apply 로도 dry-run 과 동일하게 적용된다", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0,
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedPressDomains: ["press-wire.example"],
+    });
+    const applied = await (await POST(post({ job: "v16", apply: true, batchSize: 200 }))).json();
+    expect(applied.updated).toBe(1);
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(35);
+    expect(r.scoreVersion).toBe(16);
+  });
+
+  it("v16 은 증거 컬럼을 다시 쓰지 않는다(UPDATE SET 절에서 제외) — 이미 맞는 증거를 그대로 둔다", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0, // v15a 시점 저장값(언론 배점 0) — v16 이 35 로 올리는 대상.
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedPressDomains: ["press-wire.example"],
+    });
+    await POST(post({ job: "v16", apply: true, batchSize: 200 }));
+    expect(H.updateSetKeys.length).toBeGreaterThan(0);
+    expect(H.store.runs[0].visibilityScore).toBe(35); // 점수는 실제로 올라간다.
+    for (const keys of H.updateSetKeys) {
+      expect(keys).not.toContain("citedOwnedVideoIds");
+      expect(keys).not.toContain("citedPressDomains");
+      expect(keys).not.toContain("citedSocialDomains");
+      // 그래도 점수·버전은 갱신 대상이다.
+      expect(keys).toContain("visibilityScore");
+      expect(keys).toContain("scoreVersion");
+    }
+    // 값 자체도 시드한 그대로 보존된다(다시 계산해서 덮어쓰지 않았다는 방증).
+    expect(H.store.runs[0].citedPressDomains).toEqual(["press-wire.example"]);
+  });
+
+  it("아직 버전 14인 행은 v16 대상이 아니다(소스 버전이 15 하나뿐)", async () => {
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.processed).toBe(0); // selector 가 버전 15 만 골라내므로 이 행은 애초에 안 걸린다.
+  });
+
+  it("응답에 cfgFingerprint 가 실린다 · ownedVideoFingerprint 는 null(라이브 소유 목록을 조회하지 않는다)", async () => {
+    seedRun(1, { version: 15, createdAt: v16At(1), score: 0, answer: "무관" });
+    const b = await (await POST(post({ job: "v16", dryRun: true }))).json();
+    expect(b.cfgFingerprint).toMatch(/^[0-9a-f]{12}$/);
+    // v16 은 reproFromStoredEvidence 라 applyOwnedCitationJudgment 를 쓰지 않고, 그래서
+    // 라이브 소유 영상 목록을 조회하지 않는다(저장된 증거만 읽는다) — v14 와 같은 이유로 null.
+    expect(b.ownedVideoFingerprint).toBeNull();
+  });
+
+  /**
+   * ⭐⭐ 결함 수정(2026-09-24) — cited_social_domains 는 이번 마이그레이션(0007)에서 새로
+   * 생긴 컬럼이라, v16 소스 행(score_version 15)중 이 컬럼이 생기기 전에 이미 채점된 행은
+   * DEFAULT '{}' 로 전부 비어 있다(citedOwnedVideoIds·citedPressDomains 는 v15 채점
+   * 시점에 이미 컬럼이 있어 실제 값으로 저장됐던 것과 대비된다 — 위 다른 테스트들이 이
+   * 둘을 직접 시드하는 이유). 그 행이 채점된 시점(v15)의 판정은 소셜 플랫폼을 통째로
+   * 제외하던 2차 개정이라, "이 인용이 소셜 추천이었다"는 사실 자체가 어디에도 남지 않는다.
+   *
+   * 이 테스트는 citedSocialDomains 를 일부러 시드하지 않고(= 마이그레이션 이전 행 재현)
+   * citations 에만 실제 소셜 추천을 넣는다 — 저장값을 그대로 읽는 수정 전 코드에서는
+   * after 가 0(=citedSocialDomains 재현이 안 됨)으로 남아 이 테스트가 실패하고, citations
+   * 에서 다시 분류하는 수정 후 코드에서는 35(v16a.genNoMentionSocial)로 반영돼 통과한다.
+   */
+  it("⭐ 결함 수정 — citedSocialDomains 가 비어 있는(마이그레이션 이전) 행도 citations 에서 소셜 증거를 다시 분류한다", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0, // v15 채점 시점: 소셜 컬럼 자체가 없어 어떤 값으로도 반영되지 않았다.
+      createdAt: v16At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [
+        { url: "https://www.instagram.com/p/AbCdEfGhIjK/", title: "요가원 추천 게시물", description: null },
+      ],
+      // citedSocialDomains 를 의도적으로 생략 — seedRun 기본값([])이 마이그레이션 이전 행의
+      // DEFAULT '{}' 를 재현한다.
+    });
+    const b = await (await POST(post({ job: "v16", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(0);
+    expect(b.changes[0].after).toBe(35); // v16a.genNoMentionSocial — citations 재분류가 잡아야 한다.
   });
 });

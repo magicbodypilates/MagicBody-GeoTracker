@@ -60,9 +60,12 @@ export type BrandConfig = {
    * 불리언이 아니라 쌍을 고르게 해 "세트와 버전은 항상 한 쌍"이 구조로 강제된다.
    *   미설정 또는 "v14a"(기본) — 세트 v14a·버전 14. 유튜브 소유 인용 판정 안 함(현행과 동일).
    *   "v15a" — 세트 v15a·버전 15. 소유 유튜브 인용을 hasCitationOnly 에 접어 판정.
+   *   "v16a" — 세트 v16a·버전 16. v15a 와 판정은 같고 언론·블로그·소셜 배점만 켜진다
+   *   (2026-09-23). **신규 수집** 경로에만 영향 — 이미 저장된 버전 15 행의 재계산은 재산출
+   *   잡 v16 이 담당하며 이 스위치와 무관하다.
    * 적용은 사장님 별도 승인(계획 §5 Step 9) — 이 필드는 구조만 만들고 값은 켜지 않는다.
    */
-  scoringSetSwitch?: "v14a" | "v15a";
+  scoringSetSwitch?: "v14a" | "v15a" | "v16a";
 };
 
 /* ============================================================
@@ -172,12 +175,22 @@ export const runs = pgTable(
      */
     citedOwnedVideoIds: text("cited_owned_video_ids").array().notNull().default([]),
     /**
-     * 언론(배포 매체) 인용 증거 — 계획 §4-1·§4-2·§4-4(D6). "<도메인>:title" ·
-     * "<도메인>:description" 형식(press-domain-match.ts 의 collectPressEvidence 산출물)으로
-     * 제목 조건·설명 조건을 각각 남긴다. 배점은 이번 판에서 항상 0 이라 이 컬럼은 점수에
-     * 영향을 주지 않고, 배점을 켤지 실측으로 판단할 근거로만 쌓인다.
+     * 언론(제3자 매체) 게재 증거 — 2026-09-23 3차 개정(제3자 인용 판정 재설계).
+     * 인용의 제목·설명에 브랜드 용어가 있고 우리 소유가 아니며 호스트가 소셜 플랫폼이
+     * 아닌 도메인 문자열 목록(dedup, press-domain-match.ts 의 collectThirdPartyCitationEvidence
+     * 산출물). 같은 조건에서 호스트가 소셜 플랫폼이면 cited_social_domains 로 간다 — 둘은
+     * 배타적이다. 배점은 이번 판에서도 항상 0 이라 점수에 영향을 주지 않고, 배점을 켤지
+     * 실측으로 판단할 근거로만 쌓인다.
      */
     citedPressDomains: text("cited_press_domains").array().notNull().default([]),
+    /**
+     * 블로그·소셜 추천 증거 — 2026-09-23 3차 개정. cited_press_domains 와 판정 조건은
+     * 같고 호스트가 소셜 플랫폼(SOCIAL_PLATFORM_DOMAINS)일 때만 여기로 간다. 언론 게재와
+     * 블로거·소셜 추천을 별도 집계로 나눈 것 — 직전 개정이 소셜 플랫폼을 통째로 제외해
+     * 이 증거를 잃었던 것을 되돌린다. 인스타그램 개별 게시물처럼 경로에 채널 핸들이 없는
+     * 형태는 우리 게시물이어도 소유 판별이 안 돼 여기로 섞일 수 있다 — 받아들이는 한계.
+     */
+    citedSocialDomains: text("cited_social_domains").array().notNull().default([]),
     geolocation: text("geolocation"),
     isAuto: boolean("is_auto").notNull().default(false),
     /** "2026-04-21T12" 슬롯 기반 중복 실행 방지 */

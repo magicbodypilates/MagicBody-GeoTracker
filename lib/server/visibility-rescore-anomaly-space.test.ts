@@ -272,10 +272,85 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
   });
 
   it("모든 잡의 소스 버전이 전부 재현 세트에 매핑돼 있다(매핑 누락 시 전량 skip 이 된다)", () => {
-    for (const jobId of ["v11", "v12", "v12t", "v13", "v14", "v15"] as const) {
+    for (const jobId of ["v11", "v12", "v12t", "v13", "v14", "v15", "v16"] as const) {
       for (const version of RESCORE_JOBS[jobId].sourceVersions) {
         expect(REPRO_SET_BY_VERSION[version]).toBeDefined();
       }
     }
+  });
+
+  /**
+   * ⛔ 2026-09-23 제3자 인용 판정 재설계 — v16 잡의 실제 조합. 선언 세트 v15a · 진단 세트
+   * 없음 · 목표 v16a. v16 은 reproFromStoredEvidence 라 reproBase === targetBase(같은 값)로
+   * 호출한다(v14·v15 관례와 동일). v15a 와 달리 v16a 는 언론·소셜 배점이 0 이 아니므로
+   * (35), 이 조합이 여전히 "선언 세트가 곧 유일한 후보"인지 — 특히 hasPressCitation·
+   * hasSocialCitation 이 섞여도 ambiguous-target·cross-set-ambiguous 가 안 생기는지를
+   * 이 테스트가 전수로 고정한다.
+   *
+   * inputSpace() 는 hasPressCitation·hasSocialCitation 을 고정(false)해서 만들므로, 이
+   * 두 신호를 덮어써 4가지 조합(언론만·소셜만·둘 다·없음)을 추가로 돈다 — press/social 은
+   * "저장된 증거"에서 오는 값이라 ranking 조합처럼 여러 후보를 만들지 않는다(행마다 고정),
+   * 그래도 "고정된 값이 있을 때" 모든 (mentions·firstPos·URL·sentiment·branded) 조합에서
+   * 여전히 항상 resolved 인지가 이 테스트의 요점이다.
+   */
+  it("v16 잡 조합(v15a → v16a · 진단 없음)은 언론·소셜 신호 4조합 모두에서 입력 전수 resolved", () => {
+    const job = RESCORE_JOBS.v16;
+    expect(job.targetSet).toBe("v16a");
+    let checked = 0;
+    const pressSocialCombos: Array<{ hasPressCitation: boolean; hasSocialCitation: boolean }> = [
+      { hasPressCitation: false, hasSocialCitation: false },
+      { hasPressCitation: true, hasSocialCitation: false },
+      { hasPressCitation: false, hasSocialCitation: true },
+      { hasPressCitation: true, hasSocialCitation: true },
+    ];
+    for (const rawBase of inputSpace()) {
+      for (const signal of pressSocialCombos) {
+        const base: BaseVisibilityInputs = { ...rawBase, ...signal };
+        for (const flags of RANKING_COMBOS) {
+          const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v15a);
+          const res = resolveWithDiagnostics({
+            reproBase: base,
+            targetBase: base,
+            storedScore,
+            declaredSetId: "v15a",
+            diagnosticSetIds: job.diagnosticSets,
+            targetSetId: job.targetSet,
+          });
+          if (res.status !== "resolved") {
+            throw new Error(
+              `${res.status} 발생 — stored=${storedScore} signal=${JSON.stringify(signal)} base=${JSON.stringify(base)}`,
+            );
+          }
+          expect(res.targetScore).not.toBeNull();
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(4000);
+  });
+
+  it("v16 — 언론·소셜 신호가 있으면 target(v16a) 점수가 declared(v15a) 점수보다 낮아지지 않는다(언급 0 분기)", () => {
+    // 언급 0 분기는 ranking 조합과 무관하게 값이 고정되므로 대표 조합 하나로 충분하다.
+    const base: BaseVisibilityInputs = {
+      mentions: 0,
+      firstPos: -1,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "not-mentioned",
+      isBrandedQuery: false,
+      hasPressCitation: true,
+      hasSocialCitation: false,
+    };
+    const declared = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: false },
+      SCORE_SETS.v15a,
+    );
+    const target = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: false },
+      SCORE_SETS.v16a,
+    );
+    expect(declared).toBe(0); // v15a — 언론 배점 없음
+    expect(target).toBe(35); // v16a — 언론 배점 35
+    expect(target).toBeGreaterThanOrEqual(declared);
   });
 });

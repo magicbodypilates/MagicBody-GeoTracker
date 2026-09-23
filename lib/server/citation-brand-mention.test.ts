@@ -185,6 +185,37 @@ describe("aggregateBrandMentionUrls", () => {
     expect(res.uniqueUrlCount).toBe(1);
     expect(res.urls[0].canonicalUrlKey).toBe("youtube.com/@reviewer/watch");
   });
+
+  // 2026-09-23 개정 — 제3자 인용 판정 재설계. 소유 제외 판정을 press-domain-match.ts 의
+  // isOwnedCitationUrl 과 공유하도록 정리했다(citation-url-aggregate.ts 헤더 주석 참조).
+  describe("소유 제외 판정 공유(isOwnedCitationUrl) — 위 두 테스트가 기존 판정으로도 이미 커버하는 경계와 동일 결과", () => {
+    it("등록된 웹사이트 도메인은 공유 판정으로도 그대로 제외된다(회귀 없음)", () => {
+      const rows: CitationRow[] = [
+        row({ runId: "r1", url: "https://magicbodypilates.com/notice", title: "매직바디 공지" }),
+        row({ runId: "r2", url: "https://viva100.com/x", title: "매직바디 소식" }),
+      ];
+      const res = aggregateBrandMentionUrls(rows, { brandKeySet: BRAND_KEYS, brandTerms: BRAND_TERMS });
+      expect(res.uniqueUrlCount).toBe(1);
+      expect(res.urls[0].domain).toBe("viva100.com");
+    });
+
+    it("⚠️ 받아들이는 한계 — 우리 인스타 계정이어도 경로에 핸들 없는 개별 게시물은 제3자로 남는다", () => {
+      // brandKeySet 에 인스타그램 핸들을 등록해도(buildTargetKeys 가 만드는 것과 같은 형식으로
+      // 직접 추가) instagram.com/p/<id> 는 경로 첫 세그먼트가 "p"라 host+handle 매칭이
+      // 성립하지 않는다 — 우리 게시물이어도 소유를 못 가려 제3자 언급으로 남는다. 억지로
+      // 추정하지 않는 것이 press-domain-match.ts 가 명시한 설계 결정이다.
+      const keysWithInstagram = new Set([...BRAND_KEYS, "instagram.com/magicbody"]);
+      const rows: CitationRow[] = [
+        // 핸들이 있는 프로필 링크는 정상적으로 소유 제외된다(대조군).
+        row({ runId: "r1", url: "https://instagram.com/magicbody", title: "매직바디 공식 계정" }),
+        // 핸들이 없는 개별 게시물 — 우리 것이라 가정해도 제외되지 않는다.
+        row({ runId: "r2", url: "https://instagram.com/p/OurOwnPostId/", title: "매직바디 소식 게시물" }),
+      ];
+      const res = aggregateBrandMentionUrls(rows, { brandKeySet: keysWithInstagram, brandTerms: BRAND_TERMS });
+      expect(res.uniqueUrlCount).toBe(1);
+      expect(res.urls[0].canonicalUrlKey).toBe("instagram.com/p/OurOwnPostId");
+    });
+  });
 });
 
 describe("aggregateMentionPromptsForUrl", () => {

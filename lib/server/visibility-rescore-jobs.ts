@@ -14,7 +14,7 @@ import { SCORE_SETS, type ScoreSetId } from "@/lib/server/visibility-score-sets"
 /** 운영/비운영 워크스페이스 구분 — UUID 를 코드에 두지 않고 is_production 으로 판정한다. */
 export type WorkspaceScope = "production" | "non-production";
 
-export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15";
+export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15" | "v16";
 
 export type RescoreJob = {
   /** 대상 창 시작(inclusive · timestamptz 비교) */
@@ -45,6 +45,21 @@ export type RescoreJob = {
    * 생략(undefined)은 false 와 동일하게 취급한다(옛 판정) — v15 만 명시적으로 true.
    */
   applyOwnedCitationJudgment?: boolean;
+  /**
+   * true 면 reproBase·targetBase **둘 다** 저장 행의 증거 컬럼(citedOwnedVideoIds·
+   * citedPressDomains·citedSocialDomains)에서 직접 읽어 만든다 — deriveRowInputs(옛 판정)도
+   * deriveNewJudgmentRowInputs(citations·소유 목록에서 새로 판정)도 쓰지 않는다.
+   *
+   * 왜 필요한가 — v16 의 소스 버전(15)은 이미 "소유 유튜브 인용을 hasCitationOnly 에 접는"
+   * 새 판정으로 계산된 행이다. 그 판정을 다시 재현하려면 v15 채점 시점의 소유 영상 목록이
+   * 필요한데, 그 목록은 주기적으로 바뀐다(brand_youtube_videos, 주 2회 동기화) — 지금
+   * 목록으로 다시 판정하면 그때와 달라질 수 있다(위험 ⓔ). 채점 시점에 이미 저장해 둔 증거
+   * 컬럼을 그대로 읽으면 목록이 바뀌어도 "그때 무엇으로 판정했는가"가 보존된다.
+   *
+   * **선택 필드로 둔다** — v11~v15 는 이 필드 자체를 생략해(undefined) jobHash 가 흔들리지
+   * 않는다(applyOwnedCitationJudgment 와 동일한 이유). v16 만 명시적으로 true.
+   */
+  reproFromStoredEvidence?: boolean;
 };
 
 const DIAGNOSTIC_SETS: readonly ScoreSetId[] = ["legacy8", "full10"];
@@ -166,6 +181,32 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     workspaceScope: "production",
     applyOwnedCitationJudgment: true,
   },
+  /**
+   * 2026-09-23 제3자 인용 판정 재설계 — 사장님이 언론·블로그·소셜 배점을 확정(v16a: 35/35)
+   * 하면서 신설. v15 가 이미 15 로 올려 둔 행(대상 창은 v15 와 완전히 동일 — 이미 버전 15인
+   * 행은 정의상 그 창 안에 있다)을 v16a 로 다시 계산한다. v15a·버전 15 는 그대로 둔다.
+   *
+   * reproFromStoredEvidence: true — reproBase·targetBase 둘 다 저장된 증거 컬럼에서 읽는다
+   * (위 RescoreJob 타입 주석 참조). applyOwnedCitationJudgment 는 쓰지 않는다 — 이 잡은
+   * deriveNewJudgmentRowInputs(소유 영상 목록을 다시 조회하는 경로) 자체를 타지 않는다.
+   *
+   * diagnosticSets 가 빈 목록인 이유는 v14·v15 와 같다 — 소스 버전 15 를 만든 경로는 v15
+   * 잡 하나뿐이라 선언 세트(v15a)가 곧 유일한 후보다.
+   */
+  v16: {
+    // v15 와 완전히 같은 창 — 이미 버전 15로 올라간 행은 전부 이 창 안에 있다.
+    fromUtc: "2026-09-20T15:00:00.000Z",
+    toUtc: null,
+    providers: null,
+    sourceVersions: [15],
+    diagnosticSets: [],
+    targetVersion: 16,
+    targetSet: "v16a",
+    informationalOnly: false,
+    autoOnly: true,
+    workspaceScope: "production",
+    reproFromStoredEvidence: true,
+  },
 };
 
 export const RESCORE_JOB_IDS = Object.keys(RESCORE_JOBS) as RescoreJobId[];
@@ -188,12 +229,14 @@ export function isRescoreJobId(value: unknown): value is RescoreJobId {
  * ⛔ D0-b(계획 v2 §3-2) — 14 를 여기 등록하지 않으면 `v15`(sourceVersions: [14])를 정의하는
  * 순간 jobHash 가 "재현 세트가 없는 소스 버전" 예외를 던져 잡 목록을 읽는 모든 경로(meta·
  * preflight·sweep)가 깨진다. 등록해도 예외를 피하면 전 행이 unmapped-version 이 된다.
+ * 같은 이유로 15 도 등록한다 — v16(sourceVersions: [15])이 같은 D0-b 함정에 걸린다.
  */
 export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   8: "legacy8",
   10: "full10",
   12: "v12b",
   14: "v14a",
+  15: "v15a",
 };
 
 export function reproSetForVersion(version: number): ScoreSetId | null {

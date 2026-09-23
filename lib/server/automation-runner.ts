@@ -41,7 +41,7 @@ import {
 } from "@/lib/server/visibility-score-sets";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
-import { collectPressEvidence } from "@/lib/server/press-domain-match";
+import { collectThirdPartyCitationEvidence } from "@/lib/server/press-domain-match";
 
 /**
  * (세트, 버전) 쌍 선택자 — 계획 geotracker-youtube-press-scoring-260923 §4-5(D8′).
@@ -66,6 +66,10 @@ export type ScoringProfile = {
 export const SCORING_PROFILES: Record<ScoringSetSwitch, ScoringProfile> = {
   v14a: { setId: "v14a", version: 14, applyOwnedCitationJudgment: false },
   v15a: { setId: "v15a", version: 15, applyOwnedCitationJudgment: true },
+  // v16a — 2026-09-23 언론·블로그·소셜 배점 확정. 구조만 갖춰 둔다(스위치를 실제로 v16a 로
+  // 올리는 것은 이번 작업 범위 밖 — 사장님 별도 승인). 켜지면 새 수집 응답이 scoreVersion
+  // 16 으로 직접 저장된다. 이미 버전 15 로 저장된 과거 행은 재산출 잡 v16 이 담당한다.
+  v16a: { setId: "v16a", version: 16, applyOwnedCitationJudgment: true },
 };
 
 export const DEFAULT_SCORING_SWITCH: ScoringSetSwitch = "v14a";
@@ -330,12 +334,24 @@ export type CitationJudgmentInput = {
   citedBrandDomains: string[];
 };
 
-/** resolveCitationJudgment 출력 — runs INSERT 컬럼 4개 + calcVisibilityFull 입력 2개를 겸한다. */
+/** resolveCitationJudgment 출력 — runs INSERT 컬럼 3개 + calcVisibilityFull 입력 3개(6개 키). */
 export type CitationJudgmentResult = {
   hasCitationOnly: boolean;
   citedOwnedVideoIds: string[];
   hasPressCitation: boolean;
   citedPressDomains: string[];
+  /**
+   * 블로그·소셜 추천 증거(제3자 인용 판정 재설계 — 2026-09-23). citedPressDomains 와 판정
+   * 조건은 같고 호스트가 소셜 플랫폼일 때만 여기로 간다. INSERT 컬럼(cited_social_domains)
+   * 저장용이면서 hasSocialCitation(아래)의 원천이기도 하다.
+   */
+  citedSocialDomains: string[];
+  /**
+   * 블로그·소셜 추천 신호 — calcVisibilityFull 입력. v16a 부터 실제 배점(35)이 붙는다
+   * (그 전 세트는 genNoMentionSocial·brandSocial 이 없어 항상 0). hasPressCitation 과 같은
+   * 이유로 스위치와 무관하게 항상 계산한다.
+   */
+  hasSocialCitation: boolean;
 };
 
 /**
@@ -377,17 +393,20 @@ export function resolveCitationJudgment(input: CitationJudgmentInput): CitationJ
   const hasCitationOnly =
     !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
 
-  // 언론(배포 매체) 인용 증거 — 2026-09-23 개정: 매체 도메인 allowlist 대신 "브랜드 언급 +
-  // 우리 소유 아님"으로 판정한다(press-domain-match.ts 참조). 스위치와 무관하게 항상
-  // 계산한다: 현행 전 세트의 배점이 0 이라(brandPress·genNoMentionPress) 점수에는 절대
-  // 영향이 없고, 대신 지금부터 증거가 쌓여야 나중에 배점을 켤지 실측으로 판단할 수 있다.
-  const pressEvidence = collectPressEvidence(citations, websites, ownedVideoIds, brandTerms);
+  // 제3자 인용 증거(언론 게재 · 블로그·소셜 추천) — 2026-09-23 3차 개정: "브랜드 언급 +
+  // 우리 소유 아님"인 인용을 호스트가 소셜 플랫폼인지로 나눠 둘 다 남긴다(press-domain-
+  // match.ts 참조 — 직전 개정은 소셜 플랫폼을 통째로 제외했으나, 그러면 블로거·소셜 추천
+  // 글까지 함께 버려진다). 스위치와 무관하게 항상 계산한다 — v14a·v15a 는 두 신호 모두
+  // 배점이 0 이라 점수에 영향이 없고, v16a 부터 실제 값(35)이 붙는다.
+  const thirdPartyEvidence = collectThirdPartyCitationEvidence(citations, websites, ownedVideoIds, brandTerms);
 
   return {
     hasCitationOnly,
     citedOwnedVideoIds,
-    hasPressCitation: pressEvidence.hasMatch,
-    citedPressDomains: pressEvidence.evidence,
+    hasPressCitation: thirdPartyEvidence.hasPressMatch,
+    citedPressDomains: thirdPartyEvidence.pressDomains,
+    citedSocialDomains: thirdPartyEvidence.socialDomains,
+    hasSocialCitation: thirdPartyEvidence.hasSocialMatch,
   };
 }
 
@@ -506,18 +525,25 @@ async function runOneProviderForPrompt(args: {
       // 일반 도메인: 호스트 문자열 포함만으로 매치
       return answerLower.includes(t.host);
     });
-    // 소유 유튜브 인용 병합 + 언론 인용 증거 — 순수 함수로 뽑은 resolveCitationJudgment 에
-    // 위임한다(독립 검수 지적 반영). 로직 자체는 이전과 동일 — 계획 §4-1·§4-2·§4-5·D1·D2·D3.
-    const { hasCitationOnly, citedOwnedVideoIds, hasPressCitation, citedPressDomains } =
-      resolveCitationJudgment({
-        citations,
-        scoringProfile,
-        ownedVideoIds,
-        websites: brandWebsites,
-        brandTerms,
-        hasBodyUrl,
-        citedBrandDomains,
-      });
+    // 소유 유튜브 인용 병합 + 제3자 인용 증거(언론·블로그·소셜) — 순수 함수로 뽑은
+    // resolveCitationJudgment 에 위임한다(독립 검수 지적 반영). 로직 자체는 이전과 동일 —
+    // 계획 §4-1·§4-2·§4-5·D1·D2·D3 + 2026-09-23 3차 개정(제3자 인용 판정 재설계).
+    const {
+      hasCitationOnly,
+      citedOwnedVideoIds,
+      hasPressCitation,
+      citedPressDomains,
+      citedSocialDomains,
+      hasSocialCitation,
+    } = resolveCitationJudgment({
+      citations,
+      scoringProfile,
+      ownedVideoIds,
+      websites: brandWebsites,
+      brandTerms,
+      hasBodyUrl,
+      citedBrandDomains,
+    });
 
     const visibilityScore = calcVisibilityFull(
       answerText,
@@ -530,6 +556,7 @@ async function runOneProviderForPrompt(args: {
       isBrandedQuery,
       scoringProfile.setId,
       hasPressCitation,
+      hasSocialCitation,
     );
 
     const inserted = await db
@@ -553,6 +580,7 @@ async function runOneProviderForPrompt(args: {
         citedCompetitorDomains,
         citedOwnedVideoIds,
         citedPressDomains,
+        citedSocialDomains,
         attachedBrandMentions: [],
         attachedCompetitorMentions: [],
         geolocation: sched.geolocation ?? null,
@@ -774,9 +802,10 @@ function findMentions(text: string, terms: string[]): string[] {
  * 계산기·상수는 lib/server/visibility-score-sets.ts 가 단일 정본이며,
  * 이 래퍼는 기존 호출부 시그니처를 유지하기 위한 얇은 어댑터다.
  *
- * scoreSetId·hasPressCitation 은 **선택 인자**(끝에 추가)다 — 기본값이 예전 상수
- * (CURRENT_SCORE_SET_ID="v14a"·hasPressCitation 없음)와 정확히 같으므로, 이 두 인자를
- * 모르는 기존 호출부(테스트 포함)는 인자를 그대로 두 채 동작이 완전히 같다.
+ * scoreSetId·hasPressCitation·hasSocialCitation 은 **선택 인자**(끝에 추가)다 — 기본값이
+ * 예전 상수(CURRENT_SCORE_SET_ID="v14a"·신호 없음)와 정확히 같으므로, 이 인자들을 모르는
+ * 기존 호출부(테스트 포함)는 인자를 그대로 두 채 동작이 완전히 같다(hasSocialCitation 은
+ * 2026-09-23 v16a 도입과 함께 추가).
  */
 export function calcVisibilityFull(
   text: string,
@@ -789,6 +818,7 @@ export function calcVisibilityFull(
   isBrandedQuery: boolean,
   scoreSetId: ScoreSetId = DEFAULT_SCORING_SWITCH,
   hasPressCitation: boolean = false,
+  hasSocialCitation: boolean = false,
 ): number {
   return calcVisibilityFromText(
     text,
@@ -801,6 +831,7 @@ export function calcVisibilityFull(
     isBrandedQuery,
     SCORE_SETS[scoreSetId],
     hasPressCitation,
+    hasSocialCitation,
   );
 }
 

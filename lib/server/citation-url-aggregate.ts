@@ -19,6 +19,15 @@
  * 소유 뷰와 언급 뷰는 "행별 포함 판정(keep predicate)" 만 다르고, 정규화·dedup·집계·정렬·
  * keyset 페이지네이션은 완전히 동일하다 → 공유 core(aggregateUrlsCore·aggregatePromptsCore)로
  * 단일화하고, 두 뷰는 keep predicate 만 주입하는 얇은 래퍼로 둔다 (로직 중복·드리프트 제거).
+ *
+ * 2026-09-23 개정 — 언급 뷰(aggregateBrandMentionUrls·aggregateMentionPromptsForUrl)의 소유
+ * 제외 판정에 press-domain-match.ts 의 isOwnedCitationUrl 을 추가로 적용한다. 기존
+ * isBrandCitationKey(호스트/핸들)·owned(유튜브)만으로도 대부분 같은 결과를 내지만, "제3자
+ * 인용" 판정을 이 화면과 언론/블로그·소셜 분류(press-domain-match.ts)가 각자 계산하면
+ * 한쪽만 고쳐졌을 때 소리 없이 어긋난다 — 이번 재설계의 발단이 정확히 그 어긋남이었다.
+ * 두 곳이 같은 함수를 쓰게 해 그 위험을 없앤다. ⚠️ 개별 콘텐츠 URL(instagram.com/p/<id>
+ * 등)처럼 경로에 채널 핸들이 없는 형태는 이 판정으로도 소유를 못 가린다 — 받아들이는
+ * 한계다(press-domain-match.ts 헤더 주석 참조).
  */
 
 import { SOCIAL_PLATFORM_DOMAINS, isBrandMentionMatch } from "@/components/dashboard/citation-utils";
@@ -26,6 +35,7 @@ import {
   extractYoutubeVideoId,
   canonicalYoutubeWatchUrl,
 } from "@/lib/server/youtube-video-match";
+import { isOwnedCitationUrl } from "@/lib/server/press-domain-match";
 
 /** promptText 가 null/공백일 때 표시할 라벨 (계획 M-1) */
 export const EMPTY_PROMPT_LABEL = "(제목 없는 질문)";
@@ -621,12 +631,17 @@ export function aggregateBrandMentionUrls(
   rows: CitationRow[],
   opts: MentionAggregateOptions,
 ): MentionAggregateResult {
+  const ownWebsiteKeys = [...opts.brandKeySet];
   const core = aggregateUrlsCore(rows, {
-    // 언급 판정 + 소유(내 사이트) 아님 + 소유 유튜브 영상 아님(!owned) → 제3자 언급만(R5·중복 방지).
+    // 언급 판정 + 소유(내 사이트) 아님 + 소유 유튜브 영상 아님(!owned) → 제3자 언급만(R5·중복
+    // 방지). isOwnedCitationUrl 은 press-domain-match.ts 와 공유하는 판정을 원본 raw URL 에
+    // 한 번 더 적용한다(2026-09-23 개정 — 위 헤더 주석 참조). 기존 두 조건과 겹치는 경우가
+    // 대부분이라 결과가 좁아지는 방향으로만 작동한다(과다 제외 없음).
     keep: (row, norm, owned) =>
       isBrandMentionText(row.title, row.description, opts.brandTerms) &&
       !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet) &&
-      !owned,
+      !owned &&
+      !isOwnedCitationUrl(row.url ?? row.domain, ownWebsiteKeys, opts.ownedVideoIds),
     ownedVideoIds: opts.ownedVideoIds,
     promptInlineLimit: opts.promptInlineLimit,
     pageSize: opts.pageSize,
@@ -840,11 +855,15 @@ export function aggregateMentionPromptsForUrl(
   targetCanonicalUrlKey: string,
   opts: MentionPromptsOptions,
 ): PromptPageResult {
+  const ownWebsiteKeys = [...opts.brandKeySet];
   return aggregatePromptsCore(rows, targetCanonicalUrlKey, {
+    // isOwnedCitationUrl 추가 이유는 aggregateBrandMentionUrls 와 동일(위 헤더 주석 참조) —
+    // 이 드릴다운이 그 목록의 URL 을 대상으로 하므로 같은 keep 조건을 유지해야 한다.
     keep: (row, norm, owned) =>
       isBrandMentionText(row.title, row.description, opts.brandTerms) &&
       !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet) &&
-      !owned,
+      !owned &&
+      !isOwnedCitationUrl(row.url ?? row.domain, ownWebsiteKeys, opts.ownedVideoIds),
     ownedVideoIds: opts.ownedVideoIds,
     pageSize: opts.pageSize,
     cursor: opts.cursor,

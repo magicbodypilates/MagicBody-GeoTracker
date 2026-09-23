@@ -213,3 +213,91 @@ describe("경계·엣지", () => {
     expect(score({ text: "요가원 소개", brandTerms: ["요가원"], sentiment: "neutral" })).toBe(83);
   });
 });
+
+/* ============================================================
+ * scoreSetId·hasPressCitation — 계획 v2 §4-5·§5 Step 5 신규 선택 인자
+ * ============================================================ */
+
+describe("calcVisibilityFull — scoreSetId·hasPressCitation 선택 인자(끝에 추가)", () => {
+  it("두 인자를 생략하면 기존 9-인자 호출부와 동작이 완전히 같다(v14a·언론 미반영)", () => {
+    const withDefaults = calcVisibilityFull(
+      "브랜드 미언급 답변",
+      ["요가원"],
+      false,
+      true, // hasCitationOnly
+      "not-mentioned",
+      false,
+      false,
+      false,
+    );
+    const explicitV14a = calcVisibilityFull(
+      "브랜드 미언급 답변",
+      ["요가원"],
+      false,
+      true,
+      "not-mentioned",
+      false,
+      false,
+      false,
+      "v14a",
+      false,
+    );
+    expect(withDefaults).toBe(explicitV14a);
+    expect(withDefaults).toBe(45); // v14a.genNoMentionCitation
+  });
+
+  it("scoreSetId=\"v15a\" 를 명시하면 v15a 세트로 계산한다(현재는 v14a 와 값이 같다)", () => {
+    const viaV14a = calcVisibilityFull(
+      "요가원 소개",
+      ["요가원"],
+      false,
+      false,
+      "neutral",
+      false,
+      false,
+      false,
+      "v14a",
+    );
+    const viaV15a = calcVisibilityFull(
+      "요가원 소개",
+      ["요가원"],
+      false,
+      false,
+      "neutral",
+      false,
+      false,
+      false,
+      "v15a",
+    );
+    expect(viaV15a).toBe(viaV14a);
+  });
+
+  it("hasPressCitation=true 는 현재 배점 0 인 v14a·v15a 에서 점수에 영향이 없다", () => {
+    const off = calcVisibilityFull(
+      "브랜드 미언급 답변",
+      ["요가원"],
+      false,
+      false,
+      "not-mentioned",
+      false,
+      false,
+      false,
+      "v14a",
+      false,
+    );
+    const on = calcVisibilityFull(
+      "브랜드 미언급 답변",
+      ["요가원"],
+      false,
+      false,
+      "not-mentioned",
+      false,
+      false,
+      false,
+      "v14a",
+      true,
+    );
+    expect(on).toBe(off);
+    expect(on).toBe(0);
+  });
+});

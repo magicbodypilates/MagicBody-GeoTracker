@@ -26,7 +26,12 @@ import { NextRequest } from "next/server";
 
 const H = vi.hoisted(() => {
   type Row = Record<string, unknown>;
-  const store: { runs: Row[]; workspaces: Row[] } = { runs: [], workspaces: [] };
+  const store: { runs: Row[]; workspaces: Row[]; brandYoutubeVideos: Row[] } = {
+    runs: [],
+    workspaces: [],
+    brandYoutubeVideos: [],
+  };
+  type TableName = "runs" | "workspaces" | "brandYoutubeVideos";
 
   /** 트랜잭션 진입 직후 1회 실행 — 조회와 UPDATE 사이의 제3자 변경 재현. */
   let beforeTransaction: (() => void) | null = null;
@@ -199,7 +204,7 @@ const H = vi.hoisted(() => {
     orders: Order[],
     limit: number | undefined,
   ) => {
-    let rows = store[table.__table as "runs" | "workspaces"].filter((r) => match(r, where));
+    let rows = store[table.__table as TableName].filter((r) => match(r, where));
     const hasAgg = Object.values(proj).some((v) => isAggProj(v));
     if (hasAgg) return [projectRow(rows[0] ?? {}, proj, rows.length)];
 
@@ -277,7 +282,7 @@ const H = vi.hoisted(() => {
       then(res: (v: unknown) => void, rej?: (e: unknown) => void) {
         try {
           updateSetKeys.push(Object.keys(st.vals ?? {}));
-          const rows = store[table.__table as "runs" | "workspaces"];
+          const rows = store[table.__table as TableName];
           const matched = rows.filter((r) => match(r, st.where));
           if (throwOnUpdateId && matched.some((r) => r.id === throwOnUpdateId)) {
             throw new Error("배치 중간 실패 재현");
@@ -338,6 +343,9 @@ const H = vi.hoisted(() => {
       "createdAt",
     ]),
     workspaces: mkTable("workspaces", ["id", "brandConfig", "isProduction"]),
+    // __table 은 store 의 프로퍼티 키(camelCase)와 일치해야 한다 — runSelect/updateBuilder 가
+    // store[table.__table] 로 조회하기 때문이다(runs·workspaces 도 이 관례를 따른다).
+    brandYoutubeVideos: mkTable("brandYoutubeVideos", ["id", "workspaceId", "videoId", "isActive"]),
   };
 
   const P = (op: string, extra: Record<string, unknown>) => ({ __pred: true as const, op, ...extra });
@@ -376,6 +384,7 @@ const H = vi.hoisted(() => {
   const reset = () => {
     store.runs = [];
     store.workspaces = [];
+    store.brandYoutubeVideos = [];
     beforeTransaction = null;
     throwOnUpdateId = null;
     updateSetKeys.length = 0;
@@ -408,6 +417,7 @@ vi.mock("drizzle-orm", async (importOriginal) => {
 import { POST } from "./route";
 import { RESCORE_JOBS, jobHash, promptKey } from "@/lib/server/visibility-rescore-jobs";
 import { SCORE_SETS, calcVisibilityWithSet } from "@/lib/server/visibility-score-sets";
+import { _clearOwnedVideoCache } from "@/lib/server/brand-youtube-videos";
 
 /* ============================================================
  * 픽스처
@@ -435,6 +445,7 @@ const genInputs = (isTopRanked: boolean) => ({
   isTopRanked,
   isStronglyRecommended: false,
   isBrandedQuery: false,
+  hasPressCitation: false,
 });
 
 /** 저장 점수 앵커 — 손계산과 계산기가 일치하는지 테스트가 먼저 확인한다. */
@@ -460,6 +471,8 @@ type SeedOpts = {
   answer?: string;
   /** 마이크로초까지 있는 created_at — 실 DB 의 해상도를 재현할 때만 준다. */
   createdAtUs?: string;
+  /** v15(소유 유튜브·언론) 테스트 전용 — 기본은 빈 배열. */
+  citations?: { url?: string | null; domain?: string | null; title?: string | null; description?: string | null }[];
 };
 
 function seedRun(n: number, opts: SeedOpts = {}) {
@@ -469,7 +482,7 @@ function seedRun(n: number, opts: SeedOpts = {}) {
     promptText: opts.promptText ?? GEN_PROMPT,
     provider: opts.provider ?? "google_ai",
     answer: opts.answer ?? GEN_ANSWER,
-    citations: [] as unknown[],
+    citations: opts.citations ?? ([] as unknown[]),
     sentiment: opts.sentiment ?? "neutral",
     visibilityScore: opts.score ?? STORED_V10,
     scoreVersion: opts.version ?? 10,
@@ -485,6 +498,16 @@ function seedRun(n: number, opts: SeedOpts = {}) {
 function seedWorkspaces() {
   H.store.workspaces.push({ id: WS_PROD, brandConfig: BRAND_CONFIG, isProduction: true });
   H.store.workspaces.push({ id: WS_TEST, brandConfig: BRAND_CONFIG, isProduction: false });
+}
+
+/** v15 테스트 전용 — 소유 유튜브 영상 시드(brand_youtube_videos). */
+function seedOwnedVideo(workspaceId: string, videoId: string, isActive = true) {
+  H.store.brandYoutubeVideos.push({
+    id: `owned-${videoId}`,
+    workspaceId,
+    videoId,
+    isActive,
+  });
 }
 
 function post(body: unknown, headers: Record<string, string> = {}): NextRequest {
@@ -505,6 +528,9 @@ const ORIGINAL_PORT = process.env.PORT;
 
 beforeEach(() => {
   H.reset();
+  // getOwnedYoutubeVideoIds 는 모듈 레벨 TTL 캐시(60s)를 쓴다 — 비우지 않으면 이전 테스트의
+  // 소유 영상 Set 이 다음 테스트로 새어 들어간다(브랜드 워크스페이스 id 는 매번 같으므로).
+  _clearOwnedVideoCache();
   process.env.INTERNAL_CRON_SECRET = SECRET;
   process.env.PORT = "3000";
   seedWorkspaces();
@@ -671,9 +697,11 @@ describe("(i) 도달 제어·인증 게이트", () => {
   });
 
   it("없는 잡 id → 400", async () => {
-    expect((await POST(post({ job: "v15" }))).status).toBe(400);
+    // ⛔ D0-b(계획 §5 Step 6) — v15 는 이제 등록된 잡이다. 존재하지 않는 잡 id 예시는 v16 으로.
+    expect((await POST(post({ job: "v16" }))).status).toBe(400);
     expect((await POST(post({ job: "v14t" }))).status).toBe(400);
     expect((await POST(post({ job: "v13t" }))).status).toBe(400);
+    expect((await POST(post({ job: "v15t" }))).status).toBe(400);
     expect((await POST(post({}))).status).toBe(400);
     expect((await POST(post({ job: 11 }))).status).toBe(400);
   });
@@ -1485,5 +1513,169 @@ describe("v12 잡 — 전 provider · 브랜드 질의 포함", () => {
     const r = H.store.runs[0];
     expect(r.visibilityScore).toBe(34); // 값 불변
     expect(r.scoreVersion).toBe(12); // 버전만 전진
+  });
+});
+
+/* ============================================================
+ * v15 잡 — 계획 geotracker-youtube-press-scoring-260923 §5 Step 6
+ *
+ * v11~v14 와 달리 v15 는 job.applyOwnedCitationJudgment=true 라 targetBase 가 reproBase 와
+ * 갈린다(D0). 이 블록은 그 새 판정이 실제로 라우트를 관통해 (a) 점수를 바꾸고 (b) 증거
+ * 컬럼을 동시 백필하고 (c) 언론은 점수를 안 바꾸면서도 증거는 남기고 (d) 스위치가 꺼진
+ * 잡(v14)은 owned-video 데이터가 있어도 전혀 영향받지 않는지를 검증한다.
+ * ============================================================ */
+
+describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
+  const v15At = (m: number) => new Date(new Date("2026-08-24T03:00:00.000Z").getTime() + m * 60_000);
+  const OWNED_ID = "dQw4w9WgXcQ";
+
+  it("meta: 소스 버전 14 · 목표 v15a · jobHash 가 v14 와 다르다(D0-b 회귀 없음)", async () => {
+    const body = await (await POST(post({ job: "v15", meta: true }))).json();
+    expect(body.mode).toBe("meta");
+    expect(body.sourceVersions).toEqual([14]);
+    expect(body.targetVersion).toBe(15);
+    expect(body.targetSet).toBe("v15a");
+    expect(body.jobHash).toBe(jobHash("v15"));
+    expect(body.jobHash).not.toBe(jobHash("v14"));
+  });
+
+  it("소유 유튜브 인용도 언론 설정도 없으면 v15a 출력이 v14a 와 완전히 같다(동작 변화 0)", async () => {
+    // 일반 검색·언급 0·URL 신호 전혀 없음 — 옛 판정·새 판정이 똑같이 0 을 만든다.
+    seedRun(1, { version: 14, score: 0, createdAt: v15At(1), answer: "무관한 답변" });
+    const b = await (await POST(post({ job: "v15", apply: true, batchSize: 200 }))).json();
+    expect(b.processed).toBe(1);
+    expect(b.updated).toBe(1);
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(0);
+    expect(r.scoreVersion).toBe(15);
+    expect(r.citedOwnedVideoIds).toEqual([]);
+    expect(r.citedPressDomains).toEqual([]);
+  });
+
+  it("소유 유튜브 영상 인용 — hasCitationOnly 로 접혀 점수가 45 로 뛰고 증거가 백필된다", async () => {
+    seedOwnedVideo(WS_PROD, OWNED_ID);
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v15At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [{ url: `https://youtu.be/${OWNED_ID}` }],
+    });
+
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.processed).toBe(1);
+    expect(b.anomalies).toHaveLength(0);
+    const change = b.changes[0];
+    expect(change.before).toBe(0);
+    expect(change.after).toBe(45); // v14a·v15a genNoMentionCitation
+    expect(change.citedOwnedVideoIds).toEqual([OWNED_ID]);
+    expect(change.citedPressDomains).toEqual([]);
+
+    // apply 로도 동일하게 적용되는지 별도 확인
+    const applied = await (await POST(post({ job: "v15", apply: true, batchSize: 200 }))).json();
+    expect(applied.updated).toBe(1);
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(45);
+    expect(r.scoreVersion).toBe(15);
+    expect(r.citedOwnedVideoIds).toEqual([OWNED_ID]);
+  });
+
+  it("소유 영상이 아닌 유튜브 인용은 여전히 미판정(오탐 없음)", async () => {
+    seedOwnedVideo(WS_PROD, OWNED_ID); // 다른 영상만 소유
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v15At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [{ url: "https://youtu.be/aBcD_eF-123" }], // 소유 아님
+    });
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.changes[0].after).toBe(0); // 점수 불변
+    expect(b.changes[0].citedOwnedVideoIds).toEqual([]);
+  });
+
+  it("언론(배포 매체) 인용 — 증거는 백필되지만 배점이 0 이라 점수는 안 바뀐다", async () => {
+    H.store.workspaces.length = 0;
+    H.store.workspaces.push({
+      id: WS_PROD,
+      brandConfig: { ...BRAND_CONFIG, pressDomains: ["press-wire.example"] },
+      isProduction: true,
+    });
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v15At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [
+        { url: "https://press-wire.example/a", title: "요가원 관련 보도", description: null },
+      ],
+    });
+
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.changes[0].before).toBe(0);
+    expect(b.changes[0].after).toBe(0); // 배점 0 — 점수 불변(계획 D4′)
+    expect(b.changes[0].citedOwnedVideoIds).toEqual([]);
+    expect(b.changes[0].citedPressDomains).toEqual(["press-wire.example:title"]);
+  });
+
+  it("미등록 매체의 언론성 인용은 증거로도 남지 않는다", async () => {
+    H.store.workspaces.length = 0;
+    H.store.workspaces.push({
+      id: WS_PROD,
+      brandConfig: { ...BRAND_CONFIG, pressDomains: ["press-wire.example"] },
+      isProduction: true,
+    });
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v15At(1),
+      answer: "무관한 답변",
+      citations: [{ url: "https://unregistered-outlet.example/a", title: "요가원 관련" }],
+    });
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.changes[0].citedPressDomains).toEqual([]);
+  });
+
+  it("응답에 pressCfgFingerprint·ownedVideoFingerprint 가 실린다(v15 만 소유 영상 지문 계산)", async () => {
+    seedOwnedVideo(WS_PROD, OWNED_ID);
+    seedRun(1, { version: 14, createdAt: v15At(1), score: 0, answer: "무관" });
+    const b = await (await POST(post({ job: "v15", dryRun: true }))).json();
+    expect(b.pressCfgFingerprint).toMatch(/^[0-9a-f]{12}$/);
+    expect(b.ownedVideoFingerprint).toMatchObject({ count: 1 });
+    expect(b.ownedVideoFingerprint.hash).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("v14 잡은 소유 영상 데이터가 있어도 전혀 영향받지 않는다(스위치 꺼짐 · ownedVideoFingerprint null)", async () => {
+    seedOwnedVideo(WS_PROD, OWNED_ID);
+    // v14 의 소스는 버전 12 — 같은 소유 영상을 인용해도 v14 는 옛 판정만 쓴다.
+    seedRun(1, {
+      version: 12,
+      score: 0,
+      createdAt: new Date("2026-08-24T03:00:00.000Z"),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [{ url: `https://youtu.be/${OWNED_ID}` }],
+    });
+    const b = await (await POST(post({ job: "v14", dryRun: true, batchSize: 200 }))).json();
+    expect(b.changes[0].before).toBe(0);
+    expect(b.changes[0].after).toBe(0); // 소유 영상이 있어도 v14 는 절대 반영하지 않는다
+    expect(b.changes[0].citedOwnedVideoIds).toBeUndefined();
+    expect(b.changes[0].citedPressDomains).toBeUndefined();
+    expect(b.ownedVideoFingerprint).toBeNull();
+  });
+
+  it("apply 시에도 v14 는 증거 컬럼을 건드리지 않는다(UPDATE SET 절에서 제외)", async () => {
+    seedOwnedVideo(WS_PROD, OWNED_ID);
+    seedRun(1, {
+      version: 12,
+      score: 0,
+      createdAt: new Date("2026-08-24T03:00:00.000Z"),
+      answer: "무관한 답변",
+      citations: [{ url: `https://youtu.be/${OWNED_ID}` }],
+    });
+    await POST(post({ job: "v14", apply: true, batchSize: 200 }));
+    for (const keys of H.updateSetKeys) {
+      expect(keys).not.toContain("citedOwnedVideoIds");
+      expect(keys).not.toContain("citedPressDomains");
+    }
   });
 });

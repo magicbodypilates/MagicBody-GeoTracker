@@ -14,6 +14,8 @@ import {
   configFingerprint,
   isRescoreJobId,
   jobHash,
+  ownedVideoListFingerprint,
+  pressDomainFingerprint,
   reproSetForVersion,
   type RescoreJobId,
 } from "./visibility-rescore-jobs";
@@ -31,12 +33,14 @@ function inWindow(iso: string, jobId: RescoreJobId): boolean {
 }
 
 describe("잡 id 는 닫힌 집합", () => {
-  it("등록된 다섯 잡만 통과", () => {
-    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t", "v13", "v14"]);
+  it("등록된 여섯 잡만 통과(D0-b 이후 v15 추가)", () => {
+    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t", "v13", "v14", "v15"]);
     for (const id of RESCORE_JOB_IDS) expect(isRescoreJobId(id)).toBe(true);
-    expect(isRescoreJobId("v15")).toBe(false);
+    expect(isRescoreJobId("v15")).toBe(true);
+    expect(isRescoreJobId("v16")).toBe(false);
     expect(isRescoreJobId("v14t")).toBe(false);
     expect(isRescoreJobId("v13t")).toBe(false);
+    expect(isRescoreJobId("v15t")).toBe(false);
     expect(isRescoreJobId("V14")).toBe(false);
     expect(isRescoreJobId("V11")).toBe(false);
     expect(isRescoreJobId("V13")).toBe(false);
@@ -77,13 +81,18 @@ describe("잡 정의 불변식", () => {
     }
   });
 
-  it("REPRO_SET_BY_VERSION 은 8·10·12 를 매핑한다(11·13·14·112 는 재산출 대상 밖)", () => {
-    expect(REPRO_SET_BY_VERSION).toEqual({ 8: "legacy8", 10: "full10", 12: "v12b" });
-    // 12 는 v14 잡의 소스 버전이라 재현 세트가 반드시 있어야 한다.
+  it("REPRO_SET_BY_VERSION 은 8·10·12·14 를 매핑한다(11·13·112 는 재산출 대상 밖) — D0-b", () => {
+    expect(REPRO_SET_BY_VERSION).toEqual({
+      8: "legacy8",
+      10: "full10",
+      12: "v12b",
+      14: "v14a",
+    });
+    // 12 는 v14 잡의, 14 는 v15 잡의 소스 버전이라 재현 세트가 반드시 있어야 한다.
     expect(reproSetForVersion(12)).toBe("v12b");
+    expect(reproSetForVersion(14)).toBe("v14a"); // D0-b — 등록 전엔 여기가 null 이었다
     expect(reproSetForVersion(11)).toBeNull();
     expect(reproSetForVersion(13)).toBeNull();
-    expect(reproSetForVersion(14)).toBeNull();
     expect(reproSetForVersion(112)).toBeNull();
     expect(reproSetForVersion(114)).toBeNull();
     expect(reproSetForVersion(0)).toBeNull();
@@ -96,11 +105,12 @@ describe("잡 정의 불변식", () => {
     expect(ms(v11.toUtc as string)).toBeLessThanOrEqual(ms(v12.fromUtc));
   });
 
-  it("workspaceScope — 운영 잡 4개 · 카나리 1개", () => {
+  it("workspaceScope — 운영 잡 5개 · 카나리 1개", () => {
     expect(RESCORE_JOBS.v11.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v13.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v14.workspaceScope).toBe("production");
+    expect(RESCORE_JOBS.v15.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12t.workspaceScope).toBe("non-production");
   });
 
@@ -115,6 +125,18 @@ describe("잡 정의 불변식", () => {
     expect(byVersion.get(11)).toEqual(["v11"]);
     expect(byVersion.get(13)).toEqual(["v13"]);
     expect(byVersion.get(14)).toEqual(["v14"]);
+    expect(byVersion.get(15)).toEqual(["v15"]);
+  });
+
+  it("applyOwnedCitationJudgment — v15 만 true, 나머지는 없거나(undefined) false", () => {
+    // v11~v14 는 필드 자체를 생략한다(jobHash 가 job 객체 전체를 해시하므로, 이미 운영에
+    // 적용된 잡에 필드를 추가하면 지문이 바뀐다 — 아래 "지문 고정 앵커" 참조).
+    for (const id of RESCORE_JOB_IDS) {
+      expect(!!RESCORE_JOBS[id].applyOwnedCitationJudgment).toBe(id === "v15");
+    }
+    expect(RESCORE_JOBS.v11.applyOwnedCitationJudgment).toBeUndefined();
+    expect(RESCORE_JOBS.v14.applyOwnedCitationJudgment).toBeUndefined();
+    expect(RESCORE_JOBS.v15.applyOwnedCitationJudgment).toBe(true);
   });
 
   /**
@@ -182,6 +204,45 @@ describe("잡 정의 불변식", () => {
   it("v14 의 진단 세트는 비어 있다(소스 세트가 하나뿐이라 교차 진단이 무의미)", () => {
     expect(RESCORE_JOBS.v14.diagnosticSets).toEqual([]);
     expect(RESCORE_JOBS.v11.diagnosticSets).toEqual(["legacy8", "full10"]);
+  });
+
+  /**
+   * ⛔ D0-b 회귀 고정(계획 v2 §3-2·§5 Step 6) — v15 는 소스 버전 14 하나를 받는다.
+   * REPRO_SET_BY_VERSION 에 14 가 없으면 jobHash("v15") 호출 자체가 예외를 던진다
+   * (jobHash 의 "재현 세트가 없는 소스 버전" 가드). 이 테스트가 통과한다는 것 자체가
+   * D0-b 가 고쳐져 있다는 증거다.
+   */
+  it("v15 는 v14 와 대상 창이 완전히 같고 소스 버전·목표·진단 세트만 다르다", () => {
+    const a = RESCORE_JOBS.v14;
+    const b = RESCORE_JOBS.v15;
+    const scopeOf = (job: typeof a) => ({
+      fromUtc: job.fromUtc,
+      toUtc: job.toUtc,
+      providers: job.providers,
+      informationalOnly: job.informationalOnly,
+      autoOnly: job.autoOnly,
+      workspaceScope: job.workspaceScope,
+      diagnosticSets: job.diagnosticSets,
+    });
+    // 대상 창(fromUtc·toUtc)이 v14 와 완전히 같다 — "현행 세트 구간 전체"가 대상이다(D7).
+    expect(scopeOf(b)).toEqual(scopeOf(a));
+
+    expect(b.sourceVersions).toEqual([14]);
+    expect(b.sourceVersions).toEqual([a.targetVersion]);
+    expect(b.targetVersion).toBe(15);
+    expect(b.targetSet).toBe("v15a");
+    expect(b.sourceVersions).not.toContain(b.targetVersion);
+    expect(b.applyOwnedCitationJudgment).toBe(true);
+    expect(a.applyOwnedCitationJudgment).toBeUndefined();
+
+    // D0-b 회귀 — 예외 없이 해시가 생성된다(등록 전이었다면 여기서 throw 했다).
+    expect(() => jobHash("v15")).not.toThrow();
+    expect(jobHash("v15")).toMatch(/^[0-9a-f]{12}$/);
+    expect(jobHash("v15")).not.toBe(jobHash("v14"));
+  });
+
+  it("v15 의 진단 세트도 v14 와 같은 이유로 비어 있다(소스 세트가 하나뿐)", () => {
+    expect(RESCORE_JOBS.v15.diagnosticSets).toEqual([]);
   });
 
   it("카나리 잡은 운영 잡 v12 와 범위 정의가 동일하다(스코프만 다름)", () => {
@@ -312,6 +373,46 @@ describe("jobHash / configFingerprint", () => {
       SCORE_SETS[RESCORE_JOBS.v12.targetSet],
     );
   });
+
+  it("모든 등록 잡의 해시가 서로 다르다(v15 포함)", () => {
+    const hashes = RESCORE_JOB_IDS.map((id) => jobHash(id));
+    expect(new Set(hashes).size).toBe(hashes.length);
+    expect(hashes.length).toBe(6);
+  });
+});
+
+/**
+ * 계획 v2 §4-4(D6 보강) — 매체 목록·소유 영상 목록 지문. configFingerprint 와 별개 필드로
+ * 신설한 이유는 기존 지문의 payload 를 바꾸면 과거 감사 파일과 값이 달라지기 때문이다.
+ */
+describe("pressDomainFingerprint / ownedVideoListFingerprint", () => {
+  it("pressDomainFingerprint 는 순서에 무관하고 내용이 바뀌면 달라진다", () => {
+    const a = pressDomainFingerprint(["b.example", "a.example"]);
+    const b = pressDomainFingerprint(["a.example", "b.example"]);
+    const c = pressDomainFingerprint(["a.example"]);
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+    expect(a).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("pressDomainFingerprint 는 빈 목록도 안전하게 처리한다", () => {
+    expect(pressDomainFingerprint([])).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("ownedVideoListFingerprint 는 개수 + 순서 무관 해시를 반환하고 원문을 담지 않는다", () => {
+    const a = ownedVideoListFingerprint(["id2", "id1"]);
+    const b = ownedVideoListFingerprint(["id1", "id2"]);
+    const c = ownedVideoListFingerprint(["id1"]);
+    expect(a.count).toBe(2);
+    expect(a.hash).toBe(b.hash); // 순서 무관
+    expect(a.hash).not.toBe(c.hash);
+    expect(c.count).toBe(1);
+    expect(a.hash).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("ownedVideoListFingerprint 는 빈 목록에서 count 0", () => {
+    expect(ownedVideoListFingerprint([])).toMatchObject({ count: 0 });
+  });
 });
 
 describe("검증 창 — 잡 정의에서 파생", () => {
@@ -350,6 +451,10 @@ describe("검증 창 — 잡 정의에서 파생", () => {
     const b = buildVerificationWindows("v14").find((x) => x.key === "target")!;
     expect(ms(b.fromUtc as string)).toBeGreaterThan(ms(a.fromUtc as string));
     expect(b.toUtc).toBe(a.toUtc);
+  });
+
+  it("v15: 대상 창이 v14 와 완전히 같다(현행 세트 구간 전체가 대상 — D7)", () => {
+    expect(buildVerificationWindows("v15")).toEqual(buildVerificationWindows("v14"));
   });
 
   it("v12: provider 를 좁히지 않으므로 other-providers 창이 없다", () => {

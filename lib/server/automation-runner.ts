@@ -32,20 +32,55 @@ import {
   SOCIAL_PLATFORM_DOMAINS,
 } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
-import type { Schedule, Prompt } from "@/drizzle/schema";
+import type { Schedule, Prompt, BrandConfig } from "@/drizzle/schema";
 import { buildCollectionBrandTerms } from "@/lib/server/branded-query-filter";
 import {
   calcVisibilityFromText,
   SCORE_SETS,
   type ScoreSetId,
 } from "@/lib/server/visibility-score-sets";
+import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
+import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
+import { collectPressEvidence, normalizePressDomains } from "@/lib/server/press-domain-match";
 
 /**
- * 신규 수집이 사용하는 룰 세트와 그 세트를 가리키는 score_version.
- * 두 값은 반드시 함께 바뀐다(버전이 계산 룰의 provenance 이기 때문).
+ * (세트, 버전) 쌍 선택자 — 계획 geotracker-youtube-press-scoring-260923 §4-5(D8′).
+ *
+ * 워크스페이스 brandConfig.scoringSetSwitch 값 **하나**가 세트·버전·유튜브 판정 적용
+ * 여부를 통째로 고른다. 불리언 스위치 대신 쌍으로 묶은 이유는, 그래야 "세트와 버전은
+ * 항상 한 쌍"(v1 D8)이 문서상 약속이 아니라 이 테이블 하나로 구조로 강제되기 때문이다.
+ *
+ * 꺼짐(기본, v14a) 이 applyOwnedCitationJudgment: false 인 이유 — v14a 의 인용 배점
+ * (genNoMentionCitation·brandCitation)은 0 이 아니다. 스위치가 꺼진 상태에서 소유 유튜브
+ * 인용을 hasCitationOnly 에 접으면 점수가 바뀌어 "현행과 완전히 동일"(§4-5)이 깨진다.
  */
-const CURRENT_SCORE_SET_ID: ScoreSetId = "v14a";
-const CURRENT_SCORE_VERSION = 14;
+export type ScoringSetSwitch = NonNullable<BrandConfig["scoringSetSwitch"]>;
+
+export type ScoringProfile = {
+  setId: ScoreSetId;
+  version: number;
+  /** true 면 소유 유튜브 인용을 hasCitationOnly 에 접는다. */
+  applyOwnedCitationJudgment: boolean;
+};
+
+export const SCORING_PROFILES: Record<ScoringSetSwitch, ScoringProfile> = {
+  v14a: { setId: "v14a", version: 14, applyOwnedCitationJudgment: false },
+  v15a: { setId: "v15a", version: 15, applyOwnedCitationJudgment: true },
+};
+
+export const DEFAULT_SCORING_SWITCH: ScoringSetSwitch = "v14a";
+
+/**
+ * brandConfig 의 원시 스위치 값 → 안전한 프로파일. 미지정·오타는 항상 기본값(꺼짐)으로
+ * 떨어진다. export 하는 이유 — 순수 함수라 automation-runner.test.ts 가 DB 없이
+ * 직접 단위 테스트한다(테스트 가능 구조).
+ */
+export function resolveScoringProfile(
+  scoringSetSwitch: ScoringSetSwitch | undefined,
+): ScoringProfile {
+  const key: ScoringSetSwitch = scoringSetSwitch === "v15a" ? "v15a" : DEFAULT_SCORING_SWITCH;
+  return SCORING_PROFILES[key];
+}
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */
 export const DEFAULT_CRON = "0 0,12 * * *";
@@ -206,6 +241,18 @@ async function executeSchedule(
   const competitorTerms = competitors.flatMap((c) => [c.name, ...(c.aliases ?? [])]).filter(Boolean);
   const competitorWebsites = competitors.flatMap((c) => c.websites ?? []);
 
+  // (세트·버전) 쌍 선택 — 계획 §4-5. 미지정이면 기본 v14a(꺼짐)로 떨어진다.
+  const scoringProfile = resolveScoringProfile(ws.brandConfig.scoringSetSwitch);
+  // 언론 도메인 — 스위치와 무관하게 항상 로드한다(배점 0이라 안전 · 증거는 지금부터 쌓여야
+  // 나중에 배점을 켤 실측 근거가 된다. §4-1).
+  const pressDomains = normalizePressDomains(ws.brandConfig.pressDomains);
+  // 소유 유튜브 영상 집합 — 스위치가 켜진 워크스페이스만 조회한다. 대부분의 워크스페이스는
+  // 꺼짐(기본)이라 이 DB 조회 자체를 건너뛰어야 "현행과 완전히 동일"(§4-5)이 코드 경로
+  // 수준에서도 성립한다.
+  const ownedVideoIds = scoringProfile.applyOwnedCitationJudgment
+    ? await getOwnedYoutubeVideoIds(ws.id)
+    : new Set<string>();
+
   let executedRuns = 0;
   let skippedDuplicates = 0;
   const providerFailures: ProviderFailure[] = [];
@@ -238,6 +285,9 @@ async function executeSchedule(
           competitorTerms,
           brandWebsites,
           competitorWebsites,
+          scoringProfile,
+          pressDomains,
+          ownedVideoIds,
           now,
         }),
       ),
@@ -263,6 +313,82 @@ type ProviderRunOutcome = {
   failure: ProviderFailure | null;
 };
 
+/** resolveCitationJudgment 입력 — runOneProviderForPrompt 가 이미 계산해 둔 중간값들. */
+export type CitationJudgmentInput = {
+  citations: Citation[];
+  /** (세트·버전) 쌍 — applyOwnedCitationJudgment 가 소유 유튜브 판정 적용 여부를 가른다. */
+  scoringProfile: ScoringProfile;
+  /** 소유 유튜브 video-ID 집합. 스위치가 꺼져 있으면 호출부가 항상 빈 Set 을 넘긴다. */
+  ownedVideoIds: Set<string>;
+  /** 정규화된 언론 도메인 목록 — 비어 있으면 언론 판정은 항상 미매칭. */
+  pressDomains: string[];
+  brandTerms: string[];
+  /** 본문(답변 텍스트)에 자사 URL 이 등장했는지 — hasCitationOnly 계산에 필요. */
+  hasBodyUrl: boolean;
+  /** 참고자료에 등장한 자사 브랜드 도메인(유튜브 제외) — matchCitationDomains 결과. */
+  citedBrandDomains: string[];
+};
+
+/** resolveCitationJudgment 출력 — runs INSERT 컬럼 4개 + calcVisibilityFull 입력 2개를 겸한다. */
+export type CitationJudgmentResult = {
+  hasCitationOnly: boolean;
+  citedOwnedVideoIds: string[];
+  hasPressCitation: boolean;
+  citedPressDomains: string[];
+};
+
+/**
+ * 인용 판정 묶음 — 소유 유튜브 인용 병합 + 언론 인용 증거 계산을 순수 함수로 뽑은 것
+ * (독립 검수 지적 반영). 계획 geotracker-youtube-press-scoring-260923 §4-1·§4-2·§4-5·D1·D2·D3.
+ *
+ * runOneProviderForPrompt 안에 인라인으로 있던 블록을 동작 변화 없이 그대로 옮겼다. 뽑은
+ * 이유 — 이 블록(소유 인용 병합·언론 증거 계산·INSERT 컬럼 값)이 실제 수집 배선에서 유일한
+ * 테스트 사각지대였다(그 전까지 단위 테스트는 resolveScoringProfile 하나뿐이었다). DB·Bright
+ * Data 무의존 순수 함수라 automation-runner.test.ts 가 직접 단위 테스트한다.
+ */
+export function resolveCitationJudgment(input: CitationJudgmentInput): CitationJudgmentResult {
+  const {
+    citations,
+    scoringProfile,
+    ownedVideoIds,
+    pressDomains,
+    brandTerms,
+    hasBodyUrl,
+    citedBrandDomains,
+  } = input;
+
+  // 소유 유튜브 인용 판정 — 계획 §4-5·D1·D3. 스위치가 켜진 워크스페이스에서만 적용한다.
+  // 판정 자체(기존 youtube-video-match.ts 모듈)는 이미 화면 경로에서 쓰던 것을 그대로
+  // 재사용한다 — 새 판정 로직을 만들지 않는다(D3 "기존 '인용됨' 칸에 합류").
+  const ownedVideoCitationIds = new Set<string>();
+  if (scoringProfile.applyOwnedCitationJudgment && ownedVideoIds.size > 0) {
+    for (const c of citations) {
+      const raw = c.url || c.domain || "";
+      if (isOwnedYoutubeVideo(raw, ownedVideoIds)) {
+        const videoId = extractYoutubeVideoId(raw);
+        if (videoId) ownedVideoCitationIds.add(videoId);
+      }
+    }
+  }
+  const citedOwnedVideoIds = [...ownedVideoCitationIds];
+
+  // 참고자료에만 등장 (본문엔 없음) — 소유 유튜브 인용은 "인용됨"(참고자료) 칸에 합류한다.
+  const hasCitationOnly =
+    !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
+
+  // 언론(배포 매체) 인용 증거 — 계획 §4-1·§4-2. 스위치와 무관하게 항상 계산한다: 현행 전
+  // 세트의 배점이 0 이라(brandPress·genNoMentionPress) 점수에는 절대 영향이 없고, 대신
+  // 지금부터 증거가 쌓여야 나중에 배점을 켤지 실측으로 판단할 수 있다(§4-1 점 4).
+  const pressEvidence = collectPressEvidence(citations, pressDomains, brandTerms);
+
+  return {
+    hasCitationOnly,
+    citedOwnedVideoIds,
+    hasPressCitation: pressEvidence.hasTitleMatch,
+    citedPressDomains: pressEvidence.evidence,
+  };
+}
+
 /**
  * 한 프롬프트의 단일 provider 1건을 실행한다 (pre-check → scrape → 점수 → INSERT → drift).
  * executeSchedule 의 provider 병렬 처리를 위해 분리. 예외는 내부에서 잡아
@@ -278,6 +404,12 @@ async function runOneProviderForPrompt(args: {
   competitorTerms: string[];
   brandWebsites: string[];
   competitorWebsites: string[];
+  /** (세트·버전) 쌍 — §4-5. executeSchedule 이 워크스페이스당 한 번만 계산해 넘긴다. */
+  scoringProfile: ScoringProfile;
+  /** 정규화된 언론 도메인 목록 — 비어 있으면 언론 판정은 항상 미매칭(코드 기본값). */
+  pressDomains: string[];
+  /** 소유 유튜브 video-ID 집합 — scoringProfile.applyOwnedCitationJudgment 가 false 면 항상 빈 Set. */
+  ownedVideoIds: Set<string>;
   now: Date;
 }): Promise<ProviderRunOutcome> {
   const {
@@ -289,6 +421,9 @@ async function runOneProviderForPrompt(args: {
     competitorTerms,
     brandWebsites,
     competitorWebsites,
+    scoringProfile,
+    pressDomains,
+    ownedVideoIds,
   } = args;
 
   try {
@@ -369,8 +504,18 @@ async function runOneProviderForPrompt(args: {
       // 일반 도메인: 호스트 문자열 포함만으로 매치
       return answerLower.includes(t.host);
     });
-    // 참고자료에만 등장 (본문엔 없음)
-    const hasCitationOnly = !hasBodyUrl && citedBrandDomains.length > 0;
+    // 소유 유튜브 인용 병합 + 언론 인용 증거 — 순수 함수로 뽑은 resolveCitationJudgment 에
+    // 위임한다(독립 검수 지적 반영). 로직 자체는 이전과 동일 — 계획 §4-1·§4-2·§4-5·D1·D2·D3.
+    const { hasCitationOnly, citedOwnedVideoIds, hasPressCitation, citedPressDomains } =
+      resolveCitationJudgment({
+        citations,
+        scoringProfile,
+        ownedVideoIds,
+        pressDomains,
+        brandTerms,
+        hasBodyUrl,
+        citedBrandDomains,
+      });
 
     const visibilityScore = calcVisibilityFull(
       answerText,
@@ -381,6 +526,8 @@ async function runOneProviderForPrompt(args: {
       isTopRanked,
       isStronglyRecommended,
       isBrandedQuery,
+      scoringProfile.setId,
+      hasPressCitation,
     );
 
     const inserted = await db
@@ -394,13 +541,16 @@ async function runOneProviderForPrompt(args: {
         sources: result.sources ?? [],
         citations: citations as never,
         visibilityScore,
-        // 새 응답은 항상 최신 점수 룰 버전으로 마킹 (재산출 대상에서 제외)
-        scoreVersion: CURRENT_SCORE_VERSION,
+        // 새 응답은 (세트·버전) 쌍 선택자가 가리키는 버전으로 마킹한다 — 세트 id 와 항상
+        // 함께 움직인다(§4-5). 재산출은 이 버전보다 작은 행만 대상으로 삼는다.
+        scoreVersion: scoringProfile.version,
         sentiment,
         brandMentions,
         competitorMentions,
         citedBrandDomains,
         citedCompetitorDomains,
+        citedOwnedVideoIds,
+        citedPressDomains,
         attachedBrandMentions: [],
         attachedCompetitorMentions: [],
         geolocation: sched.geolocation ?? null,
@@ -618,9 +768,13 @@ function findMentions(text: string, terms: string[]): string[] {
 }
 
 /**
- * 현행 수집(신규·수동)이 쓰는 배점 — 룰 세트 레지스트리의 v14a 세트에 위임한다.
+ * 현행 수집(신규·수동)이 쓰는 배점 — 룰 세트 레지스트리에 위임한다.
  * 계산기·상수는 lib/server/visibility-score-sets.ts 가 단일 정본이며,
  * 이 래퍼는 기존 호출부 시그니처를 유지하기 위한 얇은 어댑터다.
+ *
+ * scoreSetId·hasPressCitation 은 **선택 인자**(끝에 추가)다 — 기본값이 예전 상수
+ * (CURRENT_SCORE_SET_ID="v14a"·hasPressCitation 없음)와 정확히 같으므로, 이 두 인자를
+ * 모르는 기존 호출부(테스트 포함)는 인자를 그대로 두 채 동작이 완전히 같다.
  */
 export function calcVisibilityFull(
   text: string,
@@ -631,6 +785,8 @@ export function calcVisibilityFull(
   isTopRanked: boolean,
   isStronglyRecommended: boolean,
   isBrandedQuery: boolean,
+  scoreSetId: ScoreSetId = DEFAULT_SCORING_SWITCH,
+  hasPressCitation: boolean = false,
 ): number {
   return calcVisibilityFromText(
     text,
@@ -641,7 +797,8 @@ export function calcVisibilityFull(
     isTopRanked,
     isStronglyRecommended,
     isBrandedQuery,
-    SCORE_SETS[CURRENT_SCORE_SET_ID],
+    SCORE_SETS[scoreSetId],
+    hasPressCitation,
   );
 }
 

@@ -43,6 +43,13 @@
       "when": 1783608645748,
       "tag": "0005_fancy_hardball",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790152362076,
+      "tag": "0006_rapid_vengeance",
+      "breakpoints": true
     }
   ]
 }

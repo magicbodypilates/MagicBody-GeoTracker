@@ -21,7 +21,7 @@
  * 단일화하고, 두 뷰는 keep predicate 만 주입하는 얇은 래퍼로 둔다 (로직 중복·드리프트 제거).
  */
 
-import { SOCIAL_PLATFORM_DOMAINS } from "@/components/dashboard/citation-utils";
+import { SOCIAL_PLATFORM_DOMAINS, isBrandMentionMatch } from "@/components/dashboard/citation-utils";
 import {
   extractYoutubeVideoId,
   canonicalYoutubeWatchUrl,
@@ -323,25 +323,15 @@ export function isBrandCitationKey(
 /**
  * 인용의 제목/설명에 브랜드 용어(이름/별칭)가 하나라도 포함되는지 (언급 판정).
  *
- * citation-utils 의 isRelatedCitation 과 동일 규칙(대소문자 무시 substring)을 DB 행 기준으로 재현한다.
- * SQL 의 ILIKE 사전 필터(buildBrandMentionPrefilter)와 동일 의미이므로, SQL 은 후보만 좁히고
- * 최종 판정은 이 순수함수가 유지한다 (DB 무의존 테스트 + 판정 일관성).
+ * 계획 v2 §5 Step 2③ — 유일 구현은 components/dashboard/citation-utils.ts 의
+ * isBrandMentionMatch 다. 이 이름은 **기존 import 경로 보존용 재노출**이며(호출부·테스트가
+ * `./citation-url-aggregate` 에서 이 이름으로 계속 가져온다), 로직은 없다. SQL 의 ILIKE
+ * 사전 필터(buildBrandMentionPrefilter)와 동일 의미이므로, SQL 은 후보만 좁히고 최종 판정은
+ * 이 함수(→ isBrandMentionMatch)가 유지한다 (DB 무의존 테스트 + 판정 일관성).
  *
  * @returns brandTerms 비어있거나 title·description 모두 공백이면 false.
  */
-export function isBrandMentionText(
-  title: string | null | undefined,
-  description: string | null | undefined,
-  brandTerms: string[] | undefined,
-): boolean {
-  if (!brandTerms?.length) return false;
-  const haystack = `${title ?? ""} ${description ?? ""}`.toLowerCase();
-  if (!haystack.trim()) return false;
-  return brandTerms.some((t) => {
-    const term = t?.trim().toLowerCase();
-    return !!term && haystack.includes(term);
-  });
-}
+export const isBrandMentionText = isBrandMentionMatch;
 
 /** ISO 문자열로 정규화 */
 function toIso(v: string | Date): string {

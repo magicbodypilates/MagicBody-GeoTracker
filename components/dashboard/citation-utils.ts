@@ -119,6 +119,51 @@ export function buildTargetKeys(targetUrls: string[] | undefined): string[] {
 }
 
 /**
+ * 텍스트 한 조각(제목 또는 설명 하나)에 브랜드 용어(이름/별칭) 중 하나라도 포함되는지.
+ *
+ * 계획 v2 §4-1(D4′)의 언론(배포 매체) 판정이 "제목 조건"과 "설명 조건"을 **따로** 세야
+ * 해서 만든 단일-필드 원시 판정이다. 아래 isBrandMentionMatch(제목+설명 합본 판정)와는
+ * 별개로 press-domain-match.ts 가 이 함수를 재사용한다.
+ */
+export function containsBrandTerm(
+  text: string | null | undefined,
+  brandTerms: string[] | undefined,
+): boolean {
+  if (!brandTerms?.length) return false;
+  const haystack = (text ?? "").toLowerCase();
+  if (!haystack.trim()) return false;
+  return brandTerms.some((t) => {
+    const term = t?.trim().toLowerCase();
+    return !!term && haystack.includes(term);
+  });
+}
+
+/**
+ * 제목 + 설명(공백으로 합친 한 덩어리)에 브랜드 용어(이름/별칭)가 하나라도 포함되는지.
+ *
+ * "브랜드 언급(제3자)" 판정의 **유일 구현**이다(계획 v2 §5 Step 2③ — 이전에는 이 파일의
+ * isRelatedCitation 과 lib/server/citation-url-aggregate.ts 의 isBrandMentionText 가 같은
+ * 로직을 각자 들고 있었다). 제목·설명을 하나의 haystack 으로 합쳐서 검사하는 방식을 그대로
+ * 유지한다 — containsBrandTerm(title) || containsBrandTerm(description) 로 쪼개면, 별칭에
+ * 공백이 있고 제목 끝과 설명 시작이 그 별칭의 앞뒤 절반과 우연히 맞아떨어지는 극단적인
+ * 경계 사례에서 결과가 달라질 수 있어(통합 리팩터 전후 동일이 §6-2 Hard Gate), 굳이
+ * 바꿀 이유가 없는 기존 계산 방식을 그대로 보존한다.
+ */
+export function isBrandMentionMatch(
+  title: string | null | undefined,
+  description: string | null | undefined,
+  brandTerms: string[] | undefined,
+): boolean {
+  if (!brandTerms?.length) return false;
+  const haystack = `${title ?? ""} ${description ?? ""}`.toLowerCase();
+  if (!haystack.trim()) return false;
+  return brandTerms.some((t) => {
+    const term = t?.trim().toLowerCase();
+    return !!term && haystack.includes(term);
+  });
+}
+
+/**
  * 인용의 제목 또는 설명에 브랜드 용어(이름/별칭)가 포함되었는지.
  * "공식 출처"(URL 매칭)가 아니지만 제3자 콘텐츠가 브랜드를 언급한 경우
  * "연관 출처"로 분류하기 위한 판정.
@@ -127,13 +172,7 @@ export function isRelatedCitation(
   citation: Citation | undefined,
   brandTerms: string[] | undefined,
 ): boolean {
-  if (!citation || !brandTerms?.length) return false;
-  const haystack = `${citation.title ?? ""} ${citation.description ?? ""}`.toLowerCase();
-  if (!haystack.trim()) return false;
-  return brandTerms.some((t) => {
-    const term = t?.trim().toLowerCase();
-    return !!term && haystack.includes(term);
-  });
+  return isBrandMentionMatch(citation?.title, citation?.description, brandTerms);
 }
 
 /**

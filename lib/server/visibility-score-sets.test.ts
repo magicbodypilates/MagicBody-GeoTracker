@@ -21,6 +21,7 @@ import {
   calcVisibilityFromText,
   deriveMentionInputs,
   isScoreSetId,
+  type ScoreSet,
   type ScoreSetId,
   type Sentiment,
   type VisibilityInputs,
@@ -79,6 +80,10 @@ describe("전 세트 × 전 조합 열거: 0..100 이탈 없음", () => {
               for (const isTopRanked of bools) {
                 for (const isStronglyRecommended of bools) {
                   for (const isBrandedQuery of bools) {
+                    // hasPressCitation 은 별도 describe("언론 인용 신호")에서 전수 검증한다 —
+                    // 이 루프는 이미 8중 중첩이라 또 하나의 bool 축을 더하면 배가 되고,
+                    // genNoMentionPress·brandPress 가 모든 세트에서 0 이라 값을 바꿔도
+                    // 이 루프의 0..100 불변식 검증에는 추가 신호가 없다.
                     const inputs: VisibilityInputs = {
                       ...shape,
                       hasBodyUrl,
@@ -87,6 +92,7 @@ describe("전 세트 × 전 조합 열거: 0..100 이탈 없음", () => {
                       isTopRanked,
                       isStronglyRecommended,
                       isBrandedQuery,
+                      hasPressCitation: false,
                     };
                     const s = calcVisibilityWithSet(inputs, SCORE_SETS[setId]);
                     expect(s).toBeGreaterThanOrEqual(0);
@@ -123,6 +129,8 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     v12b: { brand: 97, gen: 99, noMention: 36 },
     full83: { brand: 97, gen: 82, noMention: 21 },
     v14a: { brand: 97, gen: 99, noMention: 55 },
+    // v15a 는 값만 보면 v14a 와 완전히 같다(계획 v2 §4-3) — 검산표도 동일해야 한다.
+    v15a: { brand: 97, gen: 99, noMention: 55 },
   };
 
   it("검산표와 정확히 일치", () => {
@@ -140,8 +148,11 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     const l = SCORE_SETS.legacy8;
     const s = SCORE_SETS.low60;
     const keys = Object.keys(l) as (keyof typeof l)[];
+    // genNoMentionPress·brandPress 는 선택 필드라 타입상 number|undefined 이지만,
+    // legacy8·low60 어느 쪽도 이 두 키를 실제로 갖지 않으므로 Object.keys(l) 에도 나오지
+    // 않는다 — 이 루프가 실제로 도는 14개 키는 전부 값이 있다(non-null 단언은 타입만 좁힘).
     for (const k of keys) {
-      expect(s[k]).toBe(Math.round(l[k] * 0.6));
+      expect(s[k]).toBe(Math.round(l[k]! * 0.6));
     }
   });
 
@@ -745,9 +756,221 @@ describe("deriveMentionInputs / 텍스트 진입점", () => {
     expect(isScoreSetId("v12b")).toBe(true);
     expect(isScoreSetId("full83")).toBe(true);
     expect(isScoreSetId("v14a")).toBe(true);
+    expect(isScoreSetId("v15a")).toBe(true);
     expect(isScoreSetId("v14")).toBe(false);
     expect(isScoreSetId("v13")).toBe(false);
+    expect(isScoreSetId("v15")).toBe(false);
     expect(isScoreSetId("full84")).toBe(false);
     expect(isScoreSetId(undefined)).toBe(false);
+  });
+});
+
+/* ============================================================
+ * ⑥ v15a 동등성 · 언론 인용 신호(hasPressCitation) — 계획 v2 §4-1·§4-3·D5
+ * ============================================================ */
+
+describe("v15a — 값만 보면 v14a 와 완전히 동일(계획 v2 §4-3)", () => {
+  const sentiments: Sentiment[] = ["positive", "neutral", "negative", "not-mentioned"];
+  const bools = [false, true];
+  const shapes = [
+    { mentions: 0, firstPos: -1 },
+    { mentions: 1, firstPos: 0 },
+    { mentions: 1, firstPos: 210 },
+    { mentions: 3, firstPos: 900 },
+  ];
+
+  it("SCORE_SETS.v15a 는 v14a 와 상수 자체가 완전히 같다", () => {
+    expect(SCORE_SETS.v15a).toEqual(SCORE_SETS.v14a);
+  });
+
+  it("모든 입력 조합(hasPressCitation 포함)에서 v14a·v15a 출력이 완전히 같다", () => {
+    let checked = 0;
+    for (const shape of shapes) {
+      for (const sentiment of sentiments) {
+        for (const hasBodyUrl of bools) {
+          for (const hasCitationOnly of bools) {
+            for (const isTopRanked of bools) {
+              for (const isStronglyRecommended of bools) {
+                for (const isBrandedQuery of bools) {
+                  for (const hasPressCitation of bools) {
+                    const inputs: VisibilityInputs = {
+                      ...shape,
+                      hasBodyUrl,
+                      hasCitationOnly,
+                      sentiment,
+                      isTopRanked,
+                      isStronglyRecommended,
+                      isBrandedQuery,
+                      hasPressCitation,
+                    };
+                    expect(calcVisibilityWithSet(inputs, SCORE_SETS.v15a)).toBe(
+                      calcVisibilityWithSet(inputs, SCORE_SETS.v14a),
+                    );
+                    checked += 1;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(500);
+  });
+});
+
+describe("언론 인용 신호(hasPressCitation) — 현행은 전 세트 배점 0", () => {
+  it("등록된 모든 세트에서 있으나 없으나 점수가 바뀌지 않는다(genNoMentionPress·brandPress = 0)", () => {
+    for (const setId of SCORE_SET_IDS) {
+      const set = SCORE_SETS[setId];
+
+      const gen0Base = {
+        mentions: 0,
+        firstPos: -1,
+        hasBodyUrl: false,
+        hasCitationOnly: false,
+        sentiment: "not-mentioned" as Sentiment,
+        isTopRanked: false,
+        isStronglyRecommended: false,
+        isBrandedQuery: false,
+      };
+      const gen0Off = calcVisibilityWithSet({ ...gen0Base, hasPressCitation: false }, set);
+      const gen0On = calcVisibilityWithSet({ ...gen0Base, hasPressCitation: true }, set);
+      expect(gen0On).toBe(gen0Off);
+      expect(gen0On).toBe(0); // genNoMentionPress = 0 이므로 미구현과 결과가 완전히 같다
+
+      const brandBase = {
+        mentions: 1,
+        firstPos: 0,
+        hasBodyUrl: false,
+        hasCitationOnly: false,
+        sentiment: "positive" as Sentiment,
+        isTopRanked: false,
+        isStronglyRecommended: false,
+        isBrandedQuery: true,
+      };
+      const brandOff = calcVisibilityWithSet({ ...brandBase, hasPressCitation: false }, set);
+      const brandOn = calcVisibilityWithSet({ ...brandBase, hasPressCitation: true }, set);
+      expect(brandOn).toBe(brandOff);
+    }
+  });
+
+  it("언급 1회 이상 분기에서는 배점이 있어도 무시된다(URL 신호와 동일 취급 — D5)", () => {
+    // brandPress·genNoMentionPress 를 인위적으로 키운 가상 세트로도, 언급>=1 분기는
+    // hasPressCitation 을 읽지 않는다는 것을 고정한다(값이 있어도 무시되는지 확인하려면
+    // 0 이 아닌 상수가 필요하다).
+    const forked: ScoreSet = { ...SCORE_SETS.v14a, genNoMentionPress: 40, brandPress: 25 };
+    const base = {
+      mentions: 1,
+      firstPos: 0,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "neutral" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: false,
+      isBrandedQuery: false,
+    };
+    expect(calcVisibilityWithSet({ ...base, hasPressCitation: false }, forked)).toBe(
+      calcVisibilityWithSet({ ...base, hasPressCitation: true }, forked),
+    );
+  });
+
+  it("우선순위 배타성 — 일반 질의·언급0 분기: 본문URL > 참고자료 > 언론 (가상 배점으로 관찰)", () => {
+    const forked: ScoreSet = { ...SCORE_SETS.v14a, genNoMentionPress: 40 };
+    const base = {
+      mentions: 0,
+      firstPos: -1,
+      sentiment: "not-mentioned" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: false,
+      isBrandedQuery: false,
+    };
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: true, hasCitationOnly: true, hasPressCitation: true },
+        forked,
+      ),
+    ).toBe(forked.genNoMentionBodyUrl);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: true, hasPressCitation: true },
+        forked,
+      ),
+    ).toBe(forked.genNoMentionCitation);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: false, hasPressCitation: true },
+        forked,
+      ),
+    ).toBe(40);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: false, hasPressCitation: false },
+        forked,
+      ),
+    ).toBe(0);
+  });
+
+  it("우선순위 배타성 — 브랜드 질의 분기: 본문URL > 참고자료 > 언론 (가상 배점으로 관찰)", () => {
+    const forked: ScoreSet = { ...SCORE_SETS.v14a, brandPress: 6 };
+    const base = {
+      mentions: 1,
+      firstPos: 0,
+      sentiment: "not-mentioned" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: false,
+      isBrandedQuery: true,
+    };
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: true, hasCitationOnly: true, hasPressCitation: true },
+        forked,
+      ),
+    ).toBe(forked.brandBodyUrl);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: true, hasPressCitation: true },
+        forked,
+      ),
+    ).toBe(forked.brandCitation);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: false, hasPressCitation: true },
+        forked,
+      ),
+    ).toBe(6);
+  });
+
+  it("calcVisibilityFromText — hasPressCitation 은 10번째 선택 인자이고 기본값은 false", () => {
+    const forked: ScoreSet = { ...SCORE_SETS.v14a, genNoMentionPress: 33 };
+    // 인자를 안 주면 false 로 기본 — 기존 9-인자 호출부와 동작이 같다.
+    expect(
+      calcVisibilityFromText(
+        "브랜드 미언급 답변",
+        ["요가원"],
+        false,
+        false,
+        "not-mentioned",
+        false,
+        false,
+        false,
+        forked,
+      ),
+    ).toBe(0);
+    // 명시적으로 true 를 주면 언론 배점이 반영된다.
+    expect(
+      calcVisibilityFromText(
+        "브랜드 미언급 답변",
+        ["요가원"],
+        false,
+        false,
+        "not-mentioned",
+        false,
+        false,
+        false,
+        forked,
+        true,
+      ),
+    ).toBe(33);
   });
 });

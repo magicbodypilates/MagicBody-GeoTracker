@@ -18,6 +18,7 @@ import {
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -110,6 +111,12 @@ type TimeseriesResult = {
   days: string[];
   providers: Record<string, SeriesPoint[]>;
   totals?: SeriesPoint[];
+  /**
+   * 채점 규칙 변경 경계(KST "YYYY-MM-DD") — 계획 geotracker-youtube-press-scoring-260923
+   * §5 Step 7. 서버가 RESCORE_JOBS.v15 의 대상 창 하한에서 파생한다. 표시 구간(trendData)
+   * 안에 이 날짜가 있을 때만 차트에 경계선을 그린다.
+   */
+  ruleChangeBoundary?: string | null;
 };
 
 function downloadCsv(filename: string, content: string) {
@@ -340,6 +347,17 @@ export function VisibilityAnalyticsTab({
     () => trendData.filter((d) => d.visibility !== null).length,
     [trendData],
   );
+
+  /**
+   * 채점 규칙 변경 경계선 — 계획 §5 Step 7 Hard Gate("경계 표시 없이 재산출 금지").
+   * 지금 표시 중인 구간(trendData) 안에 그 날짜가 실제로 있을 때만 그린다 — 범위 밖 날짜에
+   * ReferenceLine 을 그리면 recharts 가 아무것도 표시하지 않거나 축을 벗어나 그려질 수 있다.
+   */
+  const ruleChangeBoundaryInRange = useMemo(() => {
+    const boundary = timeseries?.ruleChangeBoundary;
+    if (!boundary) return null;
+    return trendData.some((d) => d.day === boundary) ? boundary : null;
+  }, [timeseries, trendData]);
 
   const exportTrendCsv = useCallback(() => {
     const header = "날짜,평균 가시성 (%)\n";
@@ -680,6 +698,19 @@ export function VisibilityAnalyticsTab({
                   dot={{ r: 3, fill: "var(--th-accent)" }}
                   connectNulls={false}
                 />
+                {ruleChangeBoundaryInRange && (
+                  <ReferenceLine
+                    x={ruleChangeBoundaryInRange}
+                    stroke="var(--th-text-muted)"
+                    strokeDasharray="4 4"
+                    label={{
+                      value: "채점 규칙 변경",
+                      position: "insideTopRight",
+                      fill: "var(--th-text-muted)",
+                      fontSize: 10,
+                    }}
+                  />
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>

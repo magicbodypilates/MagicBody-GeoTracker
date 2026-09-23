@@ -42,6 +42,8 @@ import {
   configFingerprint,
   isRescoreJobId,
   jobHash,
+  ownedVideoListFingerprint,
+  pressDomainFingerprint,
   promptKey,
   reproSetForVersion,
   type RescoreJob,
@@ -63,6 +65,9 @@ import {
   type BaseVisibilityInputs,
 } from "@/lib/server/visibility-backfill";
 import { deriveMentionInputs, type Sentiment } from "@/lib/server/visibility-score-sets";
+import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
+import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
+import { collectPressEvidence, normalizePressDomains } from "@/lib/server/press-domain-match";
 
 export const dynamic = "force-dynamic";
 
@@ -283,6 +288,8 @@ type ScopedWorkspaceFull = ScopedWorkspace & {
   websites: string[];
   /** 저장된 점수를 만든 수집 경로의 별칭 파싱 결과 — 아래 termParity 대조용. */
   collectionTerms: string[];
+  /** 정규화된 언론(배포 매체) 도메인 — 계획 §4-1. 비어 있으면 언론 판정은 항상 미매칭. */
+  pressDomains: string[];
 };
 
 async function loadScopedWorkspaces(job: RescoreJob): Promise<ScopedWorkspaceFull[]> {
@@ -299,6 +306,7 @@ async function loadScopedWorkspaces(job: RescoreJob): Promise<ScopedWorkspaceFul
     brandTerms: buildBrandTerms(w.brandConfig),
     collectionTerms: buildCollectionBrandTerms(w.brandConfig),
     websites: w.brandConfig?.websites ?? [],
+    pressDomains: normalizePressDomains(w.brandConfig?.pressDomains),
   }));
 }
 
@@ -364,6 +372,16 @@ function fingerprintOf(workspaces: readonly ScopedWorkspaceFull[]): string {
   return configFingerprint([...terms], [...sites]);
 }
 
+/**
+ * 범위 안 전 워크스페이스의 매체(언론) 목록 합집합 지문 — 계획 §4-4(D6 보강).
+ * configFingerprint 와 별개 필드다(§4-4 정정 — 기존 지문은 매체 목록을 담지 않는다).
+ */
+function pressFingerprintOf(workspaces: readonly ScopedWorkspaceFull[]): string {
+  const domains = new Set<string>();
+  for (const w of workspaces) for (const d of w.pressDomains) domains.add(d);
+  return pressDomainFingerprint([...domains]);
+}
+
 /* ============================================================
  * 행 입력 복원
  * ============================================================ */
@@ -424,6 +442,89 @@ function deriveRowInputs(row: TargetRow, ws: ScopedWorkspaceFull): BaseVisibilit
     hasCitationOnly,
     sentiment: row.sentiment as Sentiment,
     isBrandedQuery,
+    // 옛 판정은 언론 인용을 보지 않는다 — 항상 false(계획 D0: reproBase 는 "그때 저장된
+    // 점수를 실제로 만든" 입력이어야 하므로, 존재조차 안 했던 판정을 반영하지 않는다).
+    hasPressCitation: false,
+  };
+}
+
+/** deriveNewJudgmentRowInputs 반환 — 목표 계산용 입력 + 그 시점 판정의 증거(백필용). */
+type NewJudgmentResult = {
+  base: BaseVisibilityInputs;
+  citedOwnedVideoIds: string[];
+  citedPressDomains: string[];
+};
+
+/**
+ * 새 판정(계획 §3-3 targetBase 전용) — 소유 유튜브 인용을 hasCitationOnly 에 접고, 언론
+ * 인용 증거를 함께 계산한다. job.applyOwnedCitationJudgment 가 true 인 잡(v15)에서만 쓴다.
+ *
+ * deriveRowInputs 와 공통부(언급·위치·isBrandedQuery·hasBodyUrl)가 겹치지만 일부러
+ * 합치지 않는다 — 재현(reproBase)과 목표(targetBase)를 절대 뒤섞지 않는다는 D0 의 원칙을
+ * 코드 구조로도 지키기 위해서다. 배치당 최대 200행이라 중복 계산 비용은 무시할 수준이다.
+ *
+ * 유튜브 소유 판정 루프는 automation-runner.ts 의 것과 로직이 같다 — youtube-video-match.ts
+ * 는 계획 부록 F 의 "손대지 않는 것" 목록이라 공용 헬퍼로 뽑지 않고 각자 짧게 반복한다.
+ */
+function deriveNewJudgmentRowInputs(
+  row: TargetRow,
+  ws: ScopedWorkspaceFull,
+  ownedVideoIds: Set<string>,
+): NewJudgmentResult {
+  const answerText = row.answer ?? "";
+  const answerLower = answerText.toLowerCase();
+
+  const brandTargets = ws.websites
+    .map((url) => normalizeTargetKey(url))
+    .filter((k): k is { host: string; seg: string } => k !== null);
+
+  const hasBodyUrl = brandTargets.some((t) => {
+    if (SOCIAL_PLATFORM_DOMAINS.has(t.host)) {
+      if (!t.seg) return false;
+      return answerLower.includes(t.host) && answerLower.includes(t.seg);
+    }
+    return answerLower.includes(t.host);
+  });
+
+  const citations = (row.citations ?? []) as Citation[];
+  const citedBrandDomains = matchCitationDomains(citations, ws.websites);
+
+  const ownedVideoCitationIds = new Set<string>();
+  if (ownedVideoIds.size > 0) {
+    for (const c of citations) {
+      const raw = c.url || c.domain || "";
+      if (isOwnedYoutubeVideo(raw, ownedVideoIds)) {
+        const videoId = extractYoutubeVideoId(raw);
+        if (videoId) ownedVideoCitationIds.add(videoId);
+      }
+    }
+  }
+  const citedOwnedVideoIds = [...ownedVideoCitationIds];
+
+  // 소유 유튜브 인용은 "인용됨"(참고자료) 칸에 합류한다 — 새 상수 없음(D3).
+  const hasCitationOnly =
+    !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
+
+  const pressEvidence = collectPressEvidence(citations, ws.pressDomains, ws.brandTerms);
+
+  const isBrandedQuery = !isInformationalPrompt(row.promptText, ws.brandTerms);
+
+  const { mentions, firstPos } = answerText
+    ? deriveMentionInputs(answerText, ws.brandTerms)
+    : { mentions: 0, firstPos: -1 };
+
+  return {
+    base: {
+      mentions,
+      firstPos,
+      hasBodyUrl,
+      hasCitationOnly,
+      sentiment: row.sentiment as Sentiment,
+      isBrandedQuery,
+      hasPressCitation: pressEvidence.hasTitleMatch,
+    },
+    citedOwnedVideoIds,
+    citedPressDomains: pressEvidence.evidence,
   };
 }
 
@@ -447,6 +548,12 @@ type Change = {
   after: number;
   fromVersion: number;
   toVersion: number;
+  /**
+   * 증거 컬럼 동시 백필(계획 §5 Step 6) — job.applyOwnedCitationJudgment 가 true 인 잡에서만
+   * 값이 있다(v15). 그 외 잡은 undefined — 이 행의 기존 증거 컬럼 값을 건드리지 않는다.
+   */
+  citedOwnedVideoIds?: string[];
+  citedPressDomains?: string[];
 };
 
 function metaPayload(jobId: RescoreJobId) {
@@ -491,6 +598,10 @@ export async function POST(req: NextRequest) {
   try {
     const workspaces = await loadScopedWorkspaces(job);
     const cfgFingerprint = fingerprintOf(workspaces);
+    // 매체(언론) 목록 지문 — 계획 §4-4(D6 보강). 비용이 없는(DB 무의존) 계산이라 모든
+    // 모드에서 함께 낸다. 소유 영상 지문은 DB 조회가 있어 실제 쓰기가 일어나는 sweep
+    // 에서만 낸다(아래).
+    const pressCfgFingerprint = pressFingerprintOf(workspaces);
     const baseConditions = buildBaseConditions(job, workspaces);
 
     /* ── report ── */
@@ -557,6 +668,7 @@ export async function POST(req: NextRequest) {
         mode: "report",
         ...metaPayload(jobId),
         cfgFingerprint,
+        pressCfgFingerprint,
         windows,
       });
     }
@@ -639,6 +751,7 @@ export async function POST(req: NextRequest) {
         mode: "preflight",
         ...metaPayload(jobId),
         cfgFingerprint,
+        pressCfgFingerprint,
         workspaceCount: workspaces.length,
         windowTotal,
         targetCount,
@@ -722,6 +835,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // 소유 유튜브 영상 집합 — job.applyOwnedCitationJudgment 가 true 인 잡(v15)에서만
+    // 워크스페이스별로 조회한다. 그 외 잡(v11~v14)은 targetBase = reproBase 라 이 집합을
+    // 아예 쓰지 않으므로 조회 자체를 건너뛴다(불필요한 DB 호출·의존 없음).
+    const ownedVideoIdsByWorkspace = new Map<string, Set<string>>();
+    if (job.applyOwnedCitationJudgment) {
+      await Promise.all(
+        workspaces.map(async (w) => {
+          ownedVideoIdsByWorkspace.set(w.id, await getOwnedYoutubeVideoIds(w.id));
+        }),
+      );
+    }
+
     // ── 역산 · 목표 산출 ──
     const anomalies: Anomaly[] = [];
     const pending: (Change & { workspaceId: string })[] = [];
@@ -741,10 +866,31 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
+      // ⛔ D0(계획 §3-3) — reproBase 는 "그때 저장된 점수를 실제로 만든" 옛 판정, targetBase
+      // 는 job.applyOwnedCitationJudgment 가 true 일 때만 새 판정으로 갈라진다. 그 외 잡은
+      // targetBase === reproBase(같은 객체)라 D0 수정 이전과 동작이 완전히 같다.
+      const reproBase = deriveRowInputs(row, ws);
+      let targetBase = reproBase;
+      let newEvidence: { citedOwnedVideoIds: string[]; citedPressDomains: string[] } | null =
+        null;
+      if (job.applyOwnedCitationJudgment) {
+        const judged = deriveNewJudgmentRowInputs(
+          row,
+          ws,
+          ownedVideoIdsByWorkspace.get(ws.id) ?? new Set<string>(),
+        );
+        targetBase = judged.base;
+        newEvidence = {
+          citedOwnedVideoIds: judged.citedOwnedVideoIds,
+          citedPressDomains: judged.citedPressDomains,
+        };
+      }
+
       let resolution;
       try {
         resolution = resolveWithDiagnostics({
-          base: deriveRowInputs(row, ws),
+          reproBase,
+          targetBase,
           storedScore: row.visibilityScore,
           declaredSetId,
           diagnosticSetIds: job.diagnosticSets,
@@ -778,6 +924,8 @@ export async function POST(req: NextRequest) {
         after: resolution.targetScore,
         fromVersion: row.scoreVersion,
         toVersion: job.targetVersion,
+        // 증거 컬럼 동시 백필(계획 §5 Step 6) — newEvidence 가 있을 때만(v15) 싣는다.
+        ...(newEvidence ?? {}),
       });
     }
 
@@ -790,12 +938,19 @@ export async function POST(req: NextRequest) {
       await db.transaction(async (tx) => {
         for (const change of pending) {
           // 3중 CAS — id + 소스 버전 + 조회 당시 점수. 조회 이후 값이 바뀐 행은 건드리지 않는다.
-          // sentiment 는 SET 절에 넣지 않는다(저장값 보존).
+          // sentiment 는 SET 절에 넣지 않는다(저장값 보존). 증거 컬럼은 job 이 새 판정을 쓸
+          // 때만(v15) SET 절에 들어간다 — 그 외 잡은 기존 증거 컬럼 값을 그대로 둔다.
           const affected = await tx
             .update(schema.runs)
             .set({
               visibilityScore: change.after,
               scoreVersion: change.toVersion,
+              ...(change.citedOwnedVideoIds !== undefined
+                ? { citedOwnedVideoIds: change.citedOwnedVideoIds }
+                : {}),
+              ...(change.citedPressDomains !== undefined
+                ? { citedPressDomains: change.citedPressDomains }
+                : {}),
             })
             .where(
               and(
@@ -820,6 +975,8 @@ export async function POST(req: NextRequest) {
             after: change.after,
             fromVersion: change.fromVersion,
             toVersion: change.toVersion,
+            citedOwnedVideoIds: change.citedOwnedVideoIds,
+            citedPressDomains: change.citedPressDomains,
           });
         }
       });
@@ -827,7 +984,7 @@ export async function POST(req: NextRequest) {
 
     const changes: Change[] = dryRun
       ? pending.map(
-          ({ id, kstDate, provider, promptKey: pk, before, after, fromVersion, toVersion }) => ({
+          ({
             id,
             kstDate,
             provider,
@@ -836,6 +993,19 @@ export async function POST(req: NextRequest) {
             after,
             fromVersion,
             toVersion,
+            citedOwnedVideoIds,
+            citedPressDomains,
+          }) => ({
+            id,
+            kstDate,
+            provider,
+            promptKey: pk,
+            before,
+            after,
+            fromVersion,
+            toVersion,
+            citedOwnedVideoIds,
+            citedPressDomains,
           }),
         )
       : applied;
@@ -859,6 +1029,12 @@ export async function POST(req: NextRequest) {
     const anomalyCounts: Record<string, number> = {};
     for (const a of anomalies) anomalyCounts[a.reason] = (anomalyCounts[a.reason] ?? 0) + 1;
 
+    // 소유 유튜브 영상 목록 지문 — 계획 §4-4(D6 보강). job 이 새 판정을 쓸 때만(v15) 의미가
+    // 있으므로, 이미 위에서 조회해 둔 ownedVideoIdsByWorkspace 를 재사용한다(추가 DB 호출 0).
+    const ownedVideoFingerprint = job.applyOwnedCitationJudgment
+      ? ownedVideoListFingerprint([...new Set([...ownedVideoIdsByWorkspace.values()].flatMap((s) => [...s]))])
+      : null;
+
     return NextResponse.json({
       ok: true,
       mode: "sweep",
@@ -866,6 +1042,8 @@ export async function POST(req: NextRequest) {
       operationId,
       codeSha,
       cfgFingerprint,
+      pressCfgFingerprint,
+      ownedVideoFingerprint,
       dryRun,
       processed: targets.length,
       updated,

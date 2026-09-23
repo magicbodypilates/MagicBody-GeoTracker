@@ -14,7 +14,7 @@ import { SCORE_SETS, type ScoreSetId } from "@/lib/server/visibility-score-sets"
 /** 운영/비운영 워크스페이스 구분 — UUID 를 코드에 두지 않고 is_production 으로 판정한다. */
 export type WorkspaceScope = "production" | "non-production";
 
-export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14";
+export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15";
 
 export type RescoreJob = {
   /** 대상 창 시작(inclusive · timestamptz 비교) */
@@ -36,6 +36,15 @@ export type RescoreJob = {
   /** 서버 계산 경로(자동 수집)만 대상 — 리터럴 true 고정 */
   autoOnly: true;
   workspaceScope: WorkspaceScope;
+  /**
+   * true 면 목표 점수 계산에 **새 판정**(소유 유튜브 인용을 hasCitationOnly 에 접는다)을
+   * 적용한다 — 계획 v2 §3-3·D0. **선택 필드로 둔다** — jobHash 는 `job` 객체 전체를
+   * 해시하므로, 이미 운영에 적용된 잡(v11·v13)의 정의에 필드 하나만 추가해도 그 잡의
+   * jobHash 가 바뀌어 과거 manifest 가 rollback·reconcile 에서 거부된다("지문 고정 앵커"
+   * 테스트가 바로 이 드리프트를 잡기 위해 있다). 그래서 v11~v14 는 손대지 않고 생략하며,
+   * 생략(undefined)은 false 와 동일하게 취급한다(옛 판정) — v15 만 명시적으로 true.
+   */
+  applyOwnedCitationJudgment?: boolean;
 };
 
 const DIAGNOSTIC_SETS: readonly ScoreSetId[] = ["legacy8", "full10"];
@@ -124,6 +133,36 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     autoOnly: true,
     workspaceScope: "production",
   },
+  /**
+   * 계획 v2 §5 Step 6·D7·D8′. v14 가 이미 14 로 올려 둔 행(= 현행 v14a 로 계산된 구간
+   * 전체)을 받아 v15a 로 다시 계산한다. 대상 창은 v14 와 완전히 같다(하한 재사용) — 판정
+   * 변경의 효과만 보려면 세트가 바뀐 시점부터가 아니라 v14a 가 적용된 구간 전체를 봐야
+   * 하기 때문이다. 6~8월 초 레거시 구간(다른 세트)은 부록 E 로 분리해 이번 잡 대상이 아니다.
+   *
+   * applyOwnedCitationJudgment: true — 이 잡의 targetBase 만 소유 유튜브 인용을
+   * hasCitationOnly 에 접은 새 판정으로 계산한다(reproBase 는 항상 옛 판정 그대로).
+   *
+   * ⚠️ diagnosticSets 가 빈 목록인 이유는 v14 와 완전히 같다 — 소스 버전이 14 하나뿐이고,
+   *    score_version 14 를 쓴 경로(수집 · v14 재산출)는 둘 다 v14a 세트라 선언 세트가 곧
+   *    유일한 후보다. legacy8·full10 을 진단에 넣으면 우연히 합이 같은 조합에서
+   *    cross-set-ambiguous 오탐이 난다(v14 주석과 동일 근거).
+   */
+  v15: {
+    // v14 와 같은 하한(KST 2026-08-24 00:00) — 리터럴을 그대로 복제한다(v13 이 v11 의 창을
+    // 복제하는 것과 같은 관례). 객체 리터럴 안에서는 자기 자신(RESCORE_JOBS.v14)을 아직
+    // 참조할 수 없어서다. 동일성은 아래 v15 전용 테스트가 고정한다.
+    fromUtc: "2026-08-23T15:00:00.000Z",
+    toUtc: null,
+    providers: null,
+    sourceVersions: [14],
+    diagnosticSets: [],
+    targetVersion: 15,
+    targetSet: "v15a",
+    informationalOnly: false,
+    autoOnly: true,
+    workspaceScope: "production",
+    applyOwnedCitationJudgment: true,
+  },
 };
 
 export const RESCORE_JOB_IDS = Object.keys(RESCORE_JOBS) as RescoreJobId[];
@@ -142,11 +181,16 @@ export function isRescoreJobId(value: unknown): value is RescoreJobId {
 /**
  * 행의 선언 버전(score_version) → 그 점수를 만든 룰 세트.
  * 여기에 없는 버전은 재산출 대상이 될 수 없다(잡의 sourceVersions 가 이 범위 안이어야 한다).
+ *
+ * ⛔ D0-b(계획 v2 §3-2) — 14 를 여기 등록하지 않으면 `v15`(sourceVersions: [14])를 정의하는
+ * 순간 jobHash 가 "재현 세트가 없는 소스 버전" 예외를 던져 잡 목록을 읽는 모든 경로(meta·
+ * preflight·sweep)가 깨진다. 등록해도 예외를 피하면 전 행이 unmapped-version 이 된다.
  */
 export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   8: "legacy8",
   10: "full10",
   12: "v12b",
+  14: "v14a",
 };
 
 export function reproSetForVersion(version: number): ScoreSetId | null {
@@ -197,6 +241,35 @@ export function configFingerprint(brandTerms: string[], websites: string[]): str
     websites: [...websites].sort(),
   };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
+}
+
+/**
+ * 매체(언론) 도메인 목록 지문 — sha256 앞 12자 (계획 v2 §4-4 D6 보강).
+ *
+ * v1 은 "재산출 감사 기록이 이미 매체 목록을 지문으로 남긴다"고 적었는데 사실이 아니었다
+ * (§4-4 정정) — configFingerprint 는 브랜드 별칭·자사 도메인 둘만 해시한다. 기존 지문의
+ * payload 를 바꾸면 같은 설정인데 예전 감사 파일과 값이 달라져 과거·현재 대조가 깨지므로,
+ * 매체 목록은 **별도 필드**로 신설한다.
+ */
+export function pressDomainFingerprint(pressDomains: string[]): string {
+  const payload = { pressDomains: [...pressDomains].sort() };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
+}
+
+/**
+ * 소유 유튜브 영상 목록 지문 — 개수 + 정렬된 목록의 sha256 앞 12자 (계획 v2 §4-4 D6 보강).
+ *
+ * 영상 번호 원문은 감사 파일에 남기지 않는다("영상 번호 자체는 안 적는다") — 이 지문만으로
+ * "그때 소유 목록이 뭐였나"를 다음 재산출과 비교할 근거로 삼는다. 소유 목록은 점수를 직접
+ * 좌우하는 입력인데 기록이 없으면 재현 불일치의 원인을 못 찾는다.
+ */
+export function ownedVideoListFingerprint(videoIds: readonly string[]): {
+  count: number;
+  hash: string;
+} {
+  const sorted = [...videoIds].sort();
+  const hash = createHash("sha256").update(JSON.stringify(sorted)).digest("hex").slice(0, 12);
+  return { count: sorted.length, hash };
 }
 
 /**

@@ -55,6 +55,21 @@ export type BrandConfig = {
   industry: string;
   keywords: string;
   description: string;
+  /**
+   * 언론(배포 매체) 도메인 목록 — 계획 geotracker-youtube-press-scoring-260923 §4-1·D2.
+   * `websites`(내 사이트)와 의도적으로 분리한 별도 필드다 — 같은 배열에 섞으면 "내 사이트"의
+   * 정의와 화면의 소유/제3자 구분·인용률 지표의 계산 재료가 함께 무너진다(부록 D-5).
+   * 선택 필드 — 미설정(undefined)이면 언론 판정이 항상 꺼진다(설정이 비면 코드 기본값).
+   */
+  pressDomains?: string[];
+  /**
+   * (세트·버전) 쌍 선택자 — 계획 §4-5 D8′. 워크스페이스가 지금 쓰는 채점 규칙 세대를 고른다.
+   * 불리언이 아니라 쌍을 고르게 해 "세트와 버전은 항상 한 쌍"이 구조로 강제된다.
+   *   미설정 또는 "v14a"(기본) — 세트 v14a·버전 14. 유튜브 소유 인용 판정 안 함(현행과 동일).
+   *   "v15a" — 세트 v15a·버전 15. 소유 유튜브 인용을 hasCitationOnly 에 접어 판정.
+   * 적용은 사장님 별도 승인(계획 §5 Step 9) — 이 필드는 구조만 만들고 값은 켜지 않는다.
+   */
+  scoringSetSwitch?: "v14a" | "v15a";
 };
 
 /* ============================================================
@@ -155,6 +170,21 @@ export const runs = pgTable(
     citedCompetitorDomains: text("cited_competitor_domains").array().notNull().default([]),
     attachedBrandMentions: text("attached_brand_mentions").array().notNull().default([]),
     attachedCompetitorMentions: text("attached_competitor_mentions").array().notNull().default([]),
+    /**
+     * 소유 유튜브 인용 증거 — 계획 geotracker-youtube-press-scoring-260923 §4-4(D6).
+     * 이 응답의 citations 중 우리 채널 소유로 판정된 영상의 video-ID 목록(수집 시점 판정
+     * 결과를 그대로 저장 — 재계산 시점의 소유 목록 변동과 무관하게 "그때 무엇으로
+     * 판정했는가"를 보존한다). 형식은 cited_brand_domains 와 같은 text[] — 값이 없으면
+     * 소유 유튜브 인용이 없었거나(applyOwnedCitationJudgment 꺼짐 포함) 기능 미사용.
+     */
+    citedOwnedVideoIds: text("cited_owned_video_ids").array().notNull().default([]),
+    /**
+     * 언론(배포 매체) 인용 증거 — 계획 §4-1·§4-2·§4-4(D6). "<도메인>:title" ·
+     * "<도메인>:description" 형식(press-domain-match.ts 의 collectPressEvidence 산출물)으로
+     * 제목 조건·설명 조건을 각각 남긴다. 배점은 이번 판에서 항상 0 이라 이 컬럼은 점수에
+     * 영향을 주지 않고, 배점을 켤지 실측으로 판단할 근거로만 쌓인다.
+     */
+    citedPressDomains: text("cited_press_domains").array().notNull().default([]),
     geolocation: text("geolocation"),
     isAuto: boolean("is_auto").notNull().default(false),
     /** "2026-04-21T12" 슬롯 기반 중복 실행 방지 */

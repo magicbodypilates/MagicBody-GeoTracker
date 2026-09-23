@@ -12,7 +12,7 @@
  *    기존 세트는 수정하지 않는다.
  */
 
-export type ScoreSetId = "legacy8" | "full10" | "low60" | "v12b" | "full83" | "v14a";
+export type ScoreSetId = "legacy8" | "full10" | "low60" | "v12b" | "full83" | "v14a" | "v15a";
 
 export type Sentiment = "positive" | "neutral" | "negative" | "not-mentioned";
 
@@ -46,6 +46,20 @@ export type ScoreSet = {
   genNeutral: number;
   /** 일반 질의 · 1순위 언급 */
   genTopRanked: number;
+  /**
+   * 일반 질의 · 언급 0 · 언론(배포 매체) 인용만.
+   * 계획 v2 §4-1(D4′) — 이번 판은 전 세트 0(미지정 = 0, calcVisibilityWithSet 이
+   * `?? 0` 으로 기본값을 채운다). **선택 필드로 둔다** — jobHash 가 ScoreSet 객체 전체를
+   * 해시하므로, 기존 세트 리터럴에 이 필드를 채워 넣으면 그 세트를 참조하는 모든 잡(이미
+   * 운영에 적용된 v11·v13 포함)의 jobHash 가 흔들려 과거 manifest 가 rollback·reconcile 에서
+   * 거부된다. 값을 켤 때만(예: v16a) 새 세트에 명시적 숫자를 채운다.
+   */
+  genNoMentionPress?: number;
+  /**
+   * 브랜드 질의 · 언론(배포 매체) 인용. 위 genNoMentionPress 와 같은 이유로 선택 필드.
+   * 계획 v2 §4-1(D4′) — 이번 판은 전 세트 0(미지정 = 0).
+   */
+  brandPress?: number;
 };
 
 /**
@@ -63,9 +77,17 @@ export type ScoreSet = {
  *             상수는 v12b(= full10)와 동일하다. 언급 기본점과 URL 노출 배점을 올리고
  *             가산 항목을 낮춰, 일반 분기 최대(99)와 언급 0 분기(55/45/0)의 상대 위치는
  *             유지하면서 "언급됐다 / URL 만 노출됐다" 두 상태의 하한을 끌어올린다.
+ *   v15a    — 계획 geotracker-youtube-press-scoring-260923 §4-3. 값만 보면 v14a 와
+ *             완전히 동일한 14개 필드를 그대로 복제한 세트다. 점수를 바꾸는 것은 세트가
+ *             아니라 판정(유튜브 소유 인용이 "인용됨" 칸에 합류하는 것)이다 — 계산기
+ *             입력이 같으면 v14a 와 한 점도 다르지 않다(테스트가 고정).
  *
  * 어떤 세트에서도 분기별 합계가 100 미만이라 cap 이 정보를 잘라 역산 불변식을 깨지 않는다
- * (테스트가 이 성질을 고정한다).
+ * (테스트가 이 성질을 고정한다). genNoMentionPress·brandPress 는 어떤 세트에도 명시하지
+ * 않는다 — calcVisibilityWithSet 이 `?? 0` 으로 기본값을 채우므로 "이번 판은 전 세트 0"과
+ * 결과가 완전히 같으면서도, 기존 세트 리터럴을 건드리지 않아 jobHash(ScoreSet 객체 전체를
+ * 해시)가 흔들리지 않는다(이미 운영에 적용된 v11·v13 의 manifest 호환성 보존). 배점을 켤
+ * 때(예: v16a)만 새 세트에 명시적 숫자를 채운다.
  */
 export const SCORE_SETS: Record<ScoreSetId, ScoreSet> = {
   legacy8: {
@@ -164,6 +186,22 @@ export const SCORE_SETS: Record<ScoreSetId, ScoreSet> = {
     genNeutral: 8,
     genTopRanked: 8,
   },
+  v15a: {
+    brandPositive: 34,
+    brandStrong: 48,
+    brandBodyUrl: 15,
+    brandCitation: 8,
+    genNoMentionBodyUrl: 55,
+    genNoMentionCitation: 45,
+    genBase: 66,
+    genFirstPos: 9,
+    genMidPos: 7,
+    genMentions3: 7,
+    genMentions2: 3,
+    genPositive: 9,
+    genNeutral: 8,
+    genTopRanked: 8,
+  },
 };
 
 export const SCORE_SET_IDS = Object.keys(SCORE_SETS) as ScoreSetId[];
@@ -187,6 +225,12 @@ export type VisibilityInputs = {
   isTopRanked: boolean;
   isStronglyRecommended: boolean;
   isBrandedQuery: boolean;
+  /**
+   * 언론(배포 매체) 인용 — 등록된 매체 도메인 + 브랜드 용어 두 조건을 모두 만족한 인용이
+   * 있었는지(계획 v2 §4-1·§4-2). 점수 신호는 **제목** 조건만 반영한다(설명 조건은 증거로만
+   * 기록한다). 필수 필드로 둬 호출부가 값을 빠뜨리지 않고 매번 명시하게 한다.
+   */
+  hasPressCitation: boolean;
 };
 
 /**
@@ -204,6 +248,7 @@ export function calcVisibilityWithSet(inputs: VisibilityInputs, set: ScoreSet): 
     isTopRanked,
     isStronglyRecommended,
     isBrandedQuery,
+    hasPressCitation,
   } = inputs;
 
   // 브랜드 명 검색 — 평가 어조 + URL 노출만 점수. 언급/위치/반복은 의미 없음.
@@ -214,6 +259,7 @@ export function calcVisibilityWithSet(inputs: VisibilityInputs, set: ScoreSet): 
     if (isStronglyRecommended) score += set.brandStrong;
     if (hasBodyUrl) score += set.brandBodyUrl;
     else if (hasCitationOnly) score += set.brandCitation;
+    else if (hasPressCitation) score += set.brandPress ?? 0;
     return Math.min(score, 100);
   }
 
@@ -221,6 +267,7 @@ export function calcVisibilityWithSet(inputs: VisibilityInputs, set: ScoreSet): 
   if (mentions === 0) {
     if (hasBodyUrl) return set.genNoMentionBodyUrl;
     if (hasCitationOnly) return set.genNoMentionCitation;
+    if (hasPressCitation) return set.genNoMentionPress ?? 0;
     return 0;
   }
 
@@ -231,9 +278,10 @@ export function calcVisibilityWithSet(inputs: VisibilityInputs, set: ScoreSet): 
   if (mentions >= 3) score += set.genMentions3;
   else if (mentions >= 2) score += set.genMentions2;
 
-  // URL 신호는 언급 0 분기에서만 반영된다(위 분기에서 처리).
+  // URL·언론 신호는 언급 0 분기에서만 반영된다(위 분기에서 처리) — 계획 v2 D5.
   void hasBodyUrl;
   void hasCitationOnly;
+  void hasPressCitation;
 
   if (sentiment === "positive") score += set.genPositive;
   else if (sentiment === "neutral") score += set.genNeutral;
@@ -296,6 +344,10 @@ export function deriveMentionInputs(
 /**
  * 텍스트 기반 진입점 — 응답 텍스트에서 언급 신호를 도출한 뒤 세트 계산기에 위임.
  * 빈 텍스트는 어떤 신호도 신뢰할 수 없으므로 0 (기존 계산기 계약 유지).
+ *
+ * `hasPressCitation` 은 맨 끝에 **선택 인자**(기본 false)로 둔다 — 기존 호출부가 전부
+ * 9개 인자로 고정돼 있어, 중간에 끼워 넣으면 위치 인자가 전부 밀려 동작 변화가 생긴다.
+ * 끝에 추가 + 기본값 false 로 두면 기존 호출부는 인자를 몰라도 그대로 컴파일·동작한다.
  */
 export function calcVisibilityFromText(
   text: string,
@@ -307,6 +359,7 @@ export function calcVisibilityFromText(
   isStronglyRecommended: boolean,
   isBrandedQuery: boolean,
   set: ScoreSet,
+  hasPressCitation: boolean = false,
 ): number {
   if (!text) return 0;
   const { mentions, firstPos } = deriveMentionInputs(text, brandTerms);
@@ -320,6 +373,7 @@ export function calcVisibilityFromText(
       isTopRanked,
       isStronglyRecommended,
       isBrandedQuery,
+      hasPressCitation,
     },
     set,
   );

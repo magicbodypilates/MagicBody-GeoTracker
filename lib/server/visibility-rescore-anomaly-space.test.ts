@@ -13,6 +13,11 @@
  * 되는 순간) 이 테스트가 먼저 터진다. 라우트는 `status !== "resolved"` 를 한 갈래로 묶어
  * anomaly 로 기록하고 그 행을 건너뛰므로, 새 status 가 생겨도 "점수 불변" 쪽은 유지된다.
  *
+ * ⛔ D0 수정(계획 v2 §3-3) — resolveWithDiagnostics 는 reproBase·targetBase 를 따로 받는다.
+ * 이 파일의 시나리오는 전부 reproBase === targetBase(같은 값)로 호출해 D0 수정 전과 동작이
+ * 같음을 고정한다("판정이 안 바뀌는 잡"의 전제를 검증하는 파일이므로 두 입력을 분리할 이유가
+ * 없다 — D0 자체가 다른 입력을 만드는 시나리오는 visibility-backfill.test.ts 가 덮는다).
+ *
  * 순수 함수만 다룬다 — DB·네트워크 무의존.
  */
 
@@ -49,7 +54,15 @@ function* inputSpace(): Generator<BaseVisibilityInputs> {
       for (const [hasBodyUrl, hasCitationOnly] of urlList) {
         for (const sentiment of sentiments) {
           for (const isBrandedQuery of [false, true]) {
-            yield { mentions, firstPos, hasBodyUrl, hasCitationOnly, sentiment, isBrandedQuery };
+            yield {
+              mentions,
+              firstPos,
+              hasBodyUrl,
+              hasCitationOnly,
+              sentiment,
+              isBrandedQuery,
+              hasPressCitation: false,
+            };
           }
         }
       }
@@ -74,7 +87,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
           );
           for (const targetSetId of TARGET_SETS) {
             const res = resolveWithDiagnostics({
-              base,
+              reproBase: base,
+              targetBase: base,
               storedScore,
               declaredSetId,
               diagnosticSetIds: DIAGNOSTIC_SETS,
@@ -111,7 +125,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
       for (const flags of RANKING_COMBOS) {
         const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v12b);
         const res = resolveWithDiagnostics({
-          base,
+          reproBase: base,
+          targetBase: base,
           storedScore,
           declaredSetId: "v12b",
           diagnosticSetIds: job.diagnosticSets,
@@ -123,6 +138,40 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
           );
         }
         expect(res.targetScore).not.toBeNull();
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
+  });
+
+  /**
+   * ⛔ D0-b 회귀 고정(계획 v2 §3-2·§5 Step 6) — v15 잡의 실제 조합. 선언 세트 v14a ·
+   * 진단 세트 없음 · 목표 v15a. reproBase === targetBase(같은 값)로 호출하므로, v15a 가
+   * v14a 와 값이 완전히 같은 이번 판에서는 D0 수정 여부와 무관하게 입력 전수에서 항상
+   * resolved 여야 한다 — 이 성질이 깨지면 REPRO_SET_BY_VERSION[14] 등록(D0-b)이 되돌아갔다는
+   * 뜻이다(등록이 없으면 이 테스트 자체가 jobHash 단계에서 예외로 실패한다).
+   */
+  it("v15 잡 조합(v14a → v15a · 진단 없음)은 입력 전수에서 항상 resolved", () => {
+    const job = RESCORE_JOBS.v15;
+    let checked = 0;
+    for (const base of inputSpace()) {
+      for (const flags of RANKING_COMBOS) {
+        const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v14a);
+        const res = resolveWithDiagnostics({
+          reproBase: base,
+          targetBase: base,
+          storedScore,
+          declaredSetId: "v14a",
+          diagnosticSetIds: job.diagnosticSets,
+          targetSetId: job.targetSet,
+        });
+        if (res.status !== "resolved") {
+          throw new Error(
+            `${res.status} 발생 — stored=${storedScore} base=${JSON.stringify(base)}`,
+          );
+        }
+        // v15a ≡ v14a(이번 판) 이므로 목표는 항상 저장값과 같다.
+        expect(res.targetScore).toBe(storedScore);
         checked += 1;
       }
     }
@@ -143,7 +192,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
       for (const flags of RANKING_COMBOS) {
         const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v12b);
         const res = resolveWithDiagnostics({
-          base,
+          reproBase: base,
+          targetBase: base,
           storedScore,
           declaredSetId: "v12b",
           diagnosticSetIds: DIAGNOSTIC_SETS,
@@ -162,6 +212,7 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
       hasCitationOnly: false,
       sentiment: "positive",
       isBrandedQuery: false,
+      hasPressCitation: false,
     };
     expect(
       calcVisibilityWithSet(
@@ -171,7 +222,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
     ).toBe(64);
     expect(
       resolveWithDiagnostics({
-        base,
+        reproBase: base,
+        targetBase: base,
         storedScore: 64,
         declaredSetId: "v12b",
         diagnosticSetIds: DIAGNOSTIC_SETS,
@@ -181,7 +233,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
     // 같은 행이 v14 잡의 실제 설정(진단 없음)에서는 정상 해소된다.
     expect(
       resolveWithDiagnostics({
-        base,
+        reproBase: base,
+        targetBase: base,
         storedScore: 64,
         declaredSetId: "v12b",
         diagnosticSetIds: RESCORE_JOBS.v14.diagnosticSets,
@@ -203,7 +256,8 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
         const impossible = [...Array(102).keys()].find((n) => !reproducible.has(n));
         if (impossible === undefined) continue;
         const res = resolveWithDiagnostics({
-          base,
+          reproBase: base,
+          targetBase: base,
           storedScore: impossible,
           declaredSetId,
           diagnosticSetIds: DIAGNOSTIC_SETS,
@@ -218,7 +272,7 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
   });
 
   it("모든 잡의 소스 버전이 전부 재현 세트에 매핑돼 있다(매핑 누락 시 전량 skip 이 된다)", () => {
-    for (const jobId of ["v11", "v12", "v12t", "v13", "v14"] as const) {
+    for (const jobId of ["v11", "v12", "v12t", "v13", "v14", "v15"] as const) {
       for (const version of RESCORE_JOBS[jobId].sourceVersions) {
         expect(REPRO_SET_BY_VERSION[version]).toBeDefined();
       }

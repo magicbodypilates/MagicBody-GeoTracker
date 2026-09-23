@@ -1,4 +1,4 @@
-name: Sync YouTube videos (weekly + manual)
+name: Sync YouTube videos (twice weekly + manual)
 
 # 우리 채널(@magicbody1) 소유 유튜브 영상 목록을 brand_youtube_videos 에 반영한다.
 # 흐름: 러너에서 yt-dlp 로 영상 ID 목록 취득 → VM 으로 전송 → 앱 컨테이너 안에서 sync 스크립트
@@ -17,8 +17,10 @@ on:
         required: true
         default: 'yes'
   schedule:
-    # 주 1회 — 매주 일요일 18:00 UTC (KST 월요일 03:00)
-    - cron: '0 18 * * 0'
+    # 주 2회(월·목) 18:00 UTC — 기존 주 1회에서 조정. 동기화는 Data API 를 쓰지 않고
+    # 공용 러너에서 목록을 긁는 구조라, 긁는 횟수가 늘수록 차단 위험이 올라간다.
+    # 남는 지연은 재산출이 그 시점 목록으로 증거를 다시 만들어 메운다.
+    - cron: '0 18 * * 1,4'
 
 # 같은 워크스페이스 목록을 동시에 두 번 갱신하지 않도록 직렬화.
 concurrency:

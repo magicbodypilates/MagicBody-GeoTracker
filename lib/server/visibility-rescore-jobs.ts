@@ -134,24 +134,27 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     workspaceScope: "production",
   },
   /**
-   * 계획 v2 §5 Step 6·D7·D8′. v14 가 이미 14 로 올려 둔 행(= 현행 v14a 로 계산된 구간
-   * 전체)을 받아 v15a 로 다시 계산한다. 대상 창은 v14 와 완전히 같다(하한 재사용) — 판정
-   * 변경의 효과만 보려면 세트가 바뀐 시점부터가 아니라 v14a 가 적용된 구간 전체를 봐야
-   * 하기 때문이다. 6~8월 초 레거시 구간(다른 세트)은 부록 E 로 분리해 이번 잡 대상이 아니다.
+   * 계획 v2 §5 Step 6·D7·D8′. v14 가 이미 14 로 올려 둔 행 중 **2026-09-21(KST) 이후**만
+   * 받아 v15a 로 다시 계산한다. 6~8월 초 레거시 구간(다른 세트)은 부록 E 로 분리해 이번
+   * 잡 대상이 아니다.
+   *
+   * ⛔ 2026-09-23 개정 — 대상 창 하한을 v14 와 공유하지 않는다. 애초 설계는 "v14a 가 적용된
+   *    구간 전체"(v14 와 완전히 같은 하한, KST 8/24)를 대상으로 삼았지만, 과거 구간에 새
+   *    판정(소유 유튜브 인용)을 소급 적용하지 않기로 결정했다. 8/24~9/20 사이 행은
+   *    score_version 14(v14a)로 그대로 남고, v15 잡의 대상에서 조용히 빠진다(잡 정의가
+   *    시간으로 걸러내므로 별도 예외 처리가 필요 없다).
    *
    * applyOwnedCitationJudgment: true — 이 잡의 targetBase 만 소유 유튜브 인용을
    * hasCitationOnly 에 접은 새 판정으로 계산한다(reproBase 는 항상 옛 판정 그대로).
    *
-   * ⚠️ diagnosticSets 가 빈 목록인 이유는 v14 와 완전히 같다 — 소스 버전이 14 하나뿐이고,
+   * ⚠️ diagnosticSets 가 빈 목록인 이유는 v14 와 같다 — 소스 버전이 14 하나뿐이고,
    *    score_version 14 를 쓴 경로(수집 · v14 재산출)는 둘 다 v14a 세트라 선언 세트가 곧
    *    유일한 후보다. legacy8·full10 을 진단에 넣으면 우연히 합이 같은 조합에서
    *    cross-set-ambiguous 오탐이 난다(v14 주석과 동일 근거).
    */
   v15: {
-    // v14 와 같은 하한(KST 2026-08-24 00:00) — 리터럴을 그대로 복제한다(v13 이 v11 의 창을
-    // 복제하는 것과 같은 관례). 객체 리터럴 안에서는 자기 자신(RESCORE_JOBS.v14)을 아직
-    // 참조할 수 없어서다. 동일성은 아래 v15 전용 테스트가 고정한다.
-    fromUtc: "2026-08-23T15:00:00.000Z",
+    // KST 2026-09-21 00:00 이후만 대상 — 그 이전(v14a 적용 구간 전체 포함)은 손대지 않는다.
+    fromUtc: "2026-09-20T15:00:00.000Z",
     toUtc: null,
     providers: null,
     sourceVersions: [14],
@@ -240,19 +243,6 @@ export function configFingerprint(brandTerms: string[], websites: string[]): str
     brandTerms: [...brandTerms].sort(),
     websites: [...websites].sort(),
   };
-  return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
-}
-
-/**
- * 매체(언론) 도메인 목록 지문 — sha256 앞 12자 (계획 v2 §4-4 D6 보강).
- *
- * v1 은 "재산출 감사 기록이 이미 매체 목록을 지문으로 남긴다"고 적었는데 사실이 아니었다
- * (§4-4 정정) — configFingerprint 는 브랜드 별칭·자사 도메인 둘만 해시한다. 기존 지문의
- * payload 를 바꾸면 같은 설정인데 예전 감사 파일과 값이 달라져 과거·현재 대조가 깨지므로,
- * 매체 목록은 **별도 필드**로 신설한다.
- */
-export function pressDomainFingerprint(pressDomains: string[]): string {
-  const payload = { pressDomains: [...pressDomains].sort() };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 12);
 }
 

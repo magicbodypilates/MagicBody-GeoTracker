@@ -43,7 +43,6 @@ import {
   isRescoreJobId,
   jobHash,
   ownedVideoListFingerprint,
-  pressDomainFingerprint,
   promptKey,
   reproSetForVersion,
   type RescoreJob,
@@ -67,7 +66,7 @@ import {
 import { deriveMentionInputs, type Sentiment } from "@/lib/server/visibility-score-sets";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
-import { collectPressEvidence, normalizePressDomains } from "@/lib/server/press-domain-match";
+import { collectPressEvidence } from "@/lib/server/press-domain-match";
 
 export const dynamic = "force-dynamic";
 
@@ -288,8 +287,6 @@ type ScopedWorkspaceFull = ScopedWorkspace & {
   websites: string[];
   /** 저장된 점수를 만든 수집 경로의 별칭 파싱 결과 — 아래 termParity 대조용. */
   collectionTerms: string[];
-  /** 정규화된 언론(배포 매체) 도메인 — 계획 §4-1. 비어 있으면 언론 판정은 항상 미매칭. */
-  pressDomains: string[];
 };
 
 async function loadScopedWorkspaces(job: RescoreJob): Promise<ScopedWorkspaceFull[]> {
@@ -306,7 +303,6 @@ async function loadScopedWorkspaces(job: RescoreJob): Promise<ScopedWorkspaceFul
     brandTerms: buildBrandTerms(w.brandConfig),
     collectionTerms: buildCollectionBrandTerms(w.brandConfig),
     websites: w.brandConfig?.websites ?? [],
-    pressDomains: normalizePressDomains(w.brandConfig?.pressDomains),
   }));
 }
 
@@ -370,16 +366,6 @@ function fingerprintOf(workspaces: readonly ScopedWorkspaceFull[]): string {
     for (const s of w.websites) sites.add(s);
   }
   return configFingerprint([...terms], [...sites]);
-}
-
-/**
- * 범위 안 전 워크스페이스의 매체(언론) 목록 합집합 지문 — 계획 §4-4(D6 보강).
- * configFingerprint 와 별개 필드다(§4-4 정정 — 기존 지문은 매체 목록을 담지 않는다).
- */
-function pressFingerprintOf(workspaces: readonly ScopedWorkspaceFull[]): string {
-  const domains = new Set<string>();
-  for (const w of workspaces) for (const d of w.pressDomains) domains.add(d);
-  return pressDomainFingerprint([...domains]);
 }
 
 /* ============================================================
@@ -505,7 +491,10 @@ function deriveNewJudgmentRowInputs(
   const hasCitationOnly =
     !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
 
-  const pressEvidence = collectPressEvidence(citations, ws.pressDomains, ws.brandTerms);
+  // 2026-09-23 개정 — 매체 도메인 allowlist 대신 "브랜드 언급 + 우리 소유 아님"으로 판정한다
+  // (press-domain-match.ts). ownedVideoIds 는 이 함수가 applyOwnedCitationJudgment 잡에서만
+  // 호출되므로 이미 위에서 실제로 조회된 값이다.
+  const pressEvidence = collectPressEvidence(citations, ws.websites, ownedVideoIds, ws.brandTerms);
 
   const isBrandedQuery = !isInformationalPrompt(row.promptText, ws.brandTerms);
 
@@ -521,7 +510,7 @@ function deriveNewJudgmentRowInputs(
       hasCitationOnly,
       sentiment: row.sentiment as Sentiment,
       isBrandedQuery,
-      hasPressCitation: pressEvidence.hasTitleMatch,
+      hasPressCitation: pressEvidence.hasMatch,
     },
     citedOwnedVideoIds,
     citedPressDomains: pressEvidence.evidence,
@@ -598,10 +587,6 @@ export async function POST(req: NextRequest) {
   try {
     const workspaces = await loadScopedWorkspaces(job);
     const cfgFingerprint = fingerprintOf(workspaces);
-    // 매체(언론) 목록 지문 — 계획 §4-4(D6 보강). 비용이 없는(DB 무의존) 계산이라 모든
-    // 모드에서 함께 낸다. 소유 영상 지문은 DB 조회가 있어 실제 쓰기가 일어나는 sweep
-    // 에서만 낸다(아래).
-    const pressCfgFingerprint = pressFingerprintOf(workspaces);
     const baseConditions = buildBaseConditions(job, workspaces);
 
     /* ── report ── */
@@ -668,7 +653,6 @@ export async function POST(req: NextRequest) {
         mode: "report",
         ...metaPayload(jobId),
         cfgFingerprint,
-        pressCfgFingerprint,
         windows,
       });
     }
@@ -751,7 +735,6 @@ export async function POST(req: NextRequest) {
         mode: "preflight",
         ...metaPayload(jobId),
         cfgFingerprint,
-        pressCfgFingerprint,
         workspaceCount: workspaces.length,
         windowTotal,
         targetCount,
@@ -1042,7 +1025,6 @@ export async function POST(req: NextRequest) {
       operationId,
       codeSha,
       cfgFingerprint,
-      pressCfgFingerprint,
       ownedVideoFingerprint,
       dryRun,
       processed: targets.length,

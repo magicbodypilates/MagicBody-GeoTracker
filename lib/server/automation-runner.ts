@@ -41,7 +41,7 @@ import {
 } from "@/lib/server/visibility-score-sets";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
-import { collectPressEvidence, normalizePressDomains } from "@/lib/server/press-domain-match";
+import { collectPressEvidence } from "@/lib/server/press-domain-match";
 
 /**
  * (세트, 버전) 쌍 선택자 — 계획 geotracker-youtube-press-scoring-260923 §4-5(D8′).
@@ -243,15 +243,13 @@ async function executeSchedule(
 
   // (세트·버전) 쌍 선택 — 계획 §4-5. 미지정이면 기본 v14a(꺼짐)로 떨어진다.
   const scoringProfile = resolveScoringProfile(ws.brandConfig.scoringSetSwitch);
-  // 언론 도메인 — 스위치와 무관하게 항상 로드한다(배점 0이라 안전 · 증거는 지금부터 쌓여야
-  // 나중에 배점을 켤 실측 근거가 된다. §4-1).
-  const pressDomains = normalizePressDomains(ws.brandConfig.pressDomains);
-  // 소유 유튜브 영상 집합 — 스위치가 켜진 워크스페이스만 조회한다. 대부분의 워크스페이스는
-  // 꺼짐(기본)이라 이 DB 조회 자체를 건너뛰어야 "현행과 완전히 동일"(§4-5)이 코드 경로
-  // 수준에서도 성립한다.
-  const ownedVideoIds = scoringProfile.applyOwnedCitationJudgment
-    ? await getOwnedYoutubeVideoIds(ws.id)
-    : new Set<string>();
+  // 소유 유튜브 영상 집합 — 2026-09-23 개정으로 **스위치와 무관하게 항상 조회한다**.
+  // 이유: 언론 인용 판정(아래 resolveCitationJudgment)이 이제 도메인 allowlist 대신
+  // "브랜드 언급 + 우리 소유 아님"으로 판정하는데, 소유 유튜브 영상 여부를 모르면 우리
+  // 자신이 올린 영상이 언론 인용으로 오염된다(중복 계산). 점수 계산(hasCitationOnly)에서는
+  // 여전히 scoringProfile.applyOwnedCitationJudgment 로 별도 게이트된다 — 이 집합을 항상
+  // 불러오는 것은 "증거 수집"용이고 "점수 반영 여부"는 그대로 스위치가 결정한다.
+  const ownedVideoIds = await getOwnedYoutubeVideoIds(ws.id);
 
   let executedRuns = 0;
   let skippedDuplicates = 0;
@@ -286,7 +284,6 @@ async function executeSchedule(
           brandWebsites,
           competitorWebsites,
           scoringProfile,
-          pressDomains,
           ownedVideoIds,
           now,
         }),
@@ -318,10 +315,14 @@ export type CitationJudgmentInput = {
   citations: Citation[];
   /** (세트·버전) 쌍 — applyOwnedCitationJudgment 가 소유 유튜브 판정 적용 여부를 가른다. */
   scoringProfile: ScoringProfile;
-  /** 소유 유튜브 video-ID 집합. 스위치가 꺼져 있으면 호출부가 항상 빈 Set 을 넘긴다. */
+  /**
+   * 소유 유튜브 video-ID 집합. 2026-09-23 개정으로 스위치와 무관하게 항상 채워져서
+   * 들어온다(언론 인용 판정이 이 집합으로 "우리 영상"을 걸러내야 하므로) — 다만 점수
+   * 반영(citedOwnedVideoIds→hasCitationOnly)은 여전히 scoringProfile 이 게이트한다.
+   */
   ownedVideoIds: Set<string>;
-  /** 정규화된 언론 도메인 목록 — 비어 있으면 언론 판정은 항상 미매칭. */
-  pressDomains: string[];
+  /** 브랜드 공식 웹사이트·소셜 채널 URL 목록 — 언론 인용 판정에서 "우리 소유" 제외 기준. */
+  websites: string[];
   brandTerms: string[];
   /** 본문(답변 텍스트)에 자사 URL 이 등장했는지 — hasCitationOnly 계산에 필요. */
   hasBodyUrl: boolean;
@@ -351,7 +352,7 @@ export function resolveCitationJudgment(input: CitationJudgmentInput): CitationJ
     citations,
     scoringProfile,
     ownedVideoIds,
-    pressDomains,
+    websites,
     brandTerms,
     hasBodyUrl,
     citedBrandDomains,
@@ -376,15 +377,16 @@ export function resolveCitationJudgment(input: CitationJudgmentInput): CitationJ
   const hasCitationOnly =
     !hasBodyUrl && (citedBrandDomains.length > 0 || citedOwnedVideoIds.length > 0);
 
-  // 언론(배포 매체) 인용 증거 — 계획 §4-1·§4-2. 스위치와 무관하게 항상 계산한다: 현행 전
-  // 세트의 배점이 0 이라(brandPress·genNoMentionPress) 점수에는 절대 영향이 없고, 대신
-  // 지금부터 증거가 쌓여야 나중에 배점을 켤지 실측으로 판단할 수 있다(§4-1 점 4).
-  const pressEvidence = collectPressEvidence(citations, pressDomains, brandTerms);
+  // 언론(배포 매체) 인용 증거 — 2026-09-23 개정: 매체 도메인 allowlist 대신 "브랜드 언급 +
+  // 우리 소유 아님"으로 판정한다(press-domain-match.ts 참조). 스위치와 무관하게 항상
+  // 계산한다: 현행 전 세트의 배점이 0 이라(brandPress·genNoMentionPress) 점수에는 절대
+  // 영향이 없고, 대신 지금부터 증거가 쌓여야 나중에 배점을 켤지 실측으로 판단할 수 있다.
+  const pressEvidence = collectPressEvidence(citations, websites, ownedVideoIds, brandTerms);
 
   return {
     hasCitationOnly,
     citedOwnedVideoIds,
-    hasPressCitation: pressEvidence.hasTitleMatch,
+    hasPressCitation: pressEvidence.hasMatch,
     citedPressDomains: pressEvidence.evidence,
   };
 }
@@ -406,9 +408,10 @@ async function runOneProviderForPrompt(args: {
   competitorWebsites: string[];
   /** (세트·버전) 쌍 — §4-5. executeSchedule 이 워크스페이스당 한 번만 계산해 넘긴다. */
   scoringProfile: ScoringProfile;
-  /** 정규화된 언론 도메인 목록 — 비어 있으면 언론 판정은 항상 미매칭(코드 기본값). */
-  pressDomains: string[];
-  /** 소유 유튜브 video-ID 집합 — scoringProfile.applyOwnedCitationJudgment 가 false 면 항상 빈 Set. */
+  /**
+   * 소유 유튜브 video-ID 집합. 2026-09-23 개정으로 스위치와 무관하게 항상 채워져서
+   * 들어온다 — 언론 인용 판정이 "우리 영상"을 걸러내는 데 쓴다.
+   */
   ownedVideoIds: Set<string>;
   now: Date;
 }): Promise<ProviderRunOutcome> {
@@ -422,7 +425,6 @@ async function runOneProviderForPrompt(args: {
     brandWebsites,
     competitorWebsites,
     scoringProfile,
-    pressDomains,
     ownedVideoIds,
   } = args;
 
@@ -511,7 +513,7 @@ async function runOneProviderForPrompt(args: {
         citations,
         scoringProfile,
         ownedVideoIds,
-        pressDomains,
+        websites: brandWebsites,
         brandTerms,
         hasBodyUrl,
         citedBrandDomains,

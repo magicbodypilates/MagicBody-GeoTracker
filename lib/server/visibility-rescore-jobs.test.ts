@@ -15,7 +15,6 @@ import {
   isRescoreJobId,
   jobHash,
   ownedVideoListFingerprint,
-  pressDomainFingerprint,
   reproSetForVersion,
   type RescoreJobId,
 } from "./visibility-rescore-jobs";
@@ -212,11 +211,12 @@ describe("잡 정의 불변식", () => {
    * (jobHash 의 "재현 세트가 없는 소스 버전" 가드). 이 테스트가 통과한다는 것 자체가
    * D0-b 가 고쳐져 있다는 증거다.
    */
-  it("v15 는 v14 와 대상 창이 완전히 같고 소스 버전·목표·진단 세트만 다르다", () => {
+  it("v15 는 소스 버전·목표·진단 세트가 v14 와 다르고, provider·scope 등 나머지 정의는 같다", () => {
     const a = RESCORE_JOBS.v14;
     const b = RESCORE_JOBS.v15;
     const scopeOf = (job: typeof a) => ({
-      fromUtc: job.fromUtc,
+      // 2026-09-23 개정 — fromUtc 는 더 이상 v14 와 같지 않다(아래 별도 테스트). 창을 뺀
+      // 나머지 대상 조건만 비교한다(v13/v11·v14/v12 비교 관례와 동일).
       toUtc: job.toUtc,
       providers: job.providers,
       informationalOnly: job.informationalOnly,
@@ -224,7 +224,6 @@ describe("잡 정의 불변식", () => {
       workspaceScope: job.workspaceScope,
       diagnosticSets: job.diagnosticSets,
     });
-    // 대상 창(fromUtc·toUtc)이 v14 와 완전히 같다 — "현행 세트 구간 전체"가 대상이다(D7).
     expect(scopeOf(b)).toEqual(scopeOf(a));
 
     expect(b.sourceVersions).toEqual([14]);
@@ -239,6 +238,23 @@ describe("잡 정의 불변식", () => {
     expect(() => jobHash("v15")).not.toThrow();
     expect(jobHash("v15")).toMatch(/^[0-9a-f]{12}$/);
     expect(jobHash("v15")).not.toBe(jobHash("v14"));
+  });
+
+  /**
+   * ⛔ 2026-09-23 사장님 결정 — 과거 구간을 건드리지 않는다. v15 는 더 이상 v14 와 같은
+   * 하한(KST 8/24)을 쓰지 않고, KST 2026-09-21 00:00 이후만 대상으로 한다. v14~v15 사이
+   * (8/24~9/20)에 저장된 score_version 14 행은 v15 의 대상 밖으로 남아 v14a 점수 그대로
+   * 유지된다.
+   */
+  it("v15 의 대상 창 하한은 v14 보다 늦다(KST 2026-09-21 00:00) — 과거 미소급 결정", () => {
+    const a = RESCORE_JOBS.v14;
+    const b = RESCORE_JOBS.v15;
+    expect(b.fromUtc).toBe("2026-09-20T15:00:00.000Z"); // KST 2026-09-21 00:00
+    expect(b.fromUtc).not.toBe(a.fromUtc);
+    expect(new Date(b.fromUtc).getTime()).toBeGreaterThan(new Date(a.fromUtc).getTime());
+    // 상한은 둘 다 없음(운영 계속 수집 구간을 계속 포함) — 그대로 유지.
+    expect(b.toUtc).toBeNull();
+    expect(a.toUtc).toBeNull();
   });
 
   it("v15 의 진단 세트도 v14 와 같은 이유로 비어 있다(소스 세트가 하나뿐)", () => {
@@ -294,6 +310,17 @@ describe("창 경계 — ±1µs (timestamptz 반차 구간)", () => {
     // 보류 구간(8/1~8/11)도 대상 밖
     { iso: "2026-08-01T00:00:00.000000Z", job: "v14", expected: false, label: "보류 구간 시작" },
     { iso: "2026-08-11T14:59:59.999999Z", job: "v14", expected: false, label: "보류 구간 끝" },
+    // v15 하한 — 2026-09-23 개정. v14 보다 늦게 시작한다(KST 9/21 00:00). 경계를 독립으로 고정한다.
+    { iso: "2026-09-20T14:59:59.999999Z", job: "v15", expected: false, label: "하한 -1µs" },
+    { iso: "2026-09-20T15:00:00.000000Z", job: "v15", expected: true, label: "하한 정확히" },
+    { iso: "2026-09-20T15:00:00.000001Z", job: "v15", expected: true, label: "하한 +1µs" },
+    // v15 상한 없음 — 이후 시각은 전부 포함
+    { iso: "2026-12-31T23:59:59.999999Z", job: "v15", expected: true, label: "상한 없음(먼 미래)" },
+    // ⛔ 과거 미소급 회귀 고정 — v14 의 하한(8/24)부터 v15 하한 직전(9/20)까지는 v14 target
+    // 이지만 v15 target 은 아니다. 이 구간은 score_version 14(v14a)로 그대로 남는다.
+    { iso: "2026-08-23T15:00:00.000000Z", job: "v15", expected: false, label: "v14 하한(8/24) 미포함" },
+    { iso: "2026-09-01T00:00:00.000000Z", job: "v15", expected: false, label: "8/24~9/20 구간 미포함" },
+    { iso: "2026-09-20T14:59:59.999999Z", job: "v14", expected: true, label: "v15 하한 직전도 v14 는 포함(상한 없음)" },
   ];
 
   for (const c of cases) {
@@ -382,24 +409,15 @@ describe("jobHash / configFingerprint", () => {
 });
 
 /**
- * 계획 v2 §4-4(D6 보강) — 매체 목록·소유 영상 목록 지문. configFingerprint 와 별개 필드로
- * 신설한 이유는 기존 지문의 payload 를 바꾸면 과거 감사 파일과 값이 달라지기 때문이다.
+ * 계획 v2 §4-4(D6 보강) — 소유 영상 목록 지문. configFingerprint 와 별개 필드로 신설한
+ * 이유는 기존 지문의 payload 를 바꾸면 과거 감사 파일과 값이 달라지기 때문이다.
+ *
+ * ⛔ 2026-09-23 개정 — pressDomainFingerprint 는 제거했다. 매체 도메인 allowlist(설정)
+ * 자체가 없어져 지문을 낼 대상이 없다 — 언론 판정은 이제 configFingerprint(브랜드 용어·
+ * 웹사이트) + ownedVideoListFingerprint(소유 영상)만으로 전부 재현 가능하다.
  */
-describe("pressDomainFingerprint / ownedVideoListFingerprint", () => {
-  it("pressDomainFingerprint 는 순서에 무관하고 내용이 바뀌면 달라진다", () => {
-    const a = pressDomainFingerprint(["b.example", "a.example"]);
-    const b = pressDomainFingerprint(["a.example", "b.example"]);
-    const c = pressDomainFingerprint(["a.example"]);
-    expect(a).toBe(b);
-    expect(a).not.toBe(c);
-    expect(a).toMatch(/^[0-9a-f]{12}$/);
-  });
-
-  it("pressDomainFingerprint 는 빈 목록도 안전하게 처리한다", () => {
-    expect(pressDomainFingerprint([])).toMatch(/^[0-9a-f]{12}$/);
-  });
-
-  it("ownedVideoListFingerprint 는 개수 + 순서 무관 해시를 반환하고 원문을 담지 않는다", () => {
+describe("ownedVideoListFingerprint", () => {
+  it("개수 + 순서 무관 해시를 반환하고 원문을 담지 않는다", () => {
     const a = ownedVideoListFingerprint(["id2", "id1"]);
     const b = ownedVideoListFingerprint(["id1", "id2"]);
     const c = ownedVideoListFingerprint(["id1"]);
@@ -453,8 +471,29 @@ describe("검증 창 — 잡 정의에서 파생", () => {
     expect(b.toUtc).toBe(a.toUtc);
   });
 
-  it("v15: 대상 창이 v14 와 완전히 같다(현행 세트 구간 전체가 대상 — D7)", () => {
-    expect(buildVerificationWindows("v15")).toEqual(buildVerificationWindows("v14"));
+  /**
+   * ⛔ 2026-09-23 개정 — v15 의 대상 창 하한이 v14 와 달라졌으므로(과거 미소급 결정) target·
+   * before-target 창도 더 이상 v14 와 같지 않다. holdout 창만 잡 정의와 무관하게 고정된
+   * 값이라 여전히 같다.
+   */
+  it("v15: 대상 창 하한이 v14 와 다르고, 상한(null)·holdout 창은 같다", () => {
+    const a = buildVerificationWindows("v14");
+    const b = buildVerificationWindows("v15");
+    const targetA = a.find((x) => x.key === "target")!;
+    const targetB = b.find((x) => x.key === "target")!;
+    expect(targetB.fromUtc).toBe(RESCORE_JOBS.v15.fromUtc);
+    expect(targetB.fromUtc).not.toBe(targetA.fromUtc);
+    expect(targetB.toUtc).toBeNull();
+    expect(targetB.toUtc).toBe(targetA.toUtc);
+
+    const beforeA = a.find((x) => x.key === "before-target")!;
+    const beforeB = b.find((x) => x.key === "before-target")!;
+    expect(beforeB.toUtc).toBe(RESCORE_JOBS.v15.fromUtc);
+    expect(beforeB.toUtc).not.toBe(beforeA.toUtc);
+
+    const holdoutA = a.find((x) => x.key === "holdout")!;
+    const holdoutB = b.find((x) => x.key === "holdout")!;
+    expect(holdoutB).toEqual(holdoutA); // holdout 은 잡 정의와 무관하게 고정된 구간이다
   });
 
   it("v12: provider 를 좁히지 않으므로 other-providers 창이 없다", () => {

@@ -42,9 +42,8 @@ import {
   isStatsRangeError,
   type RunMode,
 } from "@/lib/server/stats-range";
-import { enumerateDateRange, toKstDateKey } from "@/lib/client/date-kst";
+import { enumerateDateRange } from "@/lib/client/date-kst";
 import { safeEnvInt } from "@/lib/server/citation-url-aggregate";
-import { RESCORE_JOBS } from "@/lib/server/visibility-rescore-jobs";
 
 export const dynamic = "force-dynamic";
 
@@ -182,10 +181,6 @@ export async function GET(
       },
       providers,
       totals,
-      // 채점 규칙 변경 경계(계획 geotracker-youtube-press-scoring-260923 §5 Step 7) — v15
-      // 잡의 대상 창 하한(KST). 재산출이 아직 적용되지 않은 지금도 날짜 자체는 고정 값이라
-      // 미리 노출한다 — 화면은 이 날짜가 현재 표시 구간 안에 있을 때만 경계선을 그린다.
-      ruleChangeBoundary: toKstDateKey(RESCORE_JOBS.v15.fromUtc),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown";

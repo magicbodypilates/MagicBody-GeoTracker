@@ -23,9 +23,10 @@ const BrandConfigSchema = z.object({
   industry: z.string().optional(),
   keywords: z.string().optional(),
   description: z.string().optional(),
-  // 계획 geotracker-youtube-press-scoring-260923 §4-1·§4-5 — 언론 도메인 목록 + (세트·버전)
-  // 쌍 선택자. 둘 다 선택 필드라 기존 PATCH 호출부(둘을 모르는)는 그대로 동작한다.
-  pressDomains: z.array(z.string()).optional(),
+  // 계획 geotracker-youtube-press-scoring-260923 §4-5 — (세트·버전) 쌍 선택자. 선택
+  // 필드라 기존 PATCH 호출부(모르는)는 그대로 동작한다. 2026-09-23 개정으로 언론(배포
+  // 매체) 도메인 목록(pressDomains) 설정은 폐기했다 — 언론 판정은 이제 브랜드 언급 +
+  // 소유 도메인 제외로만 계산해 워크스페이스 설정이 필요 없다(press-domain-match.ts).
   scoringSetSwitch: z.enum(["v14a", "v15a"]).optional(),
 });
 

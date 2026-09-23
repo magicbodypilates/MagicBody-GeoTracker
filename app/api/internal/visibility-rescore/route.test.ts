@@ -1526,7 +1526,9 @@ describe("v12 잡 — 전 provider · 브랜드 질의 포함", () => {
  * ============================================================ */
 
 describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
-  const v15At = (m: number) => new Date(new Date("2026-08-24T03:00:00.000Z").getTime() + m * 60_000);
+  // 2026-09-23 개정 — v15 의 대상 창 하한이 KST 2026-09-21 00:00(= UTC 2026-09-20T15:00)으로
+  // 바뀌었다. 옛 하한(8/24) 기준 시드는 더 이상 v15 대상에 안 걸리므로 새 하한 기준으로 옮긴다.
+  const v15At = (m: number) => new Date(new Date("2026-09-21T03:00:00.000Z").getTime() + m * 60_000);
   const OWNED_ID = "dQw4w9WgXcQ";
 
   it("meta: 소스 버전 14 · 목표 v15a · jobHash 가 v14 와 다르다(D0-b 회귀 없음)", async () => {
@@ -1539,7 +1541,7 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(body.jobHash).not.toBe(jobHash("v14"));
   });
 
-  it("소유 유튜브 인용도 언론 설정도 없으면 v15a 출력이 v14a 와 완전히 같다(동작 변화 0)", async () => {
+  it("소유 유튜브 인용도 언론 인용도 없으면 v15a 출력이 v14a 와 완전히 같다(동작 변화 0)", async () => {
     // 일반 검색·언급 0·URL 신호 전혀 없음 — 옛 판정·새 판정이 똑같이 0 을 만든다.
     seedRun(1, { version: 14, score: 0, createdAt: v15At(1), answer: "무관한 답변" });
     const b = await (await POST(post({ job: "v15", apply: true, batchSize: 200 }))).json();
@@ -1594,13 +1596,9 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(b.changes[0].citedOwnedVideoIds).toEqual([]);
   });
 
-  it("언론(배포 매체) 인용 — 증거는 백필되지만 배점이 0 이라 점수는 안 바뀐다", async () => {
-    H.store.workspaces.length = 0;
-    H.store.workspaces.push({
-      id: WS_PROD,
-      brandConfig: { ...BRAND_CONFIG, pressDomains: ["press-wire.example"] },
-      isProduction: true,
-    });
+  it("언론(제3자) 인용 — 증거는 백필되지만 배점이 0 이라 점수는 안 바뀐다(2026-09-23: 등록 도메인 개념 폐기)", async () => {
+    // 매체 도메인 allowlist 를 없앴으므로(press-domain-match.ts) 워크스페이스 설정 오버라이드가
+    // 필요 없다 — 브랜드 언급이 있고 우리 소유가 아니면 어떤 도메인이든 매칭된다.
     seedRun(1, {
       version: 14,
       score: 0,
@@ -1615,32 +1613,70 @@ describe("v15 잡 — 소스 버전 14 하나 · v14a → v15a", () => {
     expect(b.changes[0].before).toBe(0);
     expect(b.changes[0].after).toBe(0); // 배점 0 — 점수 불변(계획 D4′)
     expect(b.changes[0].citedOwnedVideoIds).toEqual([]);
-    expect(b.changes[0].citedPressDomains).toEqual(["press-wire.example:title"]);
+    expect(b.changes[0].citedPressDomains).toEqual(["press-wire.example"]);
   });
 
-  it("미등록 매체의 언론성 인용은 증거로도 남지 않는다", async () => {
-    H.store.workspaces.length = 0;
-    H.store.workspaces.push({
-      id: WS_PROD,
-      brandConfig: { ...BRAND_CONFIG, pressDomains: ["press-wire.example"] },
-      isProduction: true,
-    });
+  it("브랜드 언급이 없는 인용은 어떤 도메인이든 증거로 남지 않는다", async () => {
     seedRun(1, {
       version: 14,
       score: 0,
       createdAt: v15At(1),
       answer: "무관한 답변",
-      citations: [{ url: "https://unregistered-outlet.example/a", title: "요가원 관련" }],
+      citations: [{ url: "https://some-outlet.example/a", title: "브랜드와 무관한 기사" }],
     });
     const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
     expect(b.changes[0].citedPressDomains).toEqual([]);
   });
 
-  it("응답에 pressCfgFingerprint·ownedVideoFingerprint 가 실린다(v15 만 소유 영상 지문 계산)", async () => {
+  it("우리 공식 웹사이트 인용은 브랜드 언급이 있어도 언론 증거에서 제외된다(중복 계산 방지)", async () => {
+    H.store.workspaces.length = 0;
+    H.store.workspaces.push({
+      id: WS_PROD,
+      brandConfig: { ...BRAND_CONFIG, websites: ["https://mysite.example"] },
+      isProduction: true,
+    });
+    // 이 인용은 websites 에도 등록된 우리 사이트라 citedBrandDomains(기존 메커니즘)에도 동시에
+    // 잡혀 hasCitationOnly=true 가 된다 — 그래서 재현 점수(v14a genNoMentionCitation=45)로
+    // 시드해야 reproduction 이 성립한다. 확인하려는 것은 점수가 아니라 citedPressDomains 다:
+    // 우리 사이트는 "브랜드 공식 인용"으로 이미 분류되므로 "언론(제3자) 인용"에는 중복으로
+    // 잡히면 안 된다.
+    seedRun(1, {
+      version: 14,
+      score: 45,
+      createdAt: v15At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [{ url: "https://mysite.example/notice", title: "요가원 공지사항" }],
+    });
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].after).toBe(45); // v15a 도 같은 이유로 동일 — 점수는 바뀌지 않는다
+    expect(b.changes[0].citedPressDomains).toEqual([]);
+  });
+
+  it("소유 유튜브 영상 인용은 citedOwnedVideoIds 로 잡히고 citedPressDomains 로는 이중 계산되지 않는다", async () => {
+    seedOwnedVideo(WS_PROD, OWNED_ID);
+    seedRun(1, {
+      version: 14,
+      score: 0,
+      createdAt: v15At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [
+        { url: `https://youtu.be/${OWNED_ID}`, title: "요가원 소개 영상" }, // 우리 영상 — 언론 증거 제외 대상
+        { url: "https://press-wire.example/a", title: "요가원 관련 보도" }, // 제3자 — 언론 증거로 남아야 함
+      ],
+    });
+    const b = await (await POST(post({ job: "v15", dryRun: true, batchSize: 200 }))).json();
+    expect(b.changes[0].citedOwnedVideoIds).toEqual([OWNED_ID]);
+    expect(b.changes[0].citedPressDomains).toEqual(["press-wire.example"]);
+  });
+
+  it("응답에 cfgFingerprint·ownedVideoFingerprint 가 실린다(v15 만 소유 영상 지문 계산)", async () => {
     seedOwnedVideo(WS_PROD, OWNED_ID);
     seedRun(1, { version: 14, createdAt: v15At(1), score: 0, answer: "무관" });
     const b = await (await POST(post({ job: "v15", dryRun: true }))).json();
-    expect(b.pressCfgFingerprint).toMatch(/^[0-9a-f]{12}$/);
+    expect(b.cfgFingerprint).toMatch(/^[0-9a-f]{12}$/);
+    // 2026-09-23 제거 — 매체 도메인 allowlist 설정 자체가 없어져 지문을 낼 대상이 없다.
+    expect(b.pressCfgFingerprint).toBeUndefined();
     expect(b.ownedVideoFingerprint).toMatchObject({ count: 1 });
     expect(b.ownedVideoFingerprint.hash).toMatch(/^[0-9a-f]{12}$/);
   });

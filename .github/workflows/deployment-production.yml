@@ -153,6 +153,10 @@ jobs:
           DEPLOY_DEST_PREFIX: ${{ github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD' }}
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
+          # worker 는 앱과 같은 이미지를 쓰지만 지금까지 앱만 재생성해 옛 이미지(08-04)에 머물렀다.
+          # 상태가 없는 프로세스(1분마다 tick 호출)라 함께 재생성해도 부작용이 없다 — 계획 geotracker-collect-speed-260924 Step 6.
+          # DB(mbd-geo-tracker-db)는 의존 서비스라 재생성 대상이 아니다(--always-recreate-deps 미사용).
+          WORKER_SERVICE: "mbd-geo-tracker-worker"
           ENV_FILE: "/datadrive/apps/geo-tracker/.env"
           # 최고관리자 인증 시크릿 — 값은 GitHub Secrets 에서만 (평문 커밋 금지).
           # 미설정(빈 값)이면 기존 .env 값을 보존한다(부분 롤아웃 안전).
@@ -173,7 +177,7 @@ jobs:
           key: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
           timeout: 30s
           command_timeout: 20m
-          envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
+          envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,WORKER_SERVICE,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
           script: |
             echo "[deploy target] secrets=${DEPLOY_DEST_PREFIX}_*  server=$(hostname)"
             set -eu
@@ -226,7 +230,7 @@ jobs:
             # ────────────────────────────────────────────────────────────────────────
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
-            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
+            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME} ${WORKER_SERVICE}
             # 배포 후 이미지 정리 — 서비스별 최신 10벌 유지. 규칙 정본은 서버 /usr/local/bin/mbd-docker-gc.sh
             # 정리 실패가 배포 실패가 되면 안 되므로 결과는 기록만 하고 배포 결과와 분리한다.
             nohup sh -c 'if [ -x /usr/local/bin/mbd-docker-gc.sh ]; then KEEP=10 /usr/local/bin/mbd-docker-gc.sh; rc=$?; logger -t mbd-deploy "gc exit=$rc"; else logger -t mbd-deploy "gc script MISSING - fallback prune"; docker image prune --force; fi' >/dev/null 2>&1 &
@@ -281,6 +285,10 @@ jobs:
           DEPLOY_DEST_PREFIX: ${{ github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD' }}
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
+          # worker 는 앱과 같은 이미지를 쓰지만 지금까지 앱만 재생성해 옛 이미지(08-04)에 머물렀다.
+          # 상태가 없는 프로세스(1분마다 tick 호출)라 함께 재생성해도 부작용이 없다 — 계획 geotracker-collect-speed-260924 Step 6.
+          # DB(mbd-geo-tracker-db)는 의존 서비스라 재생성 대상이 아니다(--always-recreate-deps 미사용).
+          WORKER_SERVICE: "mbd-geo-tracker-worker"
           ENV_FILE: "/datadrive/apps/geo-tracker/.env"
           # 최고관리자 인증 시크릿 — 값은 GitHub Secrets 에서만 (평문 커밋 금지).
           # 미설정(빈 값)이면 기존 .env 값을 보존한다(부분 롤아웃 안전).
@@ -301,7 +309,7 @@ jobs:
           key: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'vultr-new' && 'VULTR_PROD' || 'AZURE_PROD')] }}
           timeout: 30s
           command_timeout: 20m
-          envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
+          envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,WORKER_SERVICE,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
           script: |
             echo "[deploy target] secrets=${DEPLOY_DEST_PREFIX}_*  server=$(hostname)"
             set -eu
@@ -354,7 +362,7 @@ jobs:
             # ────────────────────────────────────────────────────────────────────────
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
-            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME}
+            docker compose --file ${FILE_PATH} up -d --force-recreate ${CONTAINER_NAME} ${WORKER_SERVICE}
             # 배포 후 이미지 정리 — 서비스별 최신 10벌 유지. 규칙 정본은 서버 /usr/local/bin/mbd-docker-gc.sh
             # 정리 실패가 배포 실패가 되면 안 되므로 결과는 기록만 하고 배포 결과와 분리한다.
             nohup sh -c 'if [ -x /usr/local/bin/mbd-docker-gc.sh ]; then KEEP=10 /usr/local/bin/mbd-docker-gc.sh; rc=$?; logger -t mbd-deploy "gc exit=$rc"; else logger -t mbd-deploy "gc script MISSING - fallback prune"; docker image prune --force; fi' >/dev/null 2>&1 &

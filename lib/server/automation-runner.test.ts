@@ -21,12 +21,18 @@ import type { Citation } from "@/components/dashboard/types";
 import {
   DEFAULT_SCORING_SWITCH,
   SCORING_PROFILES,
+  buildAutoRunValues,
+  buildScoringContext,
   computeDailyRollupWindow,
   resolveScoringProfile,
   resolveCitationJudgment,
+  type AutoRunTarget,
   type ScoringSetSwitch,
   type CitationJudgmentInput,
 } from "./automation-runner";
+import { buildCollectionBrandTerms } from "./branded-query-filter";
+import type { BrandConfig, ScoringSnapshot } from "@/drizzle/schema";
+import type { LlmClassification } from "./llm-sentiment";
 
 describe("resolveScoringProfile — 계획 §4-5 (세트·버전) 쌍 선택자", () => {
   it("미지정(undefined) → 기본값 v14a(꺼짐)", () => {
@@ -424,5 +430,271 @@ describe("computeDailyRollupWindow — 어제(KST) 날짜와 구간", () => {
 
   it("UTC 로는 전날이지만 KST 로는 오늘인 시각 — 2026-09-24T16:00Z(= 09-25 01:00 KST) → 2026-09-24", () => {
     expect(computeDailyRollupWindow(new Date("2026-09-24T16:00:00Z")).dateStr).toBe("2026-09-24");
+  });
+});
+
+/* ============================================================
+ * Step 2 — 점수·저장 경로 분리 고정값 테스트 (계획 geotracker-collect-speed-260924 §5 · v1 §5-2)
+ * ============================================================
+ * buildAutoRunValues 는 예전 runOneProviderForPrompt 의 "수집 결과 → runs INSERT 값" 블록을 그대로
+ * 옮긴 것이다. 고정 입력에서 나오는 값을 못 박아, 누가 점수 경로를 바꾸면 이 테스트가 깨진다.
+ * 감성 분류(LLM)는 가짜 분류기로 바꾼다 — 실제 LLM·DB·Bright Data 호출 없음.
+ * ⚠️ PUBLIC 저장소 — 브랜드·경쟁사·도메인은 가짜 값(.example)만 쓴다.
+ */
+
+const GOLDEN_BRAND: BrandConfig = {
+  brandName: "예시브랜드",
+  brandAliases: "ExampleBrand",
+  websites: ["https://brand.example", "https://www.youtube.com/@brandchannel"],
+  industry: "",
+  keywords: "",
+  description: "",
+};
+
+const GOLDEN_SNAPSHOT: ScoringSnapshot = {
+  brandConfig: GOLDEN_BRAND,
+  competitors: [{ name: "경쟁기관", aliases: ["RivalCo"], websites: ["https://rival.example"] }],
+};
+
+function goldenTarget(promptText: string): AutoRunTarget {
+  return {
+    workspaceId: "00000000-0000-4000-8000-000000000001",
+    scheduleId: "00000000-0000-4000-8000-000000000002",
+    promptText,
+    provider: "perplexity",
+    intervalSlot: "2030-01-01T06",
+    geolocation: null,
+  };
+}
+
+function fakeClassifier(result: LlmClassification | null) {
+  const calls: { answerText: string; brandName: string; brandAliases?: string[] }[] = [];
+  const fn = async (params: { answerText: string; brandName: string; brandAliases?: string[] }) => {
+    calls.push(params);
+    return result;
+  };
+  return { fn, calls };
+}
+
+describe("buildAutoRunValues — 고정값 (점수 규칙 무변경 확인)", () => {
+  it("① 일반 질의 · 브랜드 언급 답변 · 긍정·1순위 (v14a)", async () => {
+    const ctx = buildScoringContext("ws-golden", GOLDEN_SNAPSHOT, new Set());
+    const answer =
+      "재활 필라테스 교육기관으로는 예시브랜드가 자주 언급됩니다. 예시브랜드는 해부학 기반 커리큘럼으로 알려져 있고, " +
+      "경쟁기관 역시 함께 거론됩니다. 과정 선택 전에 커리큘럼과 실습 비중을 비교해 보는 것이 좋습니다.";
+    const cls = fakeClassifier({ sentiment: "positive", isTopRanked: true, isStronglyRecommended: false });
+    const v = await buildAutoRunValues(
+      ctx,
+      goldenTarget("재활 필라테스 교육기관 추천해 주세요"),
+      {
+        answer,
+        sources: ["https://brand.example/about", "https://rival.example/x"],
+        citations: [
+          { url: "https://brand.example/about", domain: "brand.example", title: "소개", description: "" },
+          { url: "https://rival.example/x", domain: "rival.example", title: "비교", description: "" },
+        ],
+        cached: false,
+      },
+      1234,
+      { classifySentiment: cls.fn },
+    );
+    expect(cls.calls).toHaveLength(1);
+    expect(cls.calls[0]).toEqual({ answerText: answer, brandName: "예시브랜드", brandAliases: ["ExampleBrand"] });
+    // 두 언급이 50자 안에 있어 1회로 합쳐진다 → 66 + 첫 위치 9 + 긍정 9 + 1순위 8 = 92
+    expect(v).toMatchObject({
+      visibilityScore: 92,
+      scoreVersion: 14,
+      sentiment: "positive",
+      brandMentions: ["예시브랜드"],
+      competitorMentions: ["경쟁기관"],
+      citedBrandDomains: ["brand.example"],
+      citedCompetitorDomains: ["rival.example"],
+      citedOwnedVideoIds: [],
+      citedPressDomains: [],
+      citedSocialDomains: [],
+      attachedBrandMentions: [],
+      attachedCompetitorMentions: [],
+      parseQuality: "high",
+      isCachedResponse: false,
+      responseLength: answer.length,
+      isAuto: true,
+      intervalSlot: "2030-01-01T06",
+      geolocation: null,
+      scheduleId: "00000000-0000-4000-8000-000000000002",
+      executionDurationMs: 1234,
+      sources: ["https://brand.example/about", "https://rival.example/x"],
+    });
+  });
+
+  it("② 언급 없음 · 소유 유튜브 영상 인용 (v15a — 참고자료 인용으로 합류)", async () => {
+    const snapshot: ScoringSnapshot = {
+      ...GOLDEN_SNAPSHOT,
+      brandConfig: { ...GOLDEN_BRAND, scoringSetSwitch: "v15a" },
+    };
+    const ctx = buildScoringContext("ws-golden", snapshot, new Set(["dQw4w9WgXcQ"]));
+    const answer = "재활 운동은 기초 동작부터 차근차근 익히는 것이 중요합니다. 영상 자료를 참고하면 좋습니다.";
+    const cls = fakeClassifier(null);
+    const v = await buildAutoRunValues(
+      ctx,
+      goldenTarget("재활 운동 기초 영상 알려줘"),
+      {
+        answer,
+        sources: ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+        citations: [
+          { url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", domain: "youtube.com", title: "재활 운동 기초", description: "" },
+        ],
+        cached: true,
+      },
+      0,
+      { classifySentiment: cls.fn },
+    );
+    expect(cls.calls).toHaveLength(0); // 언급이 없으면 LLM 을 부르지 않는다
+    expect(v).toMatchObject({
+      visibilityScore: 45,
+      scoreVersion: 15,
+      sentiment: "not-mentioned",
+      brandMentions: [],
+      competitorMentions: [],
+      citedBrandDomains: [],
+      citedCompetitorDomains: [],
+      citedOwnedVideoIds: ["dQw4w9WgXcQ"],
+      citedPressDomains: [],
+      citedSocialDomains: [],
+      parseQuality: "medium",
+      isCachedResponse: true,
+      responseLength: answer.length,
+    });
+  });
+
+  it("③ 언급 없음 · 언론 게재 + 블로그·소셜 추천 혼합 (v14a — 두 신호 배점 0)", async () => {
+    const ctx = buildScoringContext("ws-golden", GOLDEN_SNAPSHOT, new Set());
+    const answer =
+      "재활 필라테스 과정을 고를 때는 해부학 수업 비중과 실습 시간, 수료 뒤 지원 범위를 함께 비교하는 것이 좋습니다. " +
+      "관련 기사와 후기 게시물도 참고할 만합니다.";
+    const v = await buildAutoRunValues(
+      ctx,
+      goldenTarget("재활 필라테스 과정 고르는 법"),
+      {
+        answer,
+        sources: [],
+        citations: [
+          { url: "https://news.example/article", domain: "news.example", title: "예시브랜드 소식", description: "" },
+          { url: "https://www.instagram.com/p/AbCdEfGhIjK/", domain: "instagram.com", title: "ExampleBrand 후기", description: "" },
+        ],
+        cached: false,
+      },
+      50,
+      { classifySentiment: fakeClassifier(null).fn },
+    );
+    expect(v).toMatchObject({
+      visibilityScore: 0,
+      scoreVersion: 14,
+      sentiment: "not-mentioned",
+      brandMentions: [],
+      citedBrandDomains: [],
+      citedOwnedVideoIds: [],
+      citedPressDomains: ["news.example"],
+      citedSocialDomains: ["instagram.com"],
+      parseQuality: "medium", // 89자 — 100자 이하
+      responseLength: answer.length,
+    });
+  });
+
+  it("④ 브랜드 질의 · 긍정 + 적극 추천 + 본문 URL (v14a 브랜드 분기)", async () => {
+    const ctx = buildScoringContext("ws-golden", GOLDEN_SNAPSHOT, new Set());
+    const answer =
+      "예시브랜드는 재활 필라테스 강사 과정을 운영하며, 해부학 기반 수업으로 가장 추천드리고 싶은 곳입니다. " +
+      "과정 안내는 https://brand.example 에서 확인할 수 있습니다.";
+    const v = await buildAutoRunValues(
+      ctx,
+      goldenTarget("예시브랜드 강사 과정 후기 어때요?"),
+      { answer, sources: [], citations: [], cached: false },
+      10,
+      {
+        classifySentiment: fakeClassifier({ sentiment: "positive", isTopRanked: false, isStronglyRecommended: true }).fn,
+      },
+    );
+    expect(v).toMatchObject({
+      visibilityScore: 97,
+      scoreVersion: 14,
+      sentiment: "positive",
+      brandMentions: ["예시브랜드"],
+      citedBrandDomains: [],
+      parseQuality: "high",
+    });
+  });
+
+  it("⑤ 분류기가 null(시간 초과·키 없음)이면 키워드 휴리스틱 결과를 그대로 쓴다", async () => {
+    const ctx = buildScoringContext("ws-golden", GOLDEN_SNAPSHOT, new Set());
+    const answer = "예시브랜드는 강사 교육 과정을 운영합니다. 수업은 소규모로 진행됩니다.";
+    const v = await buildAutoRunValues(
+      ctx,
+      goldenTarget("강사 교육 과정 운영 기관"),
+      { answer, sources: [], citations: [], cached: false },
+      0,
+      { classifySentiment: fakeClassifier(null).fn },
+    );
+    expect(v).toMatchObject({ sentiment: "neutral", visibilityScore: 83, parseQuality: "medium" });
+  });
+});
+
+describe("buildScoringContext — 예전 직접 조회 경로(executeSchedule 인라인 계산)와 같은 결과", () => {
+  /** 옮기기 전 executeSchedule 의 인라인 계산을 그대로 옮긴 기준 구현(비교용). */
+  function legacyInlineContext(
+    ws: { id: string; brandConfig: BrandConfig },
+    competitors: { name: string; aliases: string[] | null; websites: string[] | null }[],
+    ownedVideoIds: Set<string>,
+  ) {
+    const brandTerms = buildCollectionBrandTerms(ws.brandConfig);
+    const brandWebsites = ws.brandConfig.websites ?? [];
+    const competitorTerms = competitors.flatMap((c) => [c.name, ...(c.aliases ?? [])]).filter(Boolean);
+    const competitorWebsites = competitors.flatMap((c) => c.websites ?? []);
+    const scoringProfile = resolveScoringProfile(ws.brandConfig.scoringSetSwitch);
+    return { workspaceId: ws.id, brandTerms, brandWebsites, competitorTerms, competitorWebsites, scoringProfile, ownedVideoIds };
+  }
+
+  const cases: {
+    name: string;
+    brandConfig: BrandConfig;
+    competitors: { name: string; aliases: string[]; websites: string[] }[];
+  }[] = [
+    { name: "기본", brandConfig: GOLDEN_BRAND, competitors: GOLDEN_SNAPSHOT.competitors },
+    {
+      name: "별칭 공백·빈 칸 + 경쟁사 별칭·사이트 없음 + v15a",
+      brandConfig: { ...GOLDEN_BRAND, brandAliases: " ExampleBrand ,, 예시 ", scoringSetSwitch: "v15a" },
+      competitors: [
+        { name: "경쟁기관", aliases: [], websites: [] },
+        { name: "", aliases: ["별칭만"], websites: ["https://only-site.example"] },
+      ],
+    },
+    {
+      name: "사이트 없음 · 경쟁사 없음",
+      brandConfig: {
+        brandName: "예시브랜드",
+        brandAliases: "",
+        websites: undefined as unknown as string[],
+        industry: "",
+        keywords: "",
+        description: "",
+      },
+      competitors: [],
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.name, () => {
+      const owned = new Set(["dQw4w9WgXcQ"]);
+      const legacy = legacyInlineContext({ id: "ws-1", brandConfig: c.brandConfig }, c.competitors, owned);
+      const fromSnapshot = buildScoringContext("ws-1", { brandConfig: c.brandConfig, competitors: c.competitors }, owned);
+      expect(fromSnapshot).toEqual(legacy);
+    });
+  }
+
+  it("JSON 으로 저장했다 읽은 회차 사본(scoring_snapshot)도 같은 결과", () => {
+    const owned = new Set<string>();
+    const roundTripped = JSON.parse(JSON.stringify(GOLDEN_SNAPSHOT)) as ScoringSnapshot;
+    expect(buildScoringContext("ws-1", roundTripped, owned)).toEqual(
+      legacyInlineContext({ id: "ws-1", brandConfig: GOLDEN_BRAND }, GOLDEN_SNAPSHOT.competitors, owned),
+    );
   });
 });

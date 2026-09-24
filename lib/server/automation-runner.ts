@@ -21,9 +21,12 @@
  */
 
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import type { ExtractTablesWithRelations } from "drizzle-orm";
+import type { PgDatabase } from "drizzle-orm/pg-core";
+import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
 import { CronExpressionParser } from "cron-parser";
 import { db, schema } from "@/lib/server/db";
-import { runAiScraper } from "@/lib/server/brightdata-scraper";
+import { runAiScraper, type NormalizedScrapeResult } from "@/lib/server/brightdata-scraper";
 import { classifySentiment } from "@/lib/server/llm-sentiment";
 import { guardSentiment } from "@/lib/server/sentiment-guard";
 import {
@@ -32,8 +35,9 @@ import {
   SOCIAL_PLATFORM_DOMAINS,
 } from "@/components/dashboard/citation-utils";
 import type { Citation } from "@/components/dashboard/types";
-import type { Schedule, Prompt, BrandConfig } from "@/drizzle/schema";
+import type { Schedule, Prompt, BrandConfig, ScoringSnapshot } from "@/drizzle/schema";
 import { buildCollectionBrandTerms } from "@/lib/server/branded-query-filter";
+import { formatIntervalSlot } from "@/lib/server/collector-schedule";
 import {
   calcVisibilityFromText,
   SCORE_SETS,
@@ -226,34 +230,9 @@ async function executeSchedule(
     return { executedRuns: 0, skippedDuplicates: 0, providerFailures: [] };
   }
 
-  // 워크스페이스 brand/competitors 로드 — 점수 계산에 필요
-  const [ws] = await db
-    .select()
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, sched.workspaceId))
-    .limit(1);
-  if (!ws) {
-    throw new Error(`workspace ${sched.workspaceId} not found`);
-  }
-  const competitors = await db
-    .select()
-    .from(schema.competitors)
-    .where(eq(schema.competitors.workspaceId, sched.workspaceId));
-
-  const brandTerms = buildCollectionBrandTerms(ws.brandConfig);
-  const brandWebsites = ws.brandConfig.websites ?? [];
-  const competitorTerms = competitors.flatMap((c) => [c.name, ...(c.aliases ?? [])]).filter(Boolean);
-  const competitorWebsites = competitors.flatMap((c) => c.websites ?? []);
-
-  // (세트·버전) 쌍 선택 — 계획 §4-5. 미지정이면 기본 v14a(꺼짐)로 떨어진다.
-  const scoringProfile = resolveScoringProfile(ws.brandConfig.scoringSetSwitch);
-  // 소유 유튜브 영상 집합 — 2026-09-23 개정으로 **스위치와 무관하게 항상 조회한다**.
-  // 이유: 언론 인용 판정(아래 resolveCitationJudgment)이 이제 도메인 allowlist 대신
-  // "브랜드 언급 + 우리 소유 아님"으로 판정하는데, 소유 유튜브 영상 여부를 모르면 우리
-  // 자신이 올린 영상이 언론 인용으로 오염된다(중복 계산). 점수 계산(hasCitationOnly)에서는
-  // 여전히 scoringProfile.applyOwnedCitationJudgment 로 별도 게이트된다 — 이 집합을 항상
-  // 불러오는 것은 "증거 수집"용이고 "점수 반영 여부"는 그대로 스위치가 결정한다.
-  const ownedVideoIds = await getOwnedYoutubeVideoIds(ws.id);
+  // 워크스페이스 점수 기준(브랜드·경쟁사·소유 영상) — 스케줄 실행 1번에 1번 읽는다.
+  // 워크스페이스가 없으면 loadScoringSnapshot 이 "workspace <id> not found" 로 던진다(예전과 같음).
+  const ctx = await loadWorkspaceScoringContext(sched.workspaceId);
 
   let executedRuns = 0;
   let skippedDuplicates = 0;
@@ -283,12 +262,7 @@ async function executeSchedule(
           prompt,
           provider,
           intervalSlot,
-          brandTerms,
-          competitorTerms,
-          brandWebsites,
-          competitorWebsites,
-          scoringProfile,
-          ownedVideoIds,
+          ctx,
           now,
         }),
       ),
@@ -410,58 +384,348 @@ export function resolveCitationJudgment(input: CitationJudgmentInput): CitationJ
   };
 }
 
-/**
- * 한 프롬프트의 단일 provider 1건을 실행한다 (pre-check → scrape → 점수 → INSERT → drift).
- * executeSchedule 의 provider 병렬 처리를 위해 분리. 예외는 내부에서 잡아
- * ProviderFailure 로 정형화해 반환하므로 Promise.all 이 reject 되지 않는다
- * (한 provider 실패가 같은 프롬프트의 다른 provider 결과를 버리지 않게).
+/* ============================================================
+ * 점수·저장 경로 — 계획 geotracker-collect-speed-260924 Step 2
+ * ============================================================
+ * 예전 엔진(runOneProviderForPrompt)과 새 수집 엔진(collector-engine.ts)이 같은 점수·저장
+ * 코드를 쓰도록 단계별 함수로 나눴다. 옮기기 전 코드를 순서·값 그대로 옮긴 것이라 점수 규칙
+ * (visibility-score-sets·scoreVersion)은 바뀌지 않는다 — automation-runner.test.ts 의 고정값
+ * 테스트가 이를 못 박는다.
  */
-async function runOneProviderForPrompt(args: {
-  sched: Schedule;
-  prompt: Prompt;
-  provider: string;
-  intervalSlot: string;
+
+/**
+ * db 또는 트랜잭션 — 둘 다 같은 PgDatabase 계열이라 조회·저장 함수가 어느 쪽이든 받는다.
+ * 트랜잭션 안에서는 반드시 tx 를 넘긴다(db 를 직접 부르면 연결을 하나 더 잡아 풀 고갈 교착이 날 수 있다).
+ * 스키마 제네릭은 lib/server/db.ts 의 db 타입(ReturnType<typeof drizzle>)과 같게 맞춘다.
+ */
+export type DbOrTx = PgDatabase<
+  PostgresJsQueryResultHKT,
+  Record<string, unknown>,
+  ExtractTablesWithRelations<Record<string, unknown>>
+>;
+
+/** 점수 계산에 필요한 워크스페이스 기준값 — 브랜드·경쟁사 용어와 사이트, 점수 세트, 소유 영상. */
+export type WorkspaceScoringContext = {
+  workspaceId: string;
   brandTerms: string[];
-  competitorTerms: string[];
   brandWebsites: string[];
+  competitorTerms: string[];
   competitorWebsites: string[];
-  /** (세트·버전) 쌍 — §4-5. executeSchedule 이 워크스페이스당 한 번만 계산해 넘긴다. */
   scoringProfile: ScoringProfile;
   /**
-   * 소유 유튜브 video-ID 집합. 2026-09-23 개정으로 스위치와 무관하게 항상 채워져서
-   * 들어온다 — 언론 인용 판정이 "우리 영상"을 걸러내는 데 쓴다.
+   * 소유 유튜브 video-ID 집합. 2026-09-23 개정으로 **스위치와 무관하게 항상 조회한다**.
+   * 이유: 언론 인용 판정(resolveCitationJudgment)이 도메인 allowlist 대신 "브랜드 언급 + 우리
+   * 소유 아님"으로 판정하는데, 소유 유튜브 영상 여부를 모르면 우리 자신이 올린 영상이 언론
+   * 인용으로 오염된다(중복 계산). 점수 반영(hasCitationOnly)은 여전히
+   * scoringProfile.applyOwnedCitationJudgment 가 따로 정한다.
    */
   ownedVideoIds: Set<string>;
-  now: Date;
-}): Promise<ProviderRunOutcome> {
+};
+
+/**
+ * 워크스페이스 브랜드 설정·경쟁사를 읽는다(점수 기준 원본). 워크스페이스가 없으면
+ * 예전 executeSchedule 과 같은 문구로 던진다. 새 엔진은 회차를 만들 때 이 결과를 회차에 복사한다.
+ */
+export async function loadScoringSnapshot(
+  workspaceId: string,
+  dbOrTx: DbOrTx = db,
+): Promise<ScoringSnapshot> {
+  const [ws] = await dbOrTx
+    .select()
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  if (!ws) {
+    throw new Error(`workspace ${workspaceId} not found`);
+  }
+  const competitors = await dbOrTx
+    .select()
+    .from(schema.competitors)
+    .where(eq(schema.competitors.workspaceId, workspaceId));
+  return {
+    brandConfig: ws.brandConfig,
+    competitors: competitors.map((c) => ({
+      name: c.name,
+      aliases: c.aliases ?? [],
+      websites: c.websites ?? [],
+    })),
+  };
+}
+
+/** 점수 기준 원본 → 계산용 문맥. 옮기기 전 executeSchedule 의 계산과 같다(순수 함수). */
+export function buildScoringContext(
+  workspaceId: string,
+  snap: ScoringSnapshot,
+  ownedVideoIds: Set<string>,
+): WorkspaceScoringContext {
+  const brandConfig = snap.brandConfig ?? ({} as BrandConfig);
+  const competitors = snap.competitors ?? [];
+  const brandTerms = buildCollectionBrandTerms(brandConfig);
+  const brandWebsites = brandConfig.websites ?? [];
+  const competitorTerms = competitors.flatMap((c) => [c.name, ...(c.aliases ?? [])]).filter(Boolean);
+  const competitorWebsites = competitors.flatMap((c) => c.websites ?? []);
+  // (세트·버전) 쌍 선택 — 계획 §4-5. 미지정이면 기본 v14a(꺼짐)로 떨어진다.
+  const scoringProfile = resolveScoringProfile(brandConfig.scoringSetSwitch);
+  return {
+    workspaceId,
+    brandTerms,
+    brandWebsites,
+    competitorTerms,
+    competitorWebsites,
+    scoringProfile,
+    ownedVideoIds,
+  };
+}
+
+/** 예전 엔진용 — 읽기(브랜드·경쟁사) + 소유 영상 + 계산용 문맥. 스케줄 실행 1번에 1번 부른다. */
+export async function loadWorkspaceScoringContext(workspaceId: string): Promise<WorkspaceScoringContext> {
+  const snap = await loadScoringSnapshot(workspaceId);
+  const ownedVideoIds = await getOwnedYoutubeVideoIds(workspaceId);
+  return buildScoringContext(workspaceId, snap, ownedVideoIds);
+}
+
+/** 자동 수집 결과 1건의 저장 대상 — runs 의 중복 방지 키 네 칸 + 스케줄·지역값. */
+export type AutoRunTarget = {
+  workspaceId: string;
+  scheduleId: string | null;
+  promptText: string;
+  provider: string;
+  intervalSlot: string;
+  /** runs.geolocation 에 저장 = 스케줄 geolocation (지금과 같음) */
+  geolocation: string | null;
+};
+
+/**
+ * 같은 (workspace, interval_slot, prompt, provider) 결과가 이미 있으면 그 run id.
+ * 예전 pre-check(비용 절약용 사전 조회)와 같은 조건이다. 보관 표시 여부로 거르지 않는다.
+ */
+export async function findAutoRunId(
+  t: Pick<AutoRunTarget, "workspaceId" | "intervalSlot" | "promptText" | "provider">,
+  dbOrTx: DbOrTx = db,
+): Promise<string | null> {
+  const [existing] = await dbOrTx
+    .select({ id: schema.runs.id })
+    .from(schema.runs)
+    .where(
+      and(
+        eq(schema.runs.workspaceId, t.workspaceId),
+        eq(schema.runs.intervalSlot, t.intervalSlot),
+        eq(schema.runs.promptText, t.promptText),
+        eq(schema.runs.provider, t.provider),
+      ),
+    )
+    .limit(1);
+  return existing?.id ?? null;
+}
+
+/**
+ * 수집 결과 → runs INSERT 값. 옮기기 전 runOneProviderForPrompt 의 "runAiScraper 결과 이후부터
+ * INSERT values 까지" 블록 그대로다: 언급 → 감성(+LLM) → 브랜드 검색 여부 → 본문 URL →
+ * resolveCitationJudgment → calcVisibilityFull → values.
+ *
+ * 감성 분류(LLM, 최대 8초)가 여기서 돈다 → 트랜잭션 밖에서 부른다.
+ * ⛔ 응답 보관 설계가 runs 에 추가할 보관 표시 컬럼은 넣지 않는다(기본값에 맡긴다).
+ */
+export async function buildAutoRunValues(
+  ctx: WorkspaceScoringContext,
+  t: AutoRunTarget,
+  result: Pick<NormalizedScrapeResult, "answer" | "sources" | "citations" | "cached">,
+  executionDurationMs: number,
+  deps: { classifySentiment?: typeof classifySentiment } = {},
+): Promise<typeof schema.runs.$inferInsert> {
+  const classify = deps.classifySentiment ?? classifySentiment;
   const {
-    sched,
-    prompt,
-    provider,
-    intervalSlot,
     brandTerms,
     competitorTerms,
     brandWebsites,
     competitorWebsites,
     scoringProfile,
     ownedVideoIds,
-  } = args;
+  } = ctx;
+
+  const citations = Array.isArray(result.citations) ? (result.citations as Citation[]) : [];
+  const answerText = result.answer ?? "";
+
+  // 본문 기준 언급 계산 (첨부 영역 분리 없이 간단 버전 — 필요 시 splitAnswerSections 도입)
+  const brandMentions = findMentions(answerText, brandTerms);
+  const competitorMentions = findMentions(answerText, competitorTerms);
+  const citedBrandDomains = matchCitationDomains(citations, brandWebsites);
+  const citedCompetitorDomains = matchCitationDomains(citations, competitorWebsites);
+
+  // Sentiment + ranking signals: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 즉시 결정.
+  // 언급이 있을 때 LLM 에 sentiment + isTopRanked + isStronglyRecommended 한꺼번에 분류 요청.
+  let sentiment: "positive" | "neutral" | "negative" | "not-mentioned" = detectSentiment(
+    answerText,
+    brandTerms,
+  );
+  let isTopRanked = false;
+  let isStronglyRecommended = false;
+  if (sentiment !== "not-mentioned") {
+    const llm = await classify({
+      answerText,
+      brandName: brandTerms[0] ?? "",
+      brandAliases: brandTerms.slice(1),
+    });
+    if (llm) {
+      // 후처리 가드 — 약한 positive(=1위 명시 없고 적극 추천 없음)인데 비교 나열 응답이면 neutral 로 강제
+      sentiment = guardSentiment(answerText, brandTerms, llm);
+      isTopRanked = llm.isTopRanked;
+      isStronglyRecommended = llm.isStronglyRecommended;
+    }
+  }
+  // brand 명 검색 여부 — prompt 텍스트에 brand 별칭 중 하나라도 포함되면 branded query
+  const promptLower = t.promptText.toLowerCase();
+  const isBrandedQuery = brandTerms.some(
+    (term) => term && promptLower.includes(term.toLowerCase()),
+  );
+  // 본문 내 자사 URL 등장 여부 판정.
+  // 일반 도메인은 호스트 문자열 포함 여부로 매칭. 소셜 플랫폼(youtube.com, instagram.com 등)은
+  // 호스트만으로 매칭하면 다른 채널 URL 도 매칭되는 false positive 발생 → 핸들(seg)까지
+  // 본문에 등장해야 매칭으로 인정.
+  const brandTargets = brandWebsites
+    .map((url) => normalizeTargetKey(url))
+    .filter((k): k is { host: string; seg: string } => k !== null);
+  const answerLower = answerText.toLowerCase();
+  const hasBodyUrl = brandTargets.some((bt) => {
+    if (SOCIAL_PLATFORM_DOMAINS.has(bt.host)) {
+      // 소셜: 호스트 + 핸들 둘 다 본문에 있어야 매치 (핸들 없으면 매칭 불가)
+      if (!bt.seg) return false;
+      return answerLower.includes(bt.host) && answerLower.includes(bt.seg);
+    }
+    // 일반 도메인: 호스트 문자열 포함만으로 매치
+    return answerLower.includes(bt.host);
+  });
+  // 소유 유튜브 인용 병합 + 제3자 인용 증거(언론·블로그·소셜) — 순수 함수로 뽑은
+  // resolveCitationJudgment 에 위임한다(독립 검수 지적 반영). 로직 자체는 이전과 동일 —
+  // 계획 §4-1·§4-2·§4-5·D1·D2·D3 + 2026-09-23 3차 개정(제3자 인용 판정 재설계).
+  const {
+    hasCitationOnly,
+    citedOwnedVideoIds,
+    hasPressCitation,
+    citedPressDomains,
+    citedSocialDomains,
+    hasSocialCitation,
+  } = resolveCitationJudgment({
+    citations,
+    scoringProfile,
+    ownedVideoIds,
+    websites: brandWebsites,
+    brandTerms,
+    hasBodyUrl,
+    citedBrandDomains,
+  });
+
+  const visibilityScore = calcVisibilityFull(
+    answerText,
+    brandTerms,
+    hasBodyUrl,
+    hasCitationOnly,
+    sentiment,
+    isTopRanked,
+    isStronglyRecommended,
+    isBrandedQuery,
+    scoringProfile.setId,
+    hasPressCitation,
+    hasSocialCitation,
+  );
+
+  return {
+    workspaceId: t.workspaceId,
+    scheduleId: t.scheduleId,
+    promptText: t.promptText,
+    provider: t.provider,
+    answer: answerText,
+    sources: result.sources ?? [],
+    citations: citations as never,
+    visibilityScore,
+    // 새 응답은 (세트·버전) 쌍 선택자가 가리키는 버전으로 마킹한다 — 세트 id 와 항상
+    // 함께 움직인다(§4-5). 재산출은 이 버전보다 작은 행만 대상으로 삼는다.
+    scoreVersion: scoringProfile.version,
+    sentiment,
+    brandMentions,
+    competitorMentions,
+    citedBrandDomains,
+    citedCompetitorDomains,
+    citedOwnedVideoIds,
+    citedPressDomains,
+    citedSocialDomains,
+    attachedBrandMentions: [],
+    attachedCompetitorMentions: [],
+    geolocation: t.geolocation ?? null,
+    isAuto: true,
+    intervalSlot: t.intervalSlot,
+    parseQuality:
+      answerText.length > 100 ? "high" : answerText.length > 20 ? "medium" : "low",
+    isCachedResponse: Boolean(result.cached),
+    responseLength: answerText.length,
+    executionDurationMs,
+  };
+}
+
+/**
+ * runs INSERT — 같은 (workspace, slot, prompt, provider) 가 이미 있으면 조용히 건너뛴다
+ * (uq_runs_auto_slot + onConflictDoNothing). 새로 들어갔는지와 그 id 를 돌려준다.
+ */
+export async function insertAutoRun(
+  values: typeof schema.runs.$inferInsert,
+  dbOrTx: DbOrTx,
+): Promise<{ inserted: true; runId: string } | { inserted: false }> {
+  const rows = await dbOrTx
+    .insert(schema.runs)
+    .values(values)
+    .onConflictDoNothing()
+    .returning({ id: schema.runs.id });
+  const first = rows[0];
+  return first ? { inserted: true, runId: first.id } : { inserted: false };
+}
+
+/**
+ * 드리프트 감지 — 새로 들어간 run 에 대해서만, 트랜잭션이 커밋된 뒤에 부른다.
+ * 실패해도 수집 결과에는 영향이 없도록 지금처럼 잡아서 로그만 남긴다.
+ */
+export async function recordDriftAfterInsert(values: typeof schema.runs.$inferInsert): Promise<void> {
+  await detectAndRecordDrift(
+    values.workspaceId,
+    values.promptText,
+    values.provider,
+    values.visibilityScore,
+  ).catch((e) =>
+    console.error("[automation] 드리프트 감지 실패:", e instanceof Error ? e.message : e),
+  );
+}
+
+/**
+ * 한 프롬프트의 단일 provider 1건을 실행한다 (pre-check → scrape → 점수 → INSERT → drift).
+ * executeSchedule 의 provider 병렬 처리를 위해 분리. 예외는 내부에서 잡아
+ * ProviderFailure 로 정형화해 반환하므로 Promise.all 이 reject 되지 않는다
+ * (한 provider 실패가 같은 프롬프트의 다른 provider 결과를 버리지 않게).
+ *
+ * Step 2 이후: findAutoRunId → runAiScraper → buildAutoRunValues → insertAutoRun →
+ * (새로 들어갔으면) recordDriftAfterInsert. 집계 숫자는 옮기기 전과 같다.
+ */
+async function runOneProviderForPrompt(args: {
+  sched: Schedule;
+  prompt: Prompt;
+  provider: string;
+  intervalSlot: string;
+  /** 점수 기준 — executeSchedule 이 워크스페이스당 한 번만 읽어 넘긴다. */
+  ctx: WorkspaceScoringContext;
+  now: Date;
+}): Promise<ProviderRunOutcome> {
+  const { sched, prompt, provider, intervalSlot, ctx } = args;
+  const target: AutoRunTarget = {
+    workspaceId: sched.workspaceId,
+    scheduleId: sched.id,
+    promptText: prompt.text,
+    provider,
+    intervalSlot,
+    geolocation: sched.geolocation ?? null,
+  };
 
   try {
     // pre-check: 이미 이 슬롯 + prompt + provider 조합이 있으면 스킵 (API 호출 절약)
-    const [existing] = await db
-      .select({ id: schema.runs.id })
-      .from(schema.runs)
-      .where(
-        and(
-          eq(schema.runs.workspaceId, sched.workspaceId),
-          eq(schema.runs.intervalSlot, intervalSlot),
-          eq(schema.runs.promptText, prompt.text),
-          eq(schema.runs.provider, provider),
-        ),
-      )
-      .limit(1);
-    if (existing) {
+    const existingId = await findAutoRunId(target);
+    if (existingId) {
       return { executedRuns: 0, skippedDuplicates: 1, failure: null };
     }
 
@@ -473,138 +737,12 @@ async function runOneProviderForPrompt(args: {
     });
 
     const executionDurationMs = Date.now() - started;
-    const citations = Array.isArray(result.citations) ? (result.citations as Citation[]) : [];
-    const answerText = result.answer ?? "";
+    const values = await buildAutoRunValues(ctx, target, result, executionDurationMs);
+    const inserted = await insertAutoRun(values, db);
 
-    // 본문 기준 언급 계산 (첨부 영역 분리 없이 간단 버전 — 필요 시 splitAnswerSections 도입)
-    const brandMentions = findMentions(answerText, brandTerms);
-    const competitorMentions = findMentions(answerText, competitorTerms);
-    const citedBrandDomains = matchCitationDomains(citations, brandWebsites);
-    const citedCompetitorDomains = matchCitationDomains(citations, competitorWebsites);
-
-    // Sentiment + ranking signals: 언급이 아예 없으면 키워드 단계에서 "not-mentioned" 즉시 결정.
-    // 언급이 있을 때 LLM 에 sentiment + isTopRanked + isStronglyRecommended 한꺼번에 분류 요청.
-    let sentiment: "positive" | "neutral" | "negative" | "not-mentioned" = detectSentiment(
-      answerText,
-      brandTerms,
-    );
-    let isTopRanked = false;
-    let isStronglyRecommended = false;
-    if (sentiment !== "not-mentioned") {
-      const llm = await classifySentiment({
-        answerText,
-        brandName: brandTerms[0] ?? "",
-        brandAliases: brandTerms.slice(1),
-      });
-      if (llm) {
-        // 후처리 가드 — 약한 positive(=1위 명시 없고 적극 추천 없음)인데 비교 나열 응답이면 neutral 로 강제
-        sentiment = guardSentiment(answerText, brandTerms, llm);
-        isTopRanked = llm.isTopRanked;
-        isStronglyRecommended = llm.isStronglyRecommended;
-      }
-    }
-    // brand 명 검색 여부 — prompt 텍스트에 brand 별칭 중 하나라도 포함되면 branded query
-    const promptLower = prompt.text.toLowerCase();
-    const isBrandedQuery = brandTerms.some(
-      (t) => t && promptLower.includes(t.toLowerCase()),
-    );
-    // 본문 내 자사 URL 등장 여부 판정.
-    // 일반 도메인은 호스트 문자열 포함 여부로 매칭. 소셜 플랫폼(youtube.com, instagram.com 등)은
-    // 호스트만으로 매칭하면 다른 채널 URL 도 매칭되는 false positive 발생 → 핸들(seg)까지
-    // 본문에 등장해야 매칭으로 인정.
-    const brandTargets = brandWebsites
-      .map((url) => normalizeTargetKey(url))
-      .filter((k): k is { host: string; seg: string } => k !== null);
-    const answerLower = answerText.toLowerCase();
-    const hasBodyUrl = brandTargets.some((t) => {
-      if (SOCIAL_PLATFORM_DOMAINS.has(t.host)) {
-        // 소셜: 호스트 + 핸들 둘 다 본문에 있어야 매치 (핸들 없으면 매칭 불가)
-        if (!t.seg) return false;
-        return answerLower.includes(t.host) && answerLower.includes(t.seg);
-      }
-      // 일반 도메인: 호스트 문자열 포함만으로 매치
-      return answerLower.includes(t.host);
-    });
-    // 소유 유튜브 인용 병합 + 제3자 인용 증거(언론·블로그·소셜) — 순수 함수로 뽑은
-    // resolveCitationJudgment 에 위임한다(독립 검수 지적 반영). 로직 자체는 이전과 동일 —
-    // 계획 §4-1·§4-2·§4-5·D1·D2·D3 + 2026-09-23 3차 개정(제3자 인용 판정 재설계).
-    const {
-      hasCitationOnly,
-      citedOwnedVideoIds,
-      hasPressCitation,
-      citedPressDomains,
-      citedSocialDomains,
-      hasSocialCitation,
-    } = resolveCitationJudgment({
-      citations,
-      scoringProfile,
-      ownedVideoIds,
-      websites: brandWebsites,
-      brandTerms,
-      hasBodyUrl,
-      citedBrandDomains,
-    });
-
-    const visibilityScore = calcVisibilityFull(
-      answerText,
-      brandTerms,
-      hasBodyUrl,
-      hasCitationOnly,
-      sentiment,
-      isTopRanked,
-      isStronglyRecommended,
-      isBrandedQuery,
-      scoringProfile.setId,
-      hasPressCitation,
-      hasSocialCitation,
-    );
-
-    const inserted = await db
-      .insert(schema.runs)
-      .values({
-        workspaceId: sched.workspaceId,
-        scheduleId: sched.id,
-        promptText: prompt.text,
-        provider,
-        answer: answerText,
-        sources: result.sources ?? [],
-        citations: citations as never,
-        visibilityScore,
-        // 새 응답은 (세트·버전) 쌍 선택자가 가리키는 버전으로 마킹한다 — 세트 id 와 항상
-        // 함께 움직인다(§4-5). 재산출은 이 버전보다 작은 행만 대상으로 삼는다.
-        scoreVersion: scoringProfile.version,
-        sentiment,
-        brandMentions,
-        competitorMentions,
-        citedBrandDomains,
-        citedCompetitorDomains,
-        citedOwnedVideoIds,
-        citedPressDomains,
-        citedSocialDomains,
-        attachedBrandMentions: [],
-        attachedCompetitorMentions: [],
-        geolocation: sched.geolocation ?? null,
-        isAuto: true,
-        intervalSlot,
-        parseQuality:
-          answerText.length > 100 ? "high" : answerText.length > 20 ? "medium" : "low",
-        isCachedResponse: Boolean(result.cached),
-        responseLength: answerText.length,
-        executionDurationMs,
-      })
-      .onConflictDoNothing()
-      .returning({ id: schema.runs.id });
-
-    if (inserted.length > 0) {
+    if (inserted.inserted) {
       // 드리프트 감지 — 같은 (workspace, prompt, provider) 의 이전 runs 와 비교
-      await detectAndRecordDrift(
-        sched.workspaceId,
-        prompt.text,
-        provider,
-        visibilityScore,
-      ).catch((e) =>
-        console.error("[automation] 드리프트 감지 실패:", e instanceof Error ? e.message : e),
-      );
+      await recordDriftAfterInsert(values);
       return { executedRuns: 1, skippedDuplicates: 0, failure: null };
     }
     // 동시에 다른 워커/틱이 먼저 INSERT 한 경우 — unique constraint 로 스킵됨
@@ -867,14 +1005,7 @@ function detectSentiment(
   return "neutral";
 }
 
-/** interval_slot 포맷 — 같은 스케줄의 같은 시간대 실행을 식별 */
-function formatIntervalSlot(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const h = String(d.getUTCHours()).padStart(2, "0");
-  return `${y}-${m}-${day}T${h}`;
-}
+/* interval_slot 포맷(formatIntervalSlot)은 collector-schedule.ts 로 옮겼다 — 새 수집 엔진과 함께 쓴다. */
 
 // sql util 런타임 참조 방지 (미사용 이지만 앞으로 고급 쿼리에 쓸 수 있음)
 void sql;

@@ -68,6 +68,17 @@ export type BrandConfig = {
   scoringSetSwitch?: "v14a" | "v15a" | "v16a";
 };
 
+/**
+ * 회차 점수 기준 — 자동 수집 회차를 만들 때 워크스페이스 브랜드 설정·경쟁사를 복사해 둔 것
+ * (계획 geotracker-collect-speed-260924 §2-3 "점수 기준"). 회차 도중 설정이 바뀌어도 그 회차는
+ * 시작할 때의 기준으로 점수를 매긴다 — 지금 "스케줄 실행 1번에 1번 읽기"와 같은 의미다.
+ * automation-runner.ts 가 import 하므로 순환 import 를 피하려고 여기(BrandConfig 옆)에 둔다.
+ */
+export type ScoringSnapshot = {
+  brandConfig: BrandConfig;
+  competitors: { name: string; aliases: string[]; websites: string[] }[];
+};
+
 /* ============================================================
  * competitors — 경쟁사 (워크스페이스 별)
  * ============================================================ */

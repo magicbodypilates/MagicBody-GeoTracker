@@ -120,9 +120,29 @@ const H = vi.hoisted(() => {
     return api;
   };
 
+  const deleteBuilder = (t: { __table: string }) => {
+    let pred: Pred | undefined;
+    const api = {
+      where(p: Pred) {
+        pred = p;
+        return api;
+      },
+      returning(proj?: Record<string, { name: string }>) {
+        const all = tableOf(t);
+        const removed = all.filter((r) => match(r, pred));
+        const keep = all.filter((r) => !match(r, pred));
+        if (t.__table === "schedules") store.schedules = keep as ScheduleRow[];
+        else store.prompts = keep as PromptRow[];
+        return Promise.resolve(removed.map((r) => project(r, proj)));
+      },
+    };
+    return api;
+  };
+
   const db = {
     select: (proj?: Record<string, { name: string }>) => selectBuilder(proj),
     update: (t: { __table: string }) => updateBuilder(t),
+    delete: (t: { __table: string }) => deleteBuilder(t),
   };
 
   return {
@@ -155,19 +175,22 @@ vi.mock("@/lib/server/auth-guard", () => ({
   assertWorkspaceAccess: (wsId: string, session: unknown) => assertWorkspaceAccessMock(wsId, session),
 }));
 
-const { PATCH } = await import("./route");
+const { PATCH, DELETE } = await import("./route");
 
 const WS_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const WS_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 /**
  * promptIds 는 zod `.uuid()` 검증을 받는다 — zod v4 는 버전(4)·변형(8~b) 니블까지
  * 확인하므로(실측: 전부 0인 문자열은 "Invalid UUID"로 거부) 버전 4 형태를 고정해 쓴다.
+ * 이제 경로 id(스케줄 자체의 id, S1 수정)도 같은 검증을 받으므로 "sch-1" 같은 옛 임의
+ * 문자열은 더는 이 라우트를 통과하지 못한다 — 별도 네임스페이스(sid)로 구분해 쓴다.
  */
 const uid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const sid = (n: number) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 function seedSchedule(overrides: Partial<ScheduleRow> = {}): ScheduleRow {
   const row: ScheduleRow = {
-    id: "sch-1",
+    id: sid(1),
     workspaceId: WS_A,
     name: "기본 자동 조사",
     cronExpression: "0 0,12 * * *",
@@ -192,6 +215,12 @@ function patchReq(id: string, body: unknown) {
   );
 }
 
+function deleteReq(id: string) {
+  return DELETE(new NextRequest(`http://localhost/api/schedules/${id}`, { method: "DELETE" }), {
+    params: Promise.resolve({ id }),
+  });
+}
+
 beforeEach(() => {
   H.reset();
   getSessionMock.mockReset();
@@ -200,35 +229,151 @@ beforeEach(() => {
 
 describe("PATCH /api/schedules/:id — 워크스페이스 권한 확인", () => {
   it("존재하지 않는 스케줄 → 404, 권한 체크는 호출되지 않는다", async () => {
-    const res = await patchReq("no-such-id", { name: "x" });
+    const res = await patchReq(sid(99), { name: "x" });
     expect(res.status).toBe(404);
     expect(assertWorkspaceAccessMock).not.toHaveBeenCalled();
   });
 
   it("권한 없는 세션 거부 — 다른 워크스페이스 스케줄 PATCH → 403, DB 는 바뀌지 않는다", async () => {
-    seedSchedule({ id: "sch-2", workspaceId: WS_B, name: "원래 이름" });
+    seedSchedule({ id: sid(2), workspaceId: WS_B, name: "원래 이름" });
     const session = { kind: "user", role: 1, uid: "u1" };
     getSessionMock.mockResolvedValue(session);
     assertWorkspaceAccessMock.mockResolvedValue(
       NextResponse.json({ error: "forbidden" }, { status: 403 }),
     );
 
-    const res = await patchReq("sch-2", { name: "바뀐 이름" });
+    const res = await patchReq(sid(2), { name: "바뀐 이름" });
 
     expect(res.status).toBe(403);
     expect(assertWorkspaceAccessMock).toHaveBeenCalledWith(WS_B, session);
-    expect(H.store.schedules.find((s) => s.id === "sch-2")!.name).toBe("원래 이름");
+    expect(H.store.schedules.find((s) => s.id === sid(2))!.name).toBe("원래 이름");
+  });
+
+  it("UUID 형식이 아닌 id → 400, DB 조회 없음", async () => {
+    const original = H.db.select;
+    H.db.select = (() => {
+      throw new Error("DB select must not be called for a malformed id");
+    }) as unknown as typeof H.db.select;
+    try {
+      const res = await patchReq("not-a-uuid", { name: "x" });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("invalid_id");
+      expect(getSessionMock).not.toHaveBeenCalled();
+    } finally {
+      H.db.select = original;
+    }
+  });
+
+  it("DB 오류 시 응답 본문에 SQL 원문이 없고 고정 오류 코드를 반환한다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = H.db.select;
+    H.db.select = (() => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.reject(
+              new Error(
+                `Failed query: select "id", "workspace_id", "cron_expression" from "schedules" where "id" = $1 -- params: ["${sid(60)}"]`,
+              ),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.select;
+    try {
+      const res = await patchReq(sid(60), { name: "x" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|params:/i);
+      expect(body.error).toBe("schedule_update_failed");
+    } finally {
+      H.db.select = original;
+    }
+  });
+});
+
+describe("DELETE /api/schedules/:id — 워크스페이스 권한 확인 · 잘못된 id 형식 · DB 오류 응답", () => {
+  it("존재하지 않는 스케줄 → 404, 권한 체크는 호출되지 않는다", async () => {
+    const res = await deleteReq(sid(98));
+    expect(res.status).toBe(404);
+    expect(assertWorkspaceAccessMock).not.toHaveBeenCalled();
+  });
+
+  it("권한 없는 세션 거부 — 다른 워크스페이스 스케줄 DELETE → 403, 삭제되지 않는다", async () => {
+    seedSchedule({ id: sid(13), workspaceId: WS_B });
+    getSessionMock.mockResolvedValue({ kind: "user", role: 1, uid: "u1" });
+    assertWorkspaceAccessMock.mockResolvedValue(
+      NextResponse.json({ error: "forbidden" }, { status: 403 }),
+    );
+
+    const res = await deleteReq(sid(13));
+
+    expect(res.status).toBe(403);
+    expect(H.store.schedules).toHaveLength(1);
+  });
+
+  it("접근 권한이 있으면 정상 삭제된다", async () => {
+    seedSchedule({ id: sid(14) });
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    assertWorkspaceAccessMock.mockResolvedValue(null);
+
+    const res = await deleteReq(sid(14));
+
+    expect(res.status).toBe(200);
+    expect(H.store.schedules).toHaveLength(0);
+  });
+
+  it("UUID 형식이 아닌 id → 400, DB 조회 없음", async () => {
+    const original = H.db.select;
+    H.db.select = (() => {
+      throw new Error("DB select must not be called for a malformed id");
+    }) as unknown as typeof H.db.select;
+    try {
+      const res = await deleteReq("not-a-uuid");
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("invalid_id");
+      expect(getSessionMock).not.toHaveBeenCalled();
+    } finally {
+      H.db.select = original;
+    }
+  });
+
+  it("DB 오류 시 응답 본문에 SQL 원문이 없고 고정 오류 코드를 반환한다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = H.db.select;
+    H.db.select = (() => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.reject(
+              new Error(
+                `Failed query: select "id", "workspace_id" from "schedules" where "id" = $1 -- params: ["${sid(61)}"]`,
+              ),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.select;
+    try {
+      const res = await deleteReq(sid(61));
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|params:/i);
+      expect(body.error).toBe("schedule_delete_failed");
+    } finally {
+      H.db.select = original;
+    }
   });
 });
 
 describe("PATCH /api/schedules/:id — promptIds 정리(D)", () => {
   it("존재하지 않는(삭제된) 프롬프트 ID 는 저장에서 걸러진다", async () => {
-    seedSchedule({ id: "sch-3", promptIds: [] });
+    seedSchedule({ id: sid(3), promptIds: [] });
     H.store.prompts.push({ id: uid(1), workspaceId: WS_A });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-3", {
+    const res = await patchReq(sid(3), {
       promptIds: [uid(1), uid(2)], // uid(2) 는 어느 테이블에도 없다 = 삭제된 프롬프트
     });
 
@@ -238,24 +383,24 @@ describe("PATCH /api/schedules/:id — promptIds 정리(D)", () => {
   });
 
   it("다른 워크스페이스 소유의 프롬프트 ID 도 걸러진다", async () => {
-    seedSchedule({ id: "sch-4", promptIds: [] });
+    seedSchedule({ id: sid(4), promptIds: [] });
     H.store.prompts.push({ id: uid(3), workspaceId: WS_A });
     H.store.prompts.push({ id: uid(4), workspaceId: WS_B });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-4", { promptIds: [uid(3), uid(4)] });
+    const res = await patchReq(sid(4), { promptIds: [uid(3), uid(4)] });
 
     const body = await res.json();
     expect(body.schedule.promptIds).toEqual([uid(3)]);
   });
 
   it("빈 배열은 그대로 저장된다(활성 전체 실행 의미 유지)", async () => {
-    seedSchedule({ id: "sch-5", promptIds: [uid(5)] });
+    seedSchedule({ id: sid(5), promptIds: [uid(5)] });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-5", { promptIds: [] });
+    const res = await patchReq(sid(5), { promptIds: [] });
 
     const body = await res.json();
     expect(body.schedule.promptIds).toEqual([]);
@@ -264,12 +409,12 @@ describe("PATCH /api/schedules/:id — promptIds 정리(D)", () => {
   it("비어 있지 않은 선택인데 전부 무효(삭제됨/다른 워크스페이스)면 400 으로 거부하고 저장하지 않는다", async () => {
     // 재현 대상 결함: 필터링 결과가 빈 배열이 되면 조용히 "활성 프롬프트 전체 실행"으로
     // 저장돼 버려서, 사용자가 "이 질문들만" 실행하려던 의도가 예고 없이 확장됐다.
-    seedSchedule({ id: "sch-12", promptIds: [uid(7)] });
+    seedSchedule({ id: sid(12), promptIds: [uid(7)] });
     H.store.prompts.push({ id: uid(8), workspaceId: WS_B }); // 다른 워크스페이스 소속 — 무효 취급
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-12", {
+    const res = await patchReq(sid(12), {
       promptIds: [uid(9), uid(8)], // uid(9) 는 어디에도 없고, uid(8) 은 다른 워크스페이스 소속
     });
 
@@ -278,15 +423,15 @@ describe("PATCH /api/schedules/:id — promptIds 정리(D)", () => {
     expect(body.error).toBe("no_valid_prompts_selected");
     expect(typeof body.hint).toBe("string");
     // 거부됐으므로 기존 promptIds 는 그대로 남아있어야 한다(조용한 "전체 실행" 확장 금지).
-    expect(H.store.schedules.find((s) => s.id === "sch-12")!.promptIds).toEqual([uid(7)]);
+    expect(H.store.schedules.find((s) => s.id === sid(12))!.promptIds).toEqual([uid(7)]);
   });
 
   it("promptIds 를 아예 보내지 않으면 기존 값을 건드리지 않는다", async () => {
-    seedSchedule({ id: "sch-6", promptIds: [uid(6)] });
+    seedSchedule({ id: sid(6), promptIds: [uid(6)] });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-6", { name: "이름만 변경" });
+    const res = await patchReq(sid(6), { name: "이름만 변경" });
 
     const body = await res.json();
     expect(body.schedule.promptIds).toEqual([uid(6)]);
@@ -296,11 +441,11 @@ describe("PATCH /api/schedules/:id — promptIds 정리(D)", () => {
 
 describe("PATCH /api/schedules/:id — 주기 변경 시 다음 실행 시각 재계산(D)", () => {
   it("cronExpression 이 바뀌면 nextRunAt 을 새 주기 기준으로 다시 계산한다", async () => {
-    seedSchedule({ id: "sch-7", cronExpression: "0 0,12 * * *", nextRunAt: new Date("2020-01-01T00:00:00Z") });
+    seedSchedule({ id: sid(7), cronExpression: "0 0,12 * * *", nextRunAt: new Date("2020-01-01T00:00:00Z") });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-7", { cronExpression: "0 * * * *" }); // 1시간마다
+    const res = await patchReq(sid(7), { cronExpression: "0 * * * *" }); // 1시간마다
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -315,11 +460,11 @@ describe("PATCH /api/schedules/:id — 주기 변경 시 다음 실행 시각 �
     // 항상 함께 보낸다. "필드가 보내졌는가" 만으로 재계산하면 편집할 때마다 nextRunAt 이
     // 불필요하게 매번 초기화된다 — 로컬 실제 확인에서 실제로 재현된 결함.
     const fixed = new Date("2030-06-01T00:00:00Z");
-    seedSchedule({ id: "sch-11", cronExpression: "0 0,12 * * *", nextRunAt: fixed, name: "원래 이름" });
+    seedSchedule({ id: sid(11), cronExpression: "0 0,12 * * *", nextRunAt: fixed, name: "원래 이름" });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-11", {
+    const res = await patchReq(sid(11), {
       name: "이름만 바꿈",
       cronExpression: "0 0,12 * * *", // 폼이 그대로 재전송한 기존 값과 동일
     });
@@ -331,35 +476,35 @@ describe("PATCH /api/schedules/:id — 주기 변경 시 다음 실행 시각 �
   });
 
   it("호출측이 nextRunAt 을 직접 지정하면 그 값을 존중하고 재계산하지 않는다", async () => {
-    seedSchedule({ id: "sch-8", cronExpression: "0 0,12 * * *" });
+    seedSchedule({ id: sid(8), cronExpression: "0 0,12 * * *" });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
     const explicit = "2030-05-01T00:00:00.000Z";
 
-    const res = await patchReq("sch-8", { cronExpression: "0 * * * *", nextRunAt: explicit });
+    const res = await patchReq(sid(8), { cronExpression: "0 * * * *", nextRunAt: explicit });
 
     const body = await res.json();
     expect(body.schedule.nextRunAt).toBe(explicit);
   });
 
   it("잘못된 cron 표현식이면 400을 반환하고 저장하지 않는다", async () => {
-    seedSchedule({ id: "sch-9", cronExpression: "0 0,12 * * *", name: "원래" });
+    seedSchedule({ id: sid(9), cronExpression: "0 0,12 * * *", name: "원래" });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-9", { cronExpression: "not a cron" });
+    const res = await patchReq(sid(9), { cronExpression: "not a cron" });
 
     expect(res.status).toBe(400);
-    expect(H.store.schedules.find((s) => s.id === "sch-9")!.name).toBe("원래");
+    expect(H.store.schedules.find((s) => s.id === sid(9))!.name).toBe("원래");
   });
 
   it("cronExpression 이 바뀌지 않으면 nextRunAt 을 건드리지 않는다", async () => {
     const fixed = new Date("2030-01-01T00:00:00Z");
-    seedSchedule({ id: "sch-10", nextRunAt: fixed });
+    seedSchedule({ id: sid(10), nextRunAt: fixed });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("sch-10", { active: false });
+    const res = await patchReq(sid(10), { active: false });
 
     const body = await res.json();
     expect(new Date(body.schedule.nextRunAt).toISOString()).toBe(fixed.toISOString());

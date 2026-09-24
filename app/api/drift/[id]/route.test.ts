@@ -132,9 +132,15 @@ const { PATCH, DELETE } = await import("./route");
 
 const WS_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const WS_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+/**
+ * driftAlerts.id 는 이제 라우트 진입 시 zod `.uuid()` 검증을 받는다(S1 수정) — zod v4 는
+ * 버전(4)·변형(8~b) 니블까지 확인하므로(실측: 전부 0인 문자열은 "Invalid UUID"로 거부)
+ * 버전 4 형태를 고정해 쓴다. "alert-1" 같은 옛 임의 문자열은 더는 통과하지 못한다.
+ */
+const uid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 function seedAlert(overrides: Partial<DriftAlertRow> = {}): DriftAlertRow {
-  const row: DriftAlertRow = { id: "alert-1", workspaceId: WS_A, dismissed: false, ...overrides };
+  const row: DriftAlertRow = { id: uid(1), workspaceId: WS_A, dismissed: false, ...overrides };
   H.store.driftAlerts.push(row);
   return row;
 }
@@ -164,69 +170,153 @@ beforeEach(() => {
 
 describe("PATCH /api/drift/:id — 워크스페이스 권한 확인", () => {
   it("존재하지 않는 알림 → 404, 권한 체크는 호출되지 않는다", async () => {
-    const res = await patchReq("no-such-id", { dismissed: true });
+    const res = await patchReq(uid(99), { dismissed: true });
     expect(res.status).toBe(404);
     expect(assertWorkspaceAccessMock).not.toHaveBeenCalled();
   });
 
   it("권한 없는 세션 거부 — 다른 워크스페이스 알림 PATCH → 403, DB 는 바뀌지 않는다", async () => {
-    seedAlert({ id: "alert-2", workspaceId: WS_B, dismissed: false });
+    seedAlert({ id: uid(2), workspaceId: WS_B, dismissed: false });
     const session = { kind: "user", role: 1, uid: "u1" };
     getSessionMock.mockResolvedValue(session);
     assertWorkspaceAccessMock.mockResolvedValue(
       NextResponse.json({ error: "forbidden" }, { status: 403 }),
     );
 
-    const res = await patchReq("alert-2", { dismissed: true });
+    const res = await patchReq(uid(2), { dismissed: true });
 
     expect(res.status).toBe(403);
     expect(assertWorkspaceAccessMock).toHaveBeenCalledWith(WS_B, session);
-    expect(H.store.driftAlerts.find((a) => a.id === "alert-2")!.dismissed).toBe(false);
+    expect(H.store.driftAlerts.find((a) => a.id === uid(2))!.dismissed).toBe(false);
   });
 
   it("접근 권한이 있으면 정상적으로 dismiss 처리된다", async () => {
-    seedAlert({ id: "alert-3", workspaceId: WS_A, dismissed: false });
+    seedAlert({ id: uid(3), workspaceId: WS_A, dismissed: false });
     const session = { kind: "admin", role: 0 };
     getSessionMock.mockResolvedValue(session);
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("alert-3", { dismissed: true });
+    const res = await patchReq(uid(3), { dismissed: true });
 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.alert.dismissed).toBe(true);
     expect(assertWorkspaceAccessMock).toHaveBeenCalledWith(WS_A, session);
   });
+
+  it("UUID 형식이 아닌 id → 400, DB 조회 없음", async () => {
+    const original = H.db.select;
+    H.db.select = (() => {
+      throw new Error("DB select must not be called for a malformed id");
+    }) as unknown as typeof H.db.select;
+    try {
+      const res = await patchReq("not-a-uuid", { dismissed: true });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("invalid_id");
+      expect(getSessionMock).not.toHaveBeenCalled();
+    } finally {
+      H.db.select = original;
+    }
+  });
+
+  it("DB 오류 시 응답 본문에 SQL 원문이 없고 고정 오류 코드를 반환한다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = H.db.select;
+    H.db.select = (() => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.reject(
+              new Error(
+                `Failed query: select "id", "workspace_id" from "drift_alerts" where "id" = $1 -- params: ["${uid(50)}"]`,
+              ),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.select;
+    try {
+      const res = await patchReq(uid(50), { dismissed: true });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|params:/i);
+      expect(body.error).toBe("drift_update_failed");
+    } finally {
+      H.db.select = original;
+    }
+  });
 });
 
 describe("DELETE /api/drift/:id — 워크스페이스 권한 확인", () => {
   it("존재하지 않는 알림 → 404, 권한 체크는 호출되지 않는다", async () => {
-    const res = await deleteReq("no-such-id");
+    const res = await deleteReq(uid(98));
     expect(res.status).toBe(404);
     expect(assertWorkspaceAccessMock).not.toHaveBeenCalled();
   });
 
   it("권한 없는 세션 거부 — 다른 워크스페이스 알림 DELETE → 403, 삭제되지 않는다", async () => {
-    seedAlert({ id: "alert-4", workspaceId: WS_B });
+    seedAlert({ id: uid(4), workspaceId: WS_B });
     getSessionMock.mockResolvedValue({ kind: "user", role: 1, uid: "u1" });
     assertWorkspaceAccessMock.mockResolvedValue(
       NextResponse.json({ error: "forbidden" }, { status: 403 }),
     );
 
-    const res = await deleteReq("alert-4");
+    const res = await deleteReq(uid(4));
 
     expect(res.status).toBe(403);
     expect(H.store.driftAlerts).toHaveLength(1);
   });
 
   it("접근 권한이 있으면 정상 삭제된다", async () => {
-    seedAlert({ id: "alert-5", workspaceId: WS_A });
+    seedAlert({ id: uid(5), workspaceId: WS_A });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await deleteReq("alert-5");
+    const res = await deleteReq(uid(5));
 
     expect(res.status).toBe(200);
     expect(H.store.driftAlerts).toHaveLength(0);
+  });
+
+  it("UUID 형식이 아닌 id → 400, DB 조회 없음", async () => {
+    const original = H.db.select;
+    H.db.select = (() => {
+      throw new Error("DB select must not be called for a malformed id");
+    }) as unknown as typeof H.db.select;
+    try {
+      const res = await deleteReq("not-a-uuid");
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("invalid_id");
+      expect(getSessionMock).not.toHaveBeenCalled();
+    } finally {
+      H.db.select = original;
+    }
+  });
+
+  it("DB 오류 시 응답 본문에 SQL 원문이 없고 고정 오류 코드를 반환한다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = H.db.select;
+    H.db.select = (() => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.reject(
+              new Error(
+                `Failed query: select "id", "workspace_id" from "drift_alerts" where "id" = $1 -- params: ["${uid(51)}"]`,
+              ),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.select;
+    try {
+      const res = await deleteReq(uid(51));
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|params:/i);
+      expect(body.error).toBe("drift_delete_failed");
+    } finally {
+      H.db.select = original;
+    }
   });
 });

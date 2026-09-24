@@ -5,6 +5,10 @@
  * 권한: prompts/[id]·schedules/[id] 와 동일한 이유로 워크스페이스 권한을 확인한다 — id 만
  * 알면 대상을 찾을 수 있어, 그전에는 권한 없는 일반관리자가 자신의 것이 아닌 워크스페이스의
  * 알림도 숨기거나 삭제할 수 있었다.
+ *
+ * 입력 검증: 경로 id 는 DB 조회 전에 UUID 형식인지 먼저 확인한다(아니면 400). DB 오류
+ * 시에도 상세(SQL 원문 포함 가능)는 서버 로그에만 남기고 응답에는 고정 오류 코드만
+ * 반환한다(CWE-209 — prompts/[id]·schedules/[id] 와 동일한 이유).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -24,6 +28,10 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 경로 id 가 UUID 형식이 아니면 DB 를 타지 않고 즉시 거부한다.
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ error: "invalid_id" }, { status: 400 });
+  }
   try {
     // 1) 대상 조회 — 워크스페이스 권한 확인에 필요
     const [target] = await db
@@ -50,8 +58,15 @@ export async function PATCH(
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });
     }
-    const message = err instanceof Error ? err.message : "unknown";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — 서버 로그에만 상세를 남기고 클라이언트에는
+    // 고정 오류 코드만 반환한다(prompts/[id]·schedules/[id] 와 동일한 이유).
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/drift/:id] PATCH 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "drift_update_failed" }, { status: 500 });
   }
 }
 
@@ -60,6 +75,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 경로 id 가 UUID 형식이 아니면 DB 를 타지 않고 즉시 거부한다.
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ error: "invalid_id" }, { status: 400 });
+  }
   try {
     // 1) 대상 조회 — 워크스페이스 권한 확인에 필요
     const [target] = await db
@@ -80,7 +99,14 @@ export async function DELETE(
     if (!deleted) return NextResponse.json({ error: "not_found" }, { status: 404 });
     return NextResponse.json({ ok: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — 서버 로그에만 상세를 남기고 클라이언트에는
+    // 고정 오류 코드만 반환한다(위 PATCH 와 동일한 이유).
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/drift/:id] DELETE 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "drift_delete_failed" }, { status: 500 });
   }
 }

@@ -9,6 +9,11 @@
  * 뒤 그 워크스페이스에 대해 assertWorkspaceAccess 를 적용한다 — 그전에는 로그인 여부만
  * (middleware) 확인하고 워크스페이스 소유 여부는 보지 않아, 일반관리자가 자신의 프로덕션
  * 워크스페이스가 아닌 프롬프트도 id 만 알면 수정·삭제할 수 있었다.
+ *
+ * 입력 검증: 경로 id 는 DB 조회 전에 UUID 형식인지 먼저 확인한다(아니면 400) — 예전에는
+ * 형식이 틀린 id 도 그대로 쿼리에 들어가 postgres 캐스팅 오류가 발생했고, 그 오류 문구
+ * (SQL 원문 포함)가 500 응답 본문에 그대로 실렸다(CWE-209). DB 오류 시에도 상세는 서버
+ * 로그에만 남기고 응답에는 고정 오류 코드만 반환한다.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -30,6 +35,10 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 경로 id 가 UUID 형식이 아니면 DB 를 타지 않고 즉시 거부한다.
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ error: "invalid_id" }, { status: 400 });
+  }
   try {
     // 1) 대상 조회 — 워크스페이스 권한 확인에 필요
     const [target] = await db
@@ -56,9 +65,17 @@ export async function PATCH(
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });
     }
-    const message = err instanceof Error ? err.message : "unknown";
-    console.error("[/api/prompts/:id] PATCH 실패:", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — drizzle-orm 0.45 는 DB 오류를
+    // DrizzleQueryError("Failed query: ...")로 감싸 err.message 에 쿼리 전문이 그대로
+    // 담긴다. 서버 로그에만 message + cause(원 postgres 오류)를 남기고, 클라이언트에는
+    // 고정 오류 코드만 반환한다.
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/prompts/:id] PATCH 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "prompt_update_failed" }, { status: 500 });
   }
 }
 
@@ -67,6 +84,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 경로 id 가 UUID 형식이 아니면 DB 를 타지 않고 즉시 거부한다.
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ error: "invalid_id" }, { status: 400 });
+  }
   const cascade = req.nextUrl.searchParams.get("cascade") === "true";
 
   try {
@@ -118,8 +139,14 @@ export async function DELETE(
 
     return NextResponse.json({ ok: true, runsDeleted });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown";
-    console.error("[/api/prompts/:id] DELETE 실패:", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — 서버 로그에만 상세를 남기고 클라이언트에는
+    // 고정 오류 코드만 반환한다(위 PATCH 와 동일한 이유).
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/prompts/:id] DELETE 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "prompt_delete_failed" }, { status: 500 });
   }
 }

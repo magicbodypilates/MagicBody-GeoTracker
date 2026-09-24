@@ -4,6 +4,10 @@
  * 권한: id 만으로 대상을 찾으므로 먼저 대상 스케줄의 workspaceId 를 조회한 뒤
  * assertWorkspaceAccess 를 적용한다(prompts/[id] 와 동일한 이유 — 로그인 여부만으로는
  * 워크스페이스 소유 여부를 보장하지 못한다).
+ *
+ * 입력 검증: 경로 id 는 DB 조회 전에 UUID 형식인지 먼저 확인한다(아니면 400). DB 오류
+ * 시에도 상세(SQL 원문 포함 가능)는 서버 로그에만 남기고 응답에는 고정 오류 코드만
+ * 반환한다(CWE-209 — prompts/[id] 와 동일한 이유).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -31,6 +35,10 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 경로 id 가 UUID 형식이 아니면 DB 를 타지 않고 즉시 거부한다.
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ error: "invalid_id" }, { status: 400 });
+  }
   try {
     // 1) 대상 조회 — 워크스페이스 권한 확인 + 주기가 "실제로 바뀌었는지" 비교에 필요
     const [target] = await db
@@ -128,8 +136,17 @@ export async function PATCH(
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });
     }
-    const message = err instanceof Error ? err.message : "unknown";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — drizzle-orm 0.45 는 DB 오류를
+    // DrizzleQueryError("Failed query: ...")로 감싸 err.message 에 쿼리 전문이 그대로
+    // 담긴다. 서버 로그에만 message + cause(원 postgres 오류)를 남기고, 클라이언트에는
+    // 고정 오류 코드만 반환한다.
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/schedules/:id] PATCH 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "schedule_update_failed" }, { status: 500 });
   }
 }
 
@@ -138,6 +155,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // 경로 id 가 UUID 형식이 아니면 DB 를 타지 않고 즉시 거부한다.
+  if (!z.string().uuid().safeParse(id).success) {
+    return NextResponse.json({ error: "invalid_id" }, { status: 400 });
+  }
   try {
     // prompts/[id] DELETE 와 동일한 이유로 워크스페이스 권한을 함께 확인한다 — PATCH 만
     // 막고 DELETE 를 열어두면 같은 구멍이 삭제 경로로 그대로 남는다.
@@ -159,7 +180,14 @@ export async function DELETE(
     if (!deleted) return NextResponse.json({ error: "not_found" }, { status: 404 });
     return NextResponse.json({ ok: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — 서버 로그에만 상세를 남기고 클라이언트에는
+    // 고정 오류 코드만 반환한다(위 PATCH 와 동일한 이유).
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/schedules/:id] DELETE 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "schedule_delete_failed" }, { status: 500 });
   }
 }

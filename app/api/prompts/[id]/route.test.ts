@@ -155,6 +155,12 @@ const { PATCH, DELETE } = await import("./route");
 
 const WS_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const WS_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+/**
+ * prompts.id 는 이제 라우트 진입 시 zod `.uuid()` 검증을 받는다(S1 수정) — zod v4 는
+ * 버전(4)·변형(8~b) 니블까지 확인하므로(실측: 전부 0인 문자열은 "Invalid UUID"로 거부)
+ * 버전 4 형태를 고정해 쓴다. "p1" 같은 옛 임의 문자열은 더는 이 라우트를 통과하지 못한다.
+ */
+const uid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 function seedPrompt(id: string, workspaceId: string, overrides: Partial<PromptRow> = {}): PromptRow {
   const row: PromptRow = { id, workspaceId, text: "문구", tags: [], active: true, ...overrides };
@@ -189,51 +195,93 @@ beforeEach(() => {
 describe("PATCH /api/prompts/:id — 워크스페이스 권한 확인", () => {
   it("존재하지 않는 프롬프트 → 404, 권한 체크는 아예 호출되지 않는다", async () => {
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
-    const res = await patchReq("no-such-id", { active: false });
+    const res = await patchReq(uid(99), { active: false });
     expect(res.status).toBe(404);
     expect(assertWorkspaceAccessMock).not.toHaveBeenCalled();
   });
 
   it("권한 없는 세션 거부 — 일반관리자가 다른 워크스페이스 프롬프트를 PATCH → 403, DB 는 바뀌지 않는다", async () => {
-    seedPrompt("p1", WS_B, { active: true });
+    seedPrompt(uid(1), WS_B, { active: true });
     const session = { kind: "user", role: 1, uid: "u1" };
     getSessionMock.mockResolvedValue(session);
     assertWorkspaceAccessMock.mockResolvedValue(
       NextResponse.json({ error: "forbidden" }, { status: 403 }),
     );
 
-    const res = await patchReq("p1", { active: false });
+    const res = await patchReq(uid(1), { active: false });
 
     expect(res.status).toBe(403);
     expect(assertWorkspaceAccessMock).toHaveBeenCalledWith(WS_B, session);
     // 권한 게이트에서 막혔으므로 실제 수정이 일어나지 않았다.
-    expect(H.store.prompts.find((p) => p.id === "p1")!.active).toBe(true);
+    expect(H.store.prompts.find((p) => p.id === uid(1))!.active).toBe(true);
   });
 
   it("접근 권한이 있으면 정상적으로 수정된다", async () => {
-    seedPrompt("p2", WS_A, { active: true });
+    seedPrompt(uid(2), WS_A, { active: true });
     const session = { kind: "admin", role: 0 };
     getSessionMock.mockResolvedValue(session);
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await patchReq("p2", { active: false });
+    const res = await patchReq(uid(2), { active: false });
 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.prompt.active).toBe(false);
     expect(assertWorkspaceAccessMock).toHaveBeenCalledWith(WS_A, session);
   });
+
+  it("UUID 형식이 아닌 id → 400, DB 조회 없음", async () => {
+    const original = H.db.select;
+    H.db.select = (() => {
+      throw new Error("DB select must not be called for a malformed id");
+    }) as unknown as typeof H.db.select;
+    try {
+      const res = await patchReq("not-a-uuid", { active: false });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("invalid_id");
+      expect(getSessionMock).not.toHaveBeenCalled();
+    } finally {
+      H.db.select = original;
+    }
+  });
+
+  it("DB 오류 시 응답 본문에 SQL 원문이 없고 고정 오류 코드를 반환한다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = H.db.select;
+    H.db.select = (() => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.reject(
+              new Error(
+                `Failed query: select "id", "workspace_id" from "prompts" where "id" = $1 -- params: ["${uid(50)}"]`,
+              ),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.select;
+    try {
+      const res = await patchReq(uid(50), { active: false });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|params:/i);
+      expect(body.error).toBe("prompt_update_failed");
+    } finally {
+      H.db.select = original;
+    }
+  });
 });
 
 describe("DELETE /api/prompts/:id — 워크스페이스 권한 확인", () => {
   it("권한 없는 세션 거부 — 다른 워크스페이스 프롬프트 DELETE → 403, 삭제되지 않는다", async () => {
-    seedPrompt("p3", WS_B);
+    seedPrompt(uid(3), WS_B);
     getSessionMock.mockResolvedValue({ kind: "user", role: 1, uid: "u1" });
     assertWorkspaceAccessMock.mockResolvedValue(
       NextResponse.json({ error: "forbidden" }, { status: 403 }),
     );
 
-    const res = await deleteReq("p3");
+    const res = await deleteReq(uid(3));
 
     expect(res.status).toBe(403);
     expect(H.store.prompts).toHaveLength(1);
@@ -242,19 +290,19 @@ describe("DELETE /api/prompts/:id — 워크스페이스 권한 확인", () => {
   });
 
   it("워크스페이스 접근은 되지만 cascade=true 이고 admin 이 아니면 403, 삭제되지 않는다", async () => {
-    seedPrompt("p4", WS_A);
+    seedPrompt(uid(4), WS_A);
     getSessionMock.mockResolvedValue({ kind: "user", role: 1, uid: "u1" });
     assertWorkspaceAccessMock.mockResolvedValue(null);
     requireAdminMock.mockReturnValue(NextResponse.json({ error: "forbidden" }, { status: 403 }));
 
-    const res = await deleteReq("p4", "?cascade=true");
+    const res = await deleteReq(uid(4), "?cascade=true");
 
     expect(res.status).toBe(403);
     expect(H.store.prompts).toHaveLength(1);
   });
 
   it("접근 권한이 있으면 정상 삭제되고, cascade 시 같은 워크스페이스·같은 문구의 runs 만 함께 삭제된다", async () => {
-    seedPrompt("p5", WS_A, { text: "지울 문구" });
+    seedPrompt(uid(5), WS_A, { text: "지울 문구" });
     H.store.runs.push({ id: "r1", workspaceId: WS_A, promptText: "지울 문구" });
     H.store.runs.push({ id: "r2", workspaceId: WS_A, promptText: "다른 문구" });
     H.store.runs.push({ id: "r3", workspaceId: WS_B, promptText: "지울 문구" }); // 다른 워크스페이스 — 영향 없어야 함
@@ -262,7 +310,7 @@ describe("DELETE /api/prompts/:id — 워크스페이스 권한 확인", () => {
     assertWorkspaceAccessMock.mockResolvedValue(null);
     requireAdminMock.mockReturnValue(null);
 
-    const res = await deleteReq("p5", "?cascade=true");
+    const res = await deleteReq(uid(5), "?cascade=true");
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -272,17 +320,59 @@ describe("DELETE /api/prompts/:id — 워크스페이스 권한 확인", () => {
   });
 
   it("cascade 없이 삭제하면 runs 는 그대로 남는다", async () => {
-    seedPrompt("p6", WS_A, { text: "지울 문구2" });
+    seedPrompt(uid(6), WS_A, { text: "지울 문구2" });
     H.store.runs.push({ id: "r4", workspaceId: WS_A, promptText: "지울 문구2" });
     getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
     assertWorkspaceAccessMock.mockResolvedValue(null);
 
-    const res = await deleteReq("p6");
+    const res = await deleteReq(uid(6));
 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.runsDeleted).toBe(0);
     expect(H.store.runs).toHaveLength(1);
     expect(requireAdminMock).not.toHaveBeenCalled(); // cascade 아니므로 admin 체크 자체를 안 함
+  });
+
+  it("UUID 형식이 아닌 id → 400, DB 조회 없음", async () => {
+    const original = H.db.select;
+    H.db.select = (() => {
+      throw new Error("DB select must not be called for a malformed id");
+    }) as unknown as typeof H.db.select;
+    try {
+      const res = await deleteReq("not-a-uuid");
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("invalid_id");
+      expect(getSessionMock).not.toHaveBeenCalled();
+    } finally {
+      H.db.select = original;
+    }
+  });
+
+  it("DB 오류 시 응답 본문에 SQL 원문이 없고 고정 오류 코드를 반환한다", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = H.db.select;
+    H.db.select = (() => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.reject(
+              new Error(
+                `Failed query: select "id", "text", "workspace_id" from "prompts" where "id" = $1 -- params: ["${uid(51)}"]`,
+              ),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.select;
+    try {
+      const res = await deleteReq(uid(51));
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|params:/i);
+      expect(body.error).toBe("prompt_delete_failed");
+    } finally {
+      H.db.select = original;
+    }
   });
 });

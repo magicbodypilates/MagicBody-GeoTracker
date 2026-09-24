@@ -23,6 +23,11 @@ import { PROVIDER_LABELS, VISIBLE_PROVIDERS } from "@/components/dashboard/types
 
 import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
 import { filterToActivePromptIds } from "@/lib/client/schedule-prompt-select";
+import {
+  formatRoundLine,
+  pickRoundForSchedule,
+  type RoundOverviewLite,
+} from "@/lib/client/collection-round-summary";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -90,6 +95,9 @@ export function AutomationServerTab({
   const [busy, setBusy] = useState(false);
   const [rowActionIds, setRowActionIds] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string>("");
+  // 수집 엔진("queue" 면 회차 진행 한 줄을 보여 준다)과 최근 회차 — 계획 geotracker-collect-speed-260924 Step 7
+  const [collectorEngine, setCollectorEngine] = useState<"legacy" | "queue" | null>(null);
+  const [collectionRounds, setCollectionRounds] = useState<RoundOverviewLite[]>([]);
 
   // 스케줄 추가 폼 상태
   const [newName, setNewName] = useState("기본 자동 조사");
@@ -247,6 +255,22 @@ export function AutomationServerTab({
     setPromptsLoaded(true);
   }, [workspaceId]);
 
+  /** 최근 회차 진행 상태 — 실패해도 화면의 다른 부분은 그대로 둔다(진행 한 줄만 안 보인다). */
+  const reloadRounds = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const res = await fetch(`${BP}/api/workspaces/${workspaceId}/collection-rounds?limit=30`, {
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { engine?: "legacy" | "queue"; rounds?: RoundOverviewLite[] };
+      setCollectorEngine(data.engine === "queue" ? "queue" : "legacy");
+      setCollectionRounds(Array.isArray(data.rounds) ? data.rounds : []);
+    } catch {
+      // 네트워크 오류 — 다음 새로고침에서 다시
+    }
+  }, [workspaceId]);
+
   useEffect(() => {
     void initWorkspace();
   }, [initWorkspace]);
@@ -256,9 +280,11 @@ export function AutomationServerTab({
     void reloadSchedules();
     void reloadRecentRuns();
     void reloadPrompts();
+    void reloadRounds();
     const t = setInterval(() => {
       void reloadRecentRuns();
       void reloadSchedules();
+      void reloadRounds();
     }, 60_000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -330,9 +356,12 @@ export function AutomationServerTab({
         throw new Error(errBody.hint ?? errBody.error ?? "생성 실패");
       }
       setMessage(
-        "스케줄이 추가됐습니다. 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됩니다.",
+        collectorEngine === "queue"
+          ? "스케줄이 추가됐습니다. 1분 안에 첫 조사가 순서에 오릅니다."
+          : "스케줄이 추가됐습니다. 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됩니다.",
       );
       await reloadSchedules();
+      void reloadRounds();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "생성 실패");
     } finally {
@@ -429,11 +458,16 @@ export function AutomationServerTab({
         method: "POST",
         credentials: "include",
       });
-      if (!res.ok) throw new Error("트리거 실패");
+      const body = (await res.json().catch(() => ({}))) as { hint?: string; error?: string; round?: unknown };
+      // 새 엔진은 결과를 쉬운 말 안내(hint)로 돌려준다 — 실패(예: 오래된 조사 마무리 중)도 안내가 우선.
+      if (!res.ok) throw new Error(body.hint ?? "트리거 실패");
       setMessage(
-        "즉시 실행 예약됨 — 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됩니다.",
+        body.round && body.hint
+          ? body.hint
+          : "즉시 실행 예약됨 — 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됩니다.",
       );
       await reloadSchedules();
+      void reloadRounds();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "트리거 실패");
     }
@@ -527,7 +561,7 @@ export function AutomationServerTab({
               <span className="text-xs text-th-text-muted">{message}</span>
             )}
             <button
-              onClick={() => { void reloadSchedules(); void reloadRecentRuns(); void reloadPrompts(); }}
+              onClick={() => { void reloadSchedules(); void reloadRecentRuns(); void reloadPrompts(); void reloadRounds(); }}
               className="rounded-md border border-th-border bg-th-card-alt px-2.5 py-1 text-xs text-th-text-muted hover:bg-th-card-hover hover:text-th-text"
               title="스케줄·실행 결과 즉시 새로고침"
             >
@@ -555,9 +589,17 @@ export function AutomationServerTab({
                 </tr>
               </thead>
               <tbody>
-                {schedules.map((s) => (
+                {schedules.map((s) => {
+                  // 진행 한 줄 — 새 엔진일 때만(예전 엔진은 회차를 만들지 않는다). 표 칸 폭을 흔들지 않게
+                  // 스케줄 줄 바로 아래 전체 폭 줄로 붙인다.
+                  const progressRound =
+                    collectorEngine === "queue" ? pickRoundForSchedule(collectionRounds, s.id) : null;
+                  const progressLine = progressRound
+                    ? formatRoundLine(progressRound, (p) => PROVIDER_LABELS[p as Provider] ?? p)
+                    : null;
+                  return (
                   <Fragment key={s.id}>
-                  <tr className="border-b border-th-border-subtle">
+                  <tr className={progressLine ? "" : "border-b border-th-border-subtle"}>
                     <td className="py-2 font-medium text-th-text">{s.name}</td>
                     <td className="py-2 text-th-text-secondary">
                       {humanizeCron(s.cronExpression)}
@@ -600,7 +642,11 @@ export function AutomationServerTab({
                         onClick={withRowLock(s.id, () => triggerSchedule(s.id))}
                         disabled={rowActionIds.has(s.id)}
                         className="mr-2 rounded border border-th-border bg-th-card-alt px-2 py-1 text-xs hover:bg-th-card-hover disabled:opacity-50"
-                        title="즉시 실행 — 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됨"
+                        title={
+                          collectorEngine === "queue"
+                            ? "즉시 실행 — 바로 순서에 올리고 빈자리가 나는 대로 모읍니다(진행 중인 조사가 있으면 빠진 질문만 더해 먼저 처리)"
+                            : "즉시 실행 — 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됨"
+                        }
                       >
                         ⏱ 즉시
                       </button>
@@ -613,6 +659,18 @@ export function AutomationServerTab({
                       </button>
                     </td>
                   </tr>
+                  {progressLine && progressRound && (
+                    <tr className="border-b border-th-border-subtle">
+                      <td
+                        colSpan={7}
+                        className={`pb-2 text-xs ${
+                          progressRound.status === "running" ? "text-th-text-accent" : "text-th-text-muted"
+                        }`}
+                      >
+                        {progressLine}
+                      </td>
+                    </tr>
+                  )}
                   {editingId === s.id && (
                     <tr className="border-b border-th-border-subtle bg-th-card-alt/60">
                       <td colSpan={7} className="p-3">
@@ -771,7 +829,8 @@ export function AutomationServerTab({
                     </tr>
                   )}
                   </Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

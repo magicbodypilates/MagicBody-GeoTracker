@@ -12,7 +12,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type {
   BrandConfig,
   Competitor,
@@ -22,6 +22,7 @@ import type {
 import { PROVIDER_LABELS, VISIBLE_PROVIDERS } from "@/components/dashboard/types";
 
 import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
+import { filterToActivePromptIds } from "@/lib/client/schedule-prompt-select";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -83,6 +84,9 @@ export function AutomationServerTab({
   const [schedules, setSchedules] = useState<ServerSchedule[]>([]);
   const [recentRuns, setRecentRuns] = useState<ServerRun[]>([]);
   const [serverPrompts, setServerPrompts] = useState<ServerPrompt[]>([]);
+  // reloadPrompts() 가 최소 한 번 성공적으로 끝났는지 — 동기화 effect 가 serverPrompts
+  // 아직 빈 배열인 최초 렌더 타이밍에 도는 것을 막는 데 쓴다(아래 동기화 effect 참고).
+  const [promptsLoaded, setPromptsLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [rowActionIds, setRowActionIds] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string>("");
@@ -93,6 +97,14 @@ export function AutomationServerTab({
   const [newProviders, setNewProviders] = useState<Provider[]>([...VISIBLE_PROVIDERS]);
   // 실행 대상 프롬프트 — 체크된 ID 들만 스케줄에 포함. 빈 Set 이면 전체 active 프롬프트 실행 (기존 동작 유지).
   const [newPromptIds, setNewPromptIds] = useState<Set<string>>(new Set());
+
+  // 스케줄 편집 폼 상태 — editingId 가 있는 행에만 인라인 편집 패널을 펼친다.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editCron, setEditCron] = useState("");
+  const [editProviders, setEditProviders] = useState<Provider[]>([]);
+  const [editPromptIds, setEditPromptIds] = useState<Set<string>>(new Set());
+  const [editBusy, setEditBusy] = useState(false);
 
   /**
    * 워크스페이스 초기화
@@ -232,6 +244,7 @@ export function AutomationServerTab({
     if (!res.ok) return;
     const data = (await res.json()) as { prompts: ServerPrompt[] };
     setServerPrompts(data.prompts);
+    setPromptsLoaded(true);
   }, [workspaceId]);
 
   useEffect(() => {
@@ -251,20 +264,31 @@ export function AutomationServerTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
-  // 프롬프트·경쟁사가 외부에서 변경되면 서버 DB에 동기화 후 목록 갱신
-  // syncInitialSetup 과 동일 로직이나 409(중복)는 조용히 무시 → 새로 추가된 항목만 서버에 저장됨
+  // 프롬프트·경쟁사가 외부에서 변경되면 서버 DB에 동기화 후 목록 갱신.
+  // syncInitialSetup 과 동일 로직이나, 서버에 이미 있는 문구(활성·비활성 무관 — serverPrompts
+  // 는 GET /prompts 로 전체를 받는다)는 다시 보내지 않는다. 예전엔 매번 customPrompts 전체를
+  // 재전송해서 목록이 길어질수록(길이가 바뀔 때마다) 요청이 계속 불어났다 — POST 가 이제
+  // ON CONFLICT 로 성공하긴 하지만, 그렇다고 매번 전체를 다시 쏠 이유는 없다.
+  //
+  // promptsLoaded 를 게이트로 두는 이유: 이 effect는 workspaceId 가 세팅되는 시점에 reloadPrompts()
+  // 를 트리거하는 다른 effect와 함께 걸리는데, reloadPrompts() 는 비동기라 이 effect의 첫 실행
+  // 시점엔 serverPrompts 가 아직 빈 배열일 수 있다 — 그러면 existingTexts 가 비어 이미 서버에
+  // 있는 프롬프트까지 한 번 더 POST 된다(서버가 upsert 라 데이터 손상은 없지만 불필요한 요청).
+  // reloadPrompts() 가 최소 한 번 끝난 뒤(promptsLoaded=true)에만 돌게 하면 이 레이스가 없어진다.
   useEffect(() => {
-    if (!workspaceId || initState !== "ready") return;
+    if (!workspaceId || initState !== "ready" || !promptsLoaded) return;
     let cancelled = false;
     const sync = async () => {
+      const existingTexts = new Set(serverPrompts.map((p) => p.text));
       for (const p of customPrompts) {
         if (!p.text?.trim() || cancelled) continue;
+        if (existingTexts.has(p.text)) continue;
         await fetch(`${BP}/api/workspaces/${workspaceId}/prompts`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({ text: p.text, tags: p.tags ?? [] }),
-        }).catch(() => null); // 409 포함 모든 에러 무시
+        }).catch(() => null);
       }
       for (const c of competitors) {
         if (!c.name?.trim() || cancelled) continue;
@@ -280,7 +304,7 @@ export function AutomationServerTab({
     void sync();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customPrompts.length, competitors.length, workspaceId, initState]);
+  }, [customPrompts.length, competitors.length, workspaceId, initState, promptsLoaded]);
 
   async function addSchedule() {
     if (!workspaceId || busy || !newName.trim() || newProviders.length === 0) return;
@@ -300,13 +324,71 @@ export function AutomationServerTab({
           active: true,
         }),
       });
-      if (!res.ok) throw new Error((await res.json()).error ?? "생성 실패");
-      setMessage("스케줄이 추가됐습니다. 다음 tick (최대 1분) 에 실행됩니다.");
+      if (!res.ok) {
+        // hint 가 있으면(예: 선택한 질문이 전부 무효) 원인이 드러나는 한국어 안내를 우선 표시.
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.hint ?? errBody.error ?? "생성 실패");
+      }
+      setMessage(
+        "스케줄이 추가됐습니다. 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됩니다.",
+      );
       await reloadSchedules();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "생성 실패");
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * 편집 패널을 연다 — 현재 스케줄 값으로 폼을 채운다.
+   * s.promptIds 는 이미 삭제되었거나 비활성화된 프롬프트 ID 를 여전히 담고 있을 수 있다
+   * (서버는 PATCH 저장 시점에만 정리한다). 체크리스트는 활성 프롬프트만 렌더링하므로
+   * 그대로 세팅하면 "선택 N/M" 카운트가 실제 체크 개수보다 부풀어 보인다 — 활성 프롬프트
+   * 집합으로 한 번 걸러서 화면 표시와 실제 체크 상태를 일치시킨다.
+   */
+  function startEdit(s: ServerSchedule) {
+    setEditingId(s.id);
+    setEditName(s.name);
+    setEditCron(s.cronExpression);
+    setEditProviders([...(s.providers as Provider[])]);
+    setEditPromptIds(new Set(filterToActivePromptIds(s.promptIds, serverPrompts)));
+    setMessage("");
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+  }
+
+  async function saveEdit(id: string) {
+    if (editBusy || !editName.trim() || editProviders.length === 0) return;
+    setEditBusy(true);
+    setMessage("");
+    try {
+      const res = await fetch(`${BP}/api/schedules/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          name: editName.trim(),
+          cronExpression: editCron,
+          providers: editProviders,
+          // 체크된 프롬프트가 있으면 그 ID 들만, 전체 해제 상태(빈 배열)면 "활성 전체" 의미 유지.
+          promptIds: Array.from(editPromptIds),
+        }),
+      });
+      if (!res.ok) {
+        // hint 가 있으면(예: 선택한 질문이 전부 무효) 원인이 드러나는 한국어 안내를 우선 표시.
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.hint ?? errBody.error ?? "수정 실패");
+      }
+      setMessage("스케줄이 수정됐습니다.");
+      setEditingId(null);
+      await reloadSchedules();
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "수정 실패");
+    } finally {
+      setEditBusy(false);
     }
   }
 
@@ -348,7 +430,9 @@ export function AutomationServerTab({
         credentials: "include",
       });
       if (!res.ok) throw new Error("트리거 실패");
-      setMessage("즉시 실행 예약됨 — Worker 가 1분 내 처리합니다.");
+      setMessage(
+        "즉시 실행 예약됨 — 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됩니다.",
+      );
       await reloadSchedules();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "트리거 실패");
@@ -472,7 +556,8 @@ export function AutomationServerTab({
               </thead>
               <tbody>
                 {schedules.map((s) => (
-                  <tr key={s.id} className="border-b border-th-border-subtle">
+                  <Fragment key={s.id}>
+                  <tr className="border-b border-th-border-subtle">
                     <td className="py-2 font-medium text-th-text">{s.name}</td>
                     <td className="py-2 text-th-text-secondary">
                       {humanizeCron(s.cronExpression)}
@@ -505,10 +590,17 @@ export function AutomationServerTab({
                     </td>
                     <td className="py-2 text-right">
                       <button
+                        onClick={() => (editingId === s.id ? cancelEdit() : startEdit(s))}
+                        className="mr-2 rounded border border-th-border bg-th-card-alt px-2 py-1 text-xs hover:bg-th-card-hover"
+                        title="이름·주기·프로바이더·실행할 질문을 고쳐 저장"
+                      >
+                        {editingId === s.id ? "편집 취소" : "편집"}
+                      </button>
+                      <button
                         onClick={withRowLock(s.id, () => triggerSchedule(s.id))}
                         disabled={rowActionIds.has(s.id)}
                         className="mr-2 rounded border border-th-border bg-th-card-alt px-2 py-1 text-xs hover:bg-th-card-hover disabled:opacity-50"
-                        title="즉시 실행 — 다음 tick 에 곧바로 실행됨"
+                        title="즉시 실행 — 지금 진행 중인 조사가 있으면 그 조사가 끝난 뒤 바로 실행됨"
                       >
                         ⏱ 즉시
                       </button>
@@ -521,6 +613,164 @@ export function AutomationServerTab({
                       </button>
                     </td>
                   </tr>
+                  {editingId === s.id && (
+                    <tr className="border-b border-th-border-subtle bg-th-card-alt/60">
+                      <td colSpan={7} className="p-3">
+                        <div className="space-y-3 rounded-lg border border-th-border bg-th-card p-3">
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div>
+                              <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">
+                                이름
+                              </label>
+                              <input
+                                value={editName}
+                                onChange={(e) => setEditName(e.target.value)}
+                                className="bd-input w-full rounded-lg p-2 text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">
+                                주기
+                              </label>
+                              <select
+                                value={editCron}
+                                onChange={(e) => setEditCron(e.target.value)}
+                                className="bd-input w-full rounded-lg p-2 text-sm"
+                              >
+                                {!INTERVAL_PRESETS.some((p) => p.cron === editCron) && (
+                                  <option value={editCron}>{humanizeCron(editCron)}</option>
+                                )}
+                                {INTERVAL_PRESETS.map((p) => (
+                                  <option key={p.cron} value={p.cron}>
+                                    {p.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">
+                              프로바이더 선택
+                            </label>
+                            <div className="flex flex-wrap gap-2">
+                              {VISIBLE_PROVIDERS.map((p) => {
+                                const on = editProviders.includes(p);
+                                return (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    onClick={() =>
+                                      setEditProviders((prev) =>
+                                        on ? prev.filter((x) => x !== p) : [...prev, p],
+                                      )
+                                    }
+                                    className={`rounded-full border px-3 py-1 text-xs ${
+                                      on
+                                        ? "border-th-accent bg-th-accent-soft text-th-accent"
+                                        : "border-th-border bg-th-card-alt text-th-text-secondary"
+                                    }`}
+                                  >
+                                    {on ? "✓" : ""} {PROVIDER_LABELS[p]}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="mb-1 flex items-center justify-between">
+                              <label className="block text-xs uppercase tracking-wider text-th-text-muted">
+                                실행할 프롬프트
+                              </label>
+                              <div className="flex items-center gap-2 text-xs">
+                                <span className="text-th-text-muted">
+                                  {editPromptIds.size === 0
+                                    ? `전체 ${serverPrompts.filter((p) => p.active).length}개 (선택 0)`
+                                    : `선택 ${editPromptIds.size}/${serverPrompts.filter((p) => p.active).length}`}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEditPromptIds(
+                                      new Set(serverPrompts.filter((p) => p.active).map((p) => p.id)),
+                                    )
+                                  }
+                                  className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
+                                >
+                                  전체 선택
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditPromptIds(new Set())}
+                                  className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
+                                >
+                                  전체 해제
+                                </button>
+                              </div>
+                            </div>
+                            {serverPrompts.filter((p) => p.active).length === 0 ? (
+                              <p className="rounded border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-muted">
+                                활성 프롬프트가 없습니다. Prompt Hub 에서 프롬프트를 먼저 추가하세요.
+                              </p>
+                            ) : (
+                              <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-th-border bg-th-card-alt p-2">
+                                {serverPrompts
+                                  .filter((p) => p.active)
+                                  .map((p) => {
+                                    const checked = editPromptIds.has(p.id);
+                                    return (
+                                      <label
+                                        key={p.id}
+                                        className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-th-card-hover"
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          onChange={() => {
+                                            setEditPromptIds((prev) => {
+                                              const next = new Set(prev);
+                                              if (next.has(p.id)) next.delete(p.id);
+                                              else next.add(p.id);
+                                              return next;
+                                            });
+                                          }}
+                                          className="mt-0.5 shrink-0"
+                                        />
+                                        <span className="line-clamp-2 text-th-text">{p.text}</span>
+                                      </label>
+                                    );
+                                  })}
+                              </div>
+                            )}
+                            <p className="mt-2 text-xs text-th-text-muted">
+                              {editPromptIds.size === 0
+                                ? "빈 선택 상태로 저장하면 활성 프롬프트 전체를 실행합니다."
+                                : `선택한 ${editPromptIds.size}개 프롬프트만 실행합니다.`}
+                            </p>
+                          </div>
+
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => void saveEdit(s.id)}
+                              disabled={editBusy || !editName.trim() || editProviders.length === 0}
+                              className="rounded-lg bg-th-accent px-4 py-2 text-sm font-medium text-th-text-inverse hover:bg-th-accent-hover disabled:opacity-50"
+                            >
+                              {editBusy ? "저장 중…" : "저장"}
+                            </button>
+                            <button
+                              onClick={cancelEdit}
+                              disabled={editBusy}
+                              className="rounded-lg border border-th-border bg-th-card-alt px-4 py-2 text-sm text-th-text-secondary hover:bg-th-card-hover disabled:opacity-50"
+                            >
+                              취소
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

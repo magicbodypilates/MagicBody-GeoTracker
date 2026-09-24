@@ -345,25 +345,22 @@ export async function upsertBrand(wsId: string, brand: BrandConfig): Promise<voi
   });
 }
 
-/** UNIQUE 제약 — 이미 있으면 409. 호출부는 충돌을 정상 케이스로 간주. */
+/**
+ * 프롬프트 추가 — 서버가 "없으면 생성, 있으면(꺼진 채로 있어도) 재활성화" 를 처리하므로
+ * 이제 실패 없이 항상 최종 프롬프트를 돌려준다(과거엔 UNIQUE 충돌 시 409 를 받아 null 로
+ * 조용히 넘겼는데, 그 경로가 "이미 존재 = 성공"으로 취급돼 꺼진 프롬프트가 다시 켜지지
+ * 않는 원인이었다). 반환값은 호출부가 굳이 안 써도 되도록 유지.
+ */
 export async function addPromptIfNew(
   wsId: string,
   prompt: TaggedPrompt,
-): Promise<ServerPrompt | null> {
-  try {
-    const res = await j<{ prompt: ServerPrompt }>(
-      `${BP}/api/workspaces/${wsId}/prompts`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: prompt.text, tags: prompt.tags ?? [] }),
-      },
-    );
-    return res.prompt;
-  } catch (e) {
-    if (e instanceof Error && /409/.test(e.message)) return null;
-    throw e;
-  }
+): Promise<ServerPrompt> {
+  const res = await j<{ prompt: ServerPrompt }>(`${BP}/api/workspaces/${wsId}/prompts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: prompt.text, tags: prompt.tags ?? [] }),
+  });
+  return res.prompt;
 }
 
 /** 텍스트로 찾아 제거. API 는 ID 기반이므로 먼저 목록 조회 후 매칭. */

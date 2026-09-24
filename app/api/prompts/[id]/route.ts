@@ -4,13 +4,18 @@
  * PATCH  — text / tags / active 일부 또는 전체 수정
  * DELETE — 프롬프트 제거. ?cascade=true 면 같은 prompt_text 의 runs 도 함께 삭제 (admin 전용).
  *          연관된 schedules.promptIds 는 UUID 배열이라 cascade 안 됨 — 호출 측이 스케줄 업데이트 필요.
+ *
+ * 권한: 이 라우트는 id 만으로 대상을 찾으므로, 먼저 대상 프롬프트의 workspaceId 를 조회한
+ * 뒤 그 워크스페이스에 대해 assertWorkspaceAccess 를 적용한다 — 그전에는 로그인 여부만
+ * (middleware) 확인하고 워크스페이스 소유 여부는 보지 않아, 일반관리자가 자신의 프로덕션
+ * 워크스페이스가 아닌 프롬프트도 id 만 알면 수정·삭제할 수 있었다.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { and, eq } from "drizzle-orm";
-import { getSession, requireAdmin } from "@/lib/server/auth-guard";
+import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +31,18 @@ export async function PATCH(
 ) {
   const { id } = await params;
   try {
+    // 1) 대상 조회 — 워크스페이스 권한 확인에 필요
+    const [target] = await db
+      .select({ id: schema.prompts.id, workspaceId: schema.prompts.workspaceId })
+      .from(schema.prompts)
+      .where(eq(schema.prompts.id, id))
+      .limit(1);
+    if (!target) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+    const session = await getSession();
+    const guard = await assertWorkspaceAccess(target.workspaceId, session);
+    if (guard) return guard;
+
     const body = await req.json();
     const parsed = UpdatePromptSchema.parse(body);
     const [updated] = await db
@@ -52,15 +69,8 @@ export async function DELETE(
   const { id } = await params;
   const cascade = req.nextUrl.searchParams.get("cascade") === "true";
 
-  // cascade 삭제는 admin 전용 (응답 데이터 일괄 삭제 권한)
-  if (cascade) {
-    const session = await getSession();
-    const adminGuard = requireAdmin(session);
-    if (adminGuard) return adminGuard;
-  }
-
   try {
-    // 1) prompt 조회 — text 와 workspaceId 가져와 cascade 시 사용
+    // 1) prompt 조회 — text 와 workspaceId 가져와 권한 확인 + cascade 시 사용
     const [target] = await db
       .select({
         id: schema.prompts.id,
@@ -72,6 +82,17 @@ export async function DELETE(
       .limit(1);
 
     if (!target) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+    // 2) 워크스페이스 접근 권한 — 일반관리자는 자신의 프로덕션 워크스페이스만
+    const session = await getSession();
+    const guard = await assertWorkspaceAccess(target.workspaceId, session);
+    if (guard) return guard;
+
+    // 3) cascade 삭제는 그 위에 admin 전용 제약을 더 얹는다 (응답 데이터 일괄 삭제 권한)
+    if (cascade) {
+      const adminGuard = requireAdmin(session);
+      if (adminGuard) return adminGuard;
+    }
 
     let runsDeleted = 0;
     if (cascade) {
@@ -88,7 +109,7 @@ export async function DELETE(
       runsDeleted = runsResult.length;
     }
 
-    // 2) prompt 자체 삭제
+    // 4) prompt 자체 삭제
     const [deleted] = await db
       .delete(schema.prompts)
       .where(eq(schema.prompts.id, id))

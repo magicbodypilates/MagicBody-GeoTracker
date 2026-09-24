@@ -1604,10 +1604,11 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       setMessage("로드 중입니다. 잠시 후 다시 시도해주세요.");
       return;
     }
-    // UI 낙관 업데이트
+    // UI 낙관 업데이트 — 목록 상한 없음(과거 50개 cap 이 활성 프롬프트가 실제로 50개를
+    // 넘어가는 워크스페이스에서 새 프롬프트가 화면에 보이지 않는 원인 중 하나였다).
     setState((prev) => {
       if (prev.customPrompts.some((p) => p.text === cleaned)) return prev;
-      return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts].slice(0, 50) };
+      return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts] };
     });
     // 서버 동기 (실패 시 UI 롤백은 하지 않고 경고만 — 낙관 업데이트 유지)
     addPromptIfNew(serverWsId, { text: cleaned, tags: [] }).catch((e) => {

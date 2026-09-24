@@ -1,11 +1,17 @@
 /**
  * /api/schedules/[id] — 개별 스케줄 수정/삭제
+ *
+ * 권한: id 만으로 대상을 찾으므로 먼저 대상 스케줄의 workspaceId 를 조회한 뒤
+ * assertWorkspaceAccess 를 적용한다(prompts/[id] 와 동일한 이유 — 로그인 여부만으로는
+ * 워크스페이스 소유 여부를 보장하지 못한다).
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import { CronExpressionParser } from "cron-parser";
 
 export const dynamic = "force-dynamic";
 
@@ -26,19 +32,90 @@ export async function PATCH(
 ) {
   const { id } = await params;
   try {
+    // 1) 대상 조회 — 워크스페이스 권한 확인 + 주기가 "실제로 바뀌었는지" 비교에 필요
+    const [target] = await db
+      .select({
+        id: schema.schedules.id,
+        workspaceId: schema.schedules.workspaceId,
+        cronExpression: schema.schedules.cronExpression,
+      })
+      .from(schema.schedules)
+      .where(eq(schema.schedules.id, id))
+      .limit(1);
+    if (!target) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+    const session = await getSession();
+    const guard = await assertWorkspaceAccess(target.workspaceId, session);
+    if (guard) return guard;
+
     const body = await req.json();
     const parsed = UpdateScheduleSchema.parse(body);
     const patch: Partial<typeof schema.schedules.$inferInsert> = {};
     if (parsed.name !== undefined) patch.name = parsed.name;
     if (parsed.cronExpression !== undefined) patch.cronExpression = parsed.cronExpression;
     if (parsed.providers !== undefined) patch.providers = parsed.providers;
-    if (parsed.promptIds !== undefined) patch.promptIds = parsed.promptIds;
+    if (parsed.promptIds !== undefined) {
+      // 존재하지 않는(삭제된) 프롬프트 ID 는 저장 시 정리 — 그 워크스페이스에 실제로
+      // 남아있는 ID 만 유지한다. 빈 배열을 명시적으로 보낸 경우는 "활성 프롬프트 전체"
+      // 의미이므로 그대로 둔다.
+      if (parsed.promptIds.length === 0) {
+        patch.promptIds = [];
+      } else {
+        const existing = await db
+          .select({ id: schema.prompts.id })
+          .from(schema.prompts)
+          .where(
+            and(
+              eq(schema.prompts.workspaceId, target.workspaceId),
+              inArray(schema.prompts.id, parsed.promptIds),
+            ),
+          );
+        const existingIds = new Set(existing.map((p) => p.id));
+        const filteredPromptIds = parsed.promptIds.filter((pid) => existingIds.has(pid));
+        // 비어 있지 않은 선택을 보냈는데 전부 무효(삭제됨/다른 워크스페이스)면 조용히
+        // 빈 배열(= "활성 프롬프트 전체 실행")로 저장하지 않고 거부한다 — 이 시스템은
+        // 스케줄마다 주기적으로 외부 유료 조사를 호출하므로, "이 질문들만" 실행하려던
+        // 의도가 예고 없이 "전체 실행"으로 조용히 확장되면 안 된다.
+        if (filteredPromptIds.length === 0) {
+          return NextResponse.json(
+            {
+              error: "no_valid_prompts_selected",
+              hint: "선택한 질문이 모두 삭제되었거나 존재하지 않습니다. 질문을 다시 선택해 주세요.",
+            },
+            { status: 400 },
+          );
+        }
+        patch.promptIds = filteredPromptIds;
+      }
+    }
     if (parsed.geolocation !== undefined) patch.geolocation = parsed.geolocation;
     if (parsed.active !== undefined) patch.active = parsed.active;
     if (parsed.lastRunAt !== undefined)
       patch.lastRunAt = parsed.lastRunAt ? new Date(parsed.lastRunAt) : null;
     if (parsed.nextRunAt !== undefined)
       patch.nextRunAt = parsed.nextRunAt ? new Date(parsed.nextRunAt) : null;
+
+    // 주기가 "실제로" 바뀌었고(기존 값과 동일한 값을 다시 보낸 저장은 재계산하지 않음)
+    // 호출측이 nextRunAt 을 직접 지정하지 않았다면, 새 주기 기준으로 다음 실행 시각을
+    // 다시 계산한다(automation-runner.ts 의 updateScheduleTiming 과 동일 계산 방식 —
+    // CronExpressionParser 로 "지금 이후 다음 tick"을 구한다).
+    if (
+      parsed.cronExpression !== undefined &&
+      parsed.cronExpression !== target.cronExpression &&
+      parsed.nextRunAt === undefined
+    ) {
+      try {
+        const interval = CronExpressionParser.parse(parsed.cronExpression, {
+          currentDate: new Date(),
+        });
+        patch.nextRunAt = interval.next().toDate();
+      } catch (err) {
+        return NextResponse.json(
+          { error: "invalid_cron_expression", detail: err instanceof Error ? err.message : String(err) },
+          { status: 400 },
+        );
+      }
+    }
 
     const [updated] = await db
       .update(schema.schedules)
@@ -62,6 +139,19 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
+    // prompts/[id] DELETE 와 동일한 이유로 워크스페이스 권한을 함께 확인한다 — PATCH 만
+    // 막고 DELETE 를 열어두면 같은 구멍이 삭제 경로로 그대로 남는다.
+    const [target] = await db
+      .select({ id: schema.schedules.id, workspaceId: schema.schedules.workspaceId })
+      .from(schema.schedules)
+      .where(eq(schema.schedules.id, id))
+      .limit(1);
+    if (!target) return NextResponse.json({ error: "not_found" }, { status: 404 });
+
+    const session = await getSession();
+    const guard = await assertWorkspaceAccess(target.workspaceId, session);
+    if (guard) return guard;
+
     const [deleted] = await db
       .delete(schema.schedules)
       .where(eq(schema.schedules.id, id))

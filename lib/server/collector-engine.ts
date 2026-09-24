@@ -965,6 +965,7 @@ async function topUpRunningRound(
     .from(items)
     .where(eq(items.roundId, running.id));
   const have = new Set(existing.map((e) => `${e.provider}\u0000${e.promptText}`));
+  const promptsBefore = new Set(existing.map((e) => e.promptText));
   let seq = existing.reduce((m, e) => Math.max(m, e.seq), -1) + 1;
   const rows: (typeof items.$inferInsert)[] = [];
   for (const promptText of promptTexts) {
@@ -1005,7 +1006,8 @@ async function topUpRunningRound(
     status: "topped_up",
     round: updatedRound ?? running,
     addedItems: added.length,
-    addedPrompts: new Set(added.map((a) => a.promptText)).size,
+    // 회차에 아예 없던 질문 수 — "새 질문 N개" 안내용(기존 질문에 AI 만 더해진 경우와 구분)
+    addedPrompts: new Set(added.map((a) => a.promptText).filter((t) => !promptsBefore.has(t))).size,
     newItems,
   };
 }

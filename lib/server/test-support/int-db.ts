@@ -22,8 +22,12 @@ export type IntDbConfig =
   | { enabled: true; url: string; dbName: string }
   | { enabled: false; reason: string; mustFail: boolean };
 
-/** 환경값을 읽어 통합 테스트를 돌릴지 정한다. 안전 조건을 어기면 예외(스위트 즉시 중단). */
-export function readIntDbConfig(env: NodeJS.ProcessEnv = process.env): IntDbConfig {
+/**
+ * 환경값을 읽어 통합 테스트를 돌릴지 정한다. 안전 조건을 어기면 예외(스위트 즉시 중단).
+ * suffix 를 주면 DB 이름 뒤에 붙여 파일마다 따로 쓴다 — vitest 가 테스트 파일을 병렬로 돌려도
+ * 한 파일의 정리·수집 엔진이 다른 파일의 시험 데이터를 건드리지 않게 하기 위해서다.
+ */
+export function readIntDbConfig(suffix?: string, env: NodeJS.ProcessEnv = process.env): IntDbConfig {
   const raw = (env.GEO_TEST_POSTGRES_URL ?? "").trim();
   const mustFail = env.GEO_REQUIRE_DB_TESTS === "1";
   if (!raw) {
@@ -39,10 +43,12 @@ export function readIntDbConfig(env: NodeJS.ProcessEnv = process.env): IntDbConf
   if (!["localhost", "127.0.0.1", "::1"].includes(host)) {
     throw new Error(`통합 테스트는 로컬 DB 에서만 돈다 — 호스트 "${host}" 는 허용되지 않아 중단`);
   }
-  const dbName = decodeURIComponent(url.pathname.replace(/^\//, ""));
-  if (!/^[a-z0-9_]+$/.test(dbName) || !dbName.includes("test")) {
+  const baseName = decodeURIComponent(url.pathname.replace(/^\//, ""));
+  const dbName = suffix ? `${baseName}_${suffix}` : baseName;
+  if (!/^[a-z0-9_]+$/.test(dbName) || !baseName.includes("test")) {
     throw new Error(`통합 테스트 DB 이름에 "test" 가 들어가야 한다(영소문자·숫자·_ 만) — "${dbName}" 은 중단`);
   }
+  url.pathname = `/${dbName}`;
   return { enabled: true, url: url.toString(), dbName };
 }
 

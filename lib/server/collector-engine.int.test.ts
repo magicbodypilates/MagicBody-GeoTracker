@@ -28,7 +28,7 @@ vi.mock("@/lib/server/llm-sentiment", () => ({
   classifySentiment: vi.fn(async () => null),
 }));
 
-const CFG = readIntDbConfig();
+const CFG = readIntDbConfig("engine");
 if (CFG.enabled) process.env.POSTGRES_URL = CFG.url; // db 모듈은 첫 쿼리 때 이 값을 읽는다
 
 type Engine = typeof import("./collector-engine");

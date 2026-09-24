@@ -429,11 +429,12 @@ describe.skipIf(!CFG.enabled)("응답 보관 통합 (로컬 DB)", () => {
         return res;
       });
       await sleep(300);
-      expect(done, `${op} 이 잠금을 기다리지 않았다`).toBe(false);
-
+      // 판정은 연결 1을 놓아준 뒤에 한다 — 먼저 실패하면 열린 트랜잭션이 정리 단계를 붙잡는다.
+      const waited = !done;
       release();
       await t1;
       const res = await t2;
+      expect(waited, `${op} 이 잠금을 기다리지 않았다`).toBe(true);
       expect(res.skippedInList).toEqual([text]);
       expect(res.affectedRuns).toBe(0);
       expect(await runCount(ws.id, text)).toBe(3);

@@ -8,17 +8,21 @@
  *   &provider=chatgpt       프로바이더 필터
  *   &prompt=...             프롬프트 텍스트 필터 (정확 일치)
  *   &auto=true|false        자동/수동 필터
+ *   &archived=only|include  보관 응답 — 없음(기본) = 보관 제외 / only = 보관만 / include = 구분 없음
+ *   조건 조립은 lib/server/run-list-conditions.ts (목록·건수가 같은 결과를 쓴다).
  *
  * POST — 신규 run 삽입. 주로 다음 용도:
  *   - 클라이언트가 /api/scrape 응답을 서버에 기록할 때
  *   - Worker 가 자동 실행 결과 저장할 때 (Phase 5B)
+ *   새 행은 보관되지 않은 상태(archived_at NULL)로 들어간다 — 보관은 누른 시점의 스냅숏이다.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, desc, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import { buildRunsListConditions } from "@/lib/server/run-list-conditions";
 
 export const dynamic = "force-dynamic";
 
@@ -59,34 +63,15 @@ export async function GET(
 
   const limit = Math.min(Number(sp.get("limit") ?? 100), 500);
   const offset = Math.max(Number(sp.get("offset") ?? 0), 0);
-  const from = sp.get("from");
-  const to = sp.get("to");
-  const provider = sp.get("provider");
-  const prompt = sp.get("prompt");
-  const auto = sp.get("auto");
 
-  // from/to 는 ISO 문자열. 유효한 날짜만 필터에 반영(invalid date → 조건 무시).
-  const parseDate = (v: string | null): Date | null => {
-    if (!v) return null;
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? null : d;
-  };
-  const fromDate = parseDate(from);
-  const toDate = parseDate(to);
-
-  const conditions = [eq(schema.runs.workspaceId, id)];
-  if (fromDate) conditions.push(gte(schema.runs.createdAt, fromDate));
-  if (toDate) conditions.push(lte(schema.runs.createdAt, toDate));
-  if (provider) conditions.push(eq(schema.runs.provider, provider));
-  if (prompt) conditions.push(eq(schema.runs.promptText, prompt));
-  if (auto === "true") conditions.push(eq(schema.runs.isAuto, true));
-  if (auto === "false") conditions.push(eq(schema.runs.isAuto, false));
+  // 목록과 건수가 **같은 조건 배열**을 쓴다(보관 응답은 기본 제외 — archived 인자로만 바뀐다).
+  const where = and(...buildRunsListConditions(id, sp));
 
   try {
     const rows = await db
       .select()
       .from(schema.runs)
-      .where(and(...conditions))
+      .where(where)
       // 안정 정렬 — 한 슬롯의 여러 provider 가 동일초 createdAt 일 때
       // createdAt 단일 키만으로는 offset 페이지 경계에서 중복/누락이 생긴다.
       // id 를 2차 키로 추가해 페이지네이션을 결정적으로 만든다.
@@ -97,13 +82,18 @@ export async function GET(
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(schema.runs)
-      .where(and(...conditions));
+      .where(where);
 
     return NextResponse.json({ runs: rows, total: count, limit, offset });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown";
-    console.error("[/api/workspaces/:id/runs] GET 실패:", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 SQL 원문을 싣지 않는다 — 상세는 서버 로그에만 남기고 고정 코드만 돌려준다.
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/workspaces/:id/runs] GET 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "runs_list_failed" }, { status: 500 });
   }
 }
 

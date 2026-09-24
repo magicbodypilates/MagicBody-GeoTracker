@@ -8,11 +8,15 @@
  * 조건 복제로 인한 회귀를 원천 차단한다 (contract test 로 조건 개수·분기 고정).
  *
  * 순수함수 — DB 접근 없음. brandTerms 는 호출부가 getBrandTermsForWorkspace 로 미리 조회해 넘긴다.
+ *
+ * 보관 응답(runs.archived_at IS NOT NULL)은 **항상** 뺀다 — 계획 geotracker-response-archive-260924
+ * §2-3. 끄는 인자는 두지 않는다(보관했는데 어느 통계에는 남는 누락을 구조로 막기 위해서다).
  */
 
 import { and, eq, gte, lt, ne, or, isNull, type SQL } from "drizzle-orm";
 import { schema } from "@/lib/server/db";
 import { viewModeCondition } from "@/lib/server/branded-query-filter";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import type { RunMode } from "@/lib/server/stats-range";
 
 export type BuildRunStatsWhereArgs = {
@@ -44,8 +48,9 @@ export type BuildRunStatsWhereArgs = {
  *   2. createdAt >= fromDate
  *   3. createdAt <  toDate
  *   4. parseQuality != 'low' OR parseQuality IS NULL   (저품질 파싱 제외)
- *   5. (autoOnly 또는 runMode 에 따라) isAuto 필터 — runMode 미지정 시 autoOnly 그대로
- *   6. (viewMode 조건 있으면) informational / branded 필터
+ *   5. archived_at IS NULL                             (보관 응답 제외 — 항상)
+ *   6. (autoOnly 또는 runMode 에 따라) isAuto 필터 — runMode 미지정 시 autoOnly 그대로
+ *   7. (viewMode 조건 있으면) informational / branded 필터
  *
  * @returns and(...conditions) 로 감쌀 SQL[] 배열. drizzle .where(and(...arr)) 에 그대로 사용.
  */
@@ -60,6 +65,7 @@ export function buildRunStatsWhere(args: BuildRunStatsWhereArgs): SQL[] {
     gte(schema.runs.createdAt, args.fromDate),
     lt(schema.runs.createdAt, args.toDate),
     qualityFilter as SQL,
+    notArchivedRunCondition(),
   ];
 
   if (args.runMode === undefined) {

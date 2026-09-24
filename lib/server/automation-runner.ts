@@ -46,6 +46,7 @@ import {
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
 import { collectThirdPartyCitationEvidence } from "@/lib/server/press-domain-match";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 
 /**
  * (세트, 버전) 쌍 선택자 — 계획 geotracker-youtube-press-scoring-260923 §4-5(D8′).
@@ -799,6 +800,8 @@ export function computeDailyRollupWindow(now: Date): { dateStr: string; fromUtc:
  *
  * export 하는 이유 — 새 수집 엔진(collector-engine.ts)이 날짜가 바뀐 뒤 하루 1회 부른다.
  * now 를 받는 이유 — 엔진이 쓰는 기준 시각과 같은 날짜를 집계하고, 테스트가 날짜를 고정한다.
+ *
+ * daily_stats 는 수집 당시 집계다. 보관·영구 삭제를 반영하지 않는다. 화면에서 읽게 되면 runs 에서 다시 집계할 것.
  */
 export async function runDailyRollup(now: Date = new Date()): Promise<{ date: string; rows: number }> {
   // 어제(KST) 00:00 ~ 오늘(KST) 00:00 구간
@@ -877,6 +880,9 @@ async function detectAndRecordDrift(
 ): Promise<void> {
   const { desc } = await import("drizzle-orm");
   // 가장 최근 1개 이전 run 가져오기 (방금 INSERT 한 건 제외 — created_at 기준 두 번째 건)
+  // 보관한 옛 응답과는 비교하지 않는다 — 보관은 "통계에서 뺀다"는 뜻이라, 그 점수와 비교한 가짜
+  // 알림이 생기면 안 된다(계획 geotracker-response-archive-260924 §S3). 방금 넣은 행은 보관 전이라
+  // 이 조건과 무관하게 첫 번째로 남는다.
   const recent = await db
     .select({ visibilityScore: schema.runs.visibilityScore })
     .from(schema.runs)
@@ -885,6 +891,7 @@ async function detectAndRecordDrift(
         eq(schema.runs.workspaceId, workspaceId),
         eq(schema.runs.promptText, promptText),
         eq(schema.runs.provider, provider),
+        notArchivedRunCondition(),
       ),
     )
     .orderBy(desc(schema.runs.createdAt))

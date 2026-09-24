@@ -23,6 +23,7 @@ import {
   getBrandTermsForWorkspace,
   brandedPromptCondition,
 } from "@/lib/server/branded-query-filter";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
 import { statsRangeMeta } from "@/lib/server/stats-guard";
 
@@ -71,6 +72,7 @@ export async function GET(
       gte(schema.runs.createdAt, from),
       lt(schema.runs.createdAt, to),
       qualityFilter,
+      notArchivedRunCondition(), // 보관 응답 제외
       branded, // brand 명 포함 prompts 만
     ];
     if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));

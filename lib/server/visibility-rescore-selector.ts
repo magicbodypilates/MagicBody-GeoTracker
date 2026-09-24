@@ -7,12 +7,17 @@
  *
  * report 만 품질 필터를 의도적으로 더 얹는다(§ 아래 buildReportConditions 주석).
  *
+ * 보관 응답(runs.archived_at IS NOT NULL — 계획 geotracker-response-archive-260924): report 는
+ * 차트와 같은 필터라 뺀다. 재산출 **대상 선택**(base·window)은 보관 행도 그대로 고른다 — 보관 행도
+ * 최신 점수 규칙으로 맞춰 둬야 되돌렸을 때 다른 행과 기준이 어긋나지 않는다.
+ *
  * 순수 조건 조립 — DB 접근 없음. 워크스페이스 목록·브랜드 별칭은 호출부가 미리 조회해 넘긴다.
  */
 
 import { and, eq, gt, gte, inArray, isNull, lt, ne, not, or, sql, type SQL } from "drizzle-orm";
 import { schema } from "@/lib/server/db";
 import { informationalCondition } from "@/lib/server/branded-query-filter";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import type { RescoreJob, VerificationWindow } from "@/lib/server/visibility-rescore-jobs";
 
 /** 대상 범위 안의 워크스페이스 1개 — id + 그 워크스페이스의 브랜드 별칭. */
@@ -170,8 +175,9 @@ export function buildCursorCondition(cursor: RescoreCursor): SQL {
 /**
  * report 집계 조건 — 차트와 같은 필터.
  *
- * 변경 집합(base)과 의도적으로 다른 점 2가지:
+ * 변경 집합(base)과 의도적으로 다른 점 3가지:
  *   - parse_quality = 'low' 행을 **제외**한다 (모든 통계 카드가 그렇게 하므로).
+ *   - 보관 응답(archived_at IS NOT NULL)을 **제외**한다 (모든 통계 카드가 그렇게 하므로).
  *   - score_version 을 보지 않는다 (변경 전/후를 같은 필터로 비교해야 하므로).
  * 같은 점: is_auto = true · 일반 검색만.
  */
@@ -182,6 +188,7 @@ export function buildReportConditions(
   const conditions: SQL[] = [
     workspaceScopeCondition(workspaces, true),
     or(ne(schema.runs.parseQuality, "low"), isNull(schema.runs.parseQuality)) as SQL,
+    notArchivedRunCondition(),
     eq(schema.runs.isAuto, true) as SQL,
   ];
 

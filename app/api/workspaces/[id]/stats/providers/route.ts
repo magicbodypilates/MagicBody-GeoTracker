@@ -17,6 +17,7 @@ import { runStatsQuery, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
 import { statsRangeMeta } from "@/lib/server/stats-guard";
 
@@ -38,11 +39,13 @@ export async function GET(
   const { from, to } = range;
   const autoOnly = sp.get("auto") !== "false";
 
-  // parseQuality/durations 등 low 포함해서 집계해야 신뢰도 알 수 있음
+  // parseQuality/durations 등 low 포함해서 집계해야 신뢰도 알 수 있음.
+  // 단 보관 응답은 뺀다(계획 geotracker-response-archive-260924 §2-3) — 품질 조건과 별개다.
   const conditions = [
     eq(schema.runs.workspaceId, id),
     gte(schema.runs.createdAt, from),
     lt(schema.runs.createdAt, to),
+    notArchivedRunCondition(),
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
   const __brandedView = sp.get("branded") === "true";

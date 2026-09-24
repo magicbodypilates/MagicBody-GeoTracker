@@ -8,7 +8,9 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildRunStatsWhere } from "./run-stats-where";
+import { and } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { buildRunStatsWhere, buildRunStatsWhereClause } from "./run-stats-where";
 
 const BASE = {
   workspaceId: "ws-1",
@@ -17,41 +19,59 @@ const BASE = {
 };
 
 describe("buildRunStatsWhere contract", () => {
-  it("기본(autoOnly=false, brandTerms=[]): workspace/from/to/quality 4 조건만", () => {
+  it("기본(autoOnly=false, brandTerms=[]): workspace/from/to/quality/보관 제외 5 조건만", () => {
     const conds = buildRunStatsWhere({ ...BASE, autoOnly: false, brandTerms: [], branded: false });
-    // 1 workspace + 2 createdAt(from/to) + 1 qualityFilter = 4
-    expect(conds).toHaveLength(4);
+    // 1 workspace + 2 createdAt(from/to) + 1 qualityFilter + 1 보관 제외 = 5
+    expect(conds).toHaveLength(5);
   });
 
-  it("autoOnly=true → isAuto 조건 1개 추가 (5개)", () => {
+  it("autoOnly=true → isAuto 조건 1개 추가 (6개)", () => {
     const conds = buildRunStatsWhere({ ...BASE, autoOnly: true, brandTerms: [], branded: false });
-    expect(conds).toHaveLength(5);
+    expect(conds).toHaveLength(6);
   });
 
   it("brandTerms 비어있으면 viewMode 조건 없음 (autoOnly 무관)", () => {
     const off = buildRunStatsWhere({ ...BASE, autoOnly: false, brandTerms: [], branded: true });
     const on = buildRunStatsWhere({ ...BASE, autoOnly: false, brandTerms: [], branded: false });
-    // 둘 다 4 (viewMode 조건 없음)
-    expect(off).toHaveLength(4);
-    expect(on).toHaveLength(4);
+    // 둘 다 5 (viewMode 조건 없음)
+    expect(off).toHaveLength(5);
+    expect(on).toHaveLength(5);
   });
 
   it("brandTerms 있으면 viewMode 조건 1개 추가 — informational/branded 둘 다", () => {
     const info = buildRunStatsWhere({ ...BASE, autoOnly: false, brandTerms: ["매직바디"], branded: false });
     const brand = buildRunStatsWhere({ ...BASE, autoOnly: false, brandTerms: ["매직바디"], branded: true });
-    // 4 base + 1 viewMode = 5
-    expect(info).toHaveLength(5);
-    expect(brand).toHaveLength(5);
+    // 5 base + 1 viewMode = 6
+    expect(info).toHaveLength(6);
+    expect(brand).toHaveLength(6);
   });
 
-  it("autoOnly=true + brandTerms 있음 → 6개 (isAuto + viewMode 둘 다)", () => {
+  it("autoOnly=true + brandTerms 있음 → 7개 (isAuto + viewMode 둘 다)", () => {
     const conds = buildRunStatsWhere({
       ...BASE,
       autoOnly: true,
       brandTerms: ["매직바디", "magicbody"],
       branded: false,
     });
-    expect(conds).toHaveLength(6);
+    expect(conds).toHaveLength(7);
+  });
+
+  it("보관 응답 제외 조건이 모든 조합에 들어간다 — 렌더 SQL 에 archived_at is null", () => {
+    // 계획 geotracker-response-archive-260924 §2-3: 통계 헬퍼는 보관 응답을 항상 뺀다(끄는 인자 없음).
+    const dialect = new PgDialect();
+    for (const autoOnly of [true, false]) {
+      for (const runMode of [undefined, "auto", "manual", "all"] as const) {
+        for (const brandTerms of [[], ["매직바디"]]) {
+          const q = dialect.sqlToQuery(
+            and(...buildRunStatsWhere({ ...BASE, autoOnly, runMode, brandTerms, branded: false }))!,
+          );
+          expect(q.sql).toContain('"archived_at" is null');
+        }
+      }
+    }
+    expect(dialect.sqlToQuery(buildRunStatsWhereClause({ ...BASE, autoOnly: true, brandTerms: [], branded: false })).sql).toContain(
+      '"archived_at" is null',
+    );
   });
 
   it("모든 조건이 truthy SQL (null/undefined 섞이지 않음)", () => {
@@ -93,20 +113,20 @@ describe("buildRunStatsWhere runMode 계약", () => {
 
   it("runMode 미지정 + autoOnly=true → 기존 동작 그대로 (isAuto = true)", () => {
     const conds = buildRunStatsWhere({ ...BASE, autoOnly: true, brandTerms: [], branded: false });
-    expect(conds).toHaveLength(5);
+    expect(conds).toHaveLength(6);
     expect(isAutoParam(conds)).toBe(true);
   });
 
   it("runMode 미지정 + autoOnly=false → 기존 동작 그대로 (isAuto 조건 없음)", () => {
     const conds = buildRunStatsWhere({ ...BASE, autoOnly: false, brandTerms: [], branded: false });
-    expect(conds).toHaveLength(4);
+    expect(conds).toHaveLength(5);
     expect(isAutoParam(conds)).toBeUndefined();
   });
 
   it("runMode=auto 는 autoOnly 값과 무관하게 isAuto = true", () => {
     for (const autoOnly of [true, false]) {
       const conds = buildRunStatsWhere({ ...BASE, autoOnly, runMode: "auto", brandTerms: [], branded: false });
-      expect(conds).toHaveLength(5);
+      expect(conds).toHaveLength(6);
       expect(isAutoParam(conds)).toBe(true);
     }
   });
@@ -114,18 +134,18 @@ describe("buildRunStatsWhere runMode 계약", () => {
   it("runMode=manual 은 autoOnly 값과 무관하게 isAuto = false", () => {
     for (const autoOnly of [true, false]) {
       const conds = buildRunStatsWhere({ ...BASE, autoOnly, runMode: "manual", brandTerms: [], branded: false });
-      expect(conds).toHaveLength(5);
+      expect(conds).toHaveLength(6);
       expect(isAutoParam(conds)).toBe(false);
     }
   });
 
   it("runMode=all 은 autoOnly=true 여도 isAuto 조건을 넣지 않는다", () => {
     const conds = buildRunStatsWhere({ ...BASE, autoOnly: true, runMode: "all", brandTerms: [], branded: false });
-    expect(conds).toHaveLength(4);
+    expect(conds).toHaveLength(5);
     expect(isAutoParam(conds)).toBeUndefined();
   });
 
-  it("runMode 는 viewMode 조건과 독립 — manual + brandTerms → 6개", () => {
+  it("runMode 는 viewMode 조건과 독립 — manual + brandTerms → 7개", () => {
     const conds = buildRunStatsWhere({
       ...BASE,
       autoOnly: false,
@@ -133,7 +153,7 @@ describe("buildRunStatsWhere runMode 계약", () => {
       brandTerms: ["매직바디"],
       branded: false,
     });
-    expect(conds).toHaveLength(6);
+    expect(conds).toHaveLength(7);
     expect(isAutoParam(conds)).toBe(false);
   });
 });

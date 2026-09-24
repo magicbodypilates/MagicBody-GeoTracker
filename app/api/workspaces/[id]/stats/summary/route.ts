@@ -24,6 +24,7 @@ import {
   getBrandTermsForWorkspace,
   viewModeCondition,
 } from "@/lib/server/branded-query-filter";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
 
 export const dynamic = "force-dynamic";
@@ -55,6 +56,7 @@ async function aggregate(
     gte(schema.runs.createdAt, from),
     lt(schema.runs.createdAt, to),
     qualityFilter,
+    notArchivedRunCondition(), // 보관 응답 제외
   ];
   if (autoOnly) baseConditions.push(eq(schema.runs.isAuto, true));
   // brandedView=true 면 brand 명 검색만, false (기본) 면 일반 검색만
@@ -94,6 +96,7 @@ async function autoHealth(workspaceId: string, from: Date, to: Date) {
         eq(schema.runs.isAuto, true),
         gte(schema.runs.createdAt, from),
         lt(schema.runs.createdAt, to),
+        notArchivedRunCondition(), // 보관 응답 제외 — 자동 실행 건강성도 화면 숫자와 같은 기준
       ),
     );
 

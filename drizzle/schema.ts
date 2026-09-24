@@ -220,6 +220,16 @@ export const runs = pgTable(
      */
     scoreVersion: integer("score_version").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * 응답 보관 시각 — 계획 geotracker-response-archive-260924 §2-2. NULL = 보관 안 함.
+     * 「질문 목록에 없는 질문」의 응답을 사용자가 보관함으로 옮기면 그 시점 행에만 채워진다
+     * (스냅숏 — 이후 같은 문구로 새로 생긴 행은 NULL 로 들어와 보관함 ①에 다시 보인다).
+     * 보관 행은 응답 목록·모든 통계·변동 알림에서 빠지고(lib/server/run-archive.ts 의
+     * notArchivedRunCondition 단일 정의), 되돌리면 NULL 로 돌아가 그대로 다시 들어간다.
+     * 중복 수집 확인(uq_runs_auto_slot)은 보관 행도 센다 — 되돌렸을 때 같은 칸에 응답이
+     * 두 개 생기지 않게 하기 위해서다.
+     */
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
   },
   (t) => ({
     workspaceCreatedIdx: index("idx_runs_workspace_created").on(t.workspaceId, t.createdAt),
@@ -242,6 +252,13 @@ export const runs = pgTable(
     autoSlotUnique: uniqueIndex("uq_runs_auto_slot")
       .on(t.workspaceId, t.intervalSlot, t.promptText, t.provider)
       .where(sql`interval_slot IS NOT NULL`),
+    /**
+     * 보관 행 전용 부분 인덱스 — 보관함 목록(문구별 묶음·max(archived_at) 정렬)과 변동 알림
+     * 숨김(알림 뒤에 보관됐는지 시각 비교)을 인덱스 안에서 끝낸다. 보관 행만 담아 작다.
+     */
+    archivedPromptIdx: index("idx_runs_ws_prompt_archived")
+      .on(t.workspaceId, t.promptText, t.archivedAt)
+      .where(sql`archived_at IS NOT NULL`),
   }),
 );
 

@@ -17,6 +17,7 @@ import {
   buildBaseConditions,
   buildCursorCondition,
   buildReportConditions,
+  buildWindowConditions,
   isCursorTimestamp,
   isInformationalPrompt,
   matchesJob,
@@ -150,6 +151,16 @@ describe("buildReportConditions — 차트와 같은 필터", () => {
     const params = q.params.map((p) => (p instanceof Date ? p.toISOString() : String(p)));
     expect(params).toContain("2026-07-31T15:00:00.000Z");
     expect(params).toContain("2026-08-11T15:00:00.000Z");
+  });
+
+  it("보관 응답은 리포트(차트와 같은 필터)에서만 빠지고, 재산출 대상 선택에는 그대로 남는다", () => {
+    // 계획 geotracker-response-archive-260924 §S3 — 리포트는 통계 카드와 같은 기준이라 보관 행을
+    // 빼고, 대상 선택(쓰기)은 보관 행도 최신 점수 규칙으로 맞춰 두도록 빼지 않는다.
+    for (const w of buildVerificationWindows("v11")) {
+      expect(render(buildReportConditions(w, prodWorkspaces)).sql).toContain('"archived_at" is null');
+    }
+    expect(render(buildBaseConditions(RESCORE_JOBS.v11, prodWorkspaces)).sql).not.toContain("archived_at");
+    expect(render(buildWindowConditions(RESCORE_JOBS.v11, prodWorkspaces)).sql).not.toContain("archived_at");
   });
 });
 

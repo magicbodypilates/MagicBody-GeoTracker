@@ -3,7 +3,7 @@
  *
  * POST — 워크스페이스의 응답/분석 이력 삭제.
  *   scope=all   (기본) : runs 전체 + audit_history + drift_alerts + daily_stats
- *   scope=manual       : is_auto=false 인 runs 만 삭제 (나머지 테이블은 건드리지 않음)
+ *   scope=manual       : is_auto=false 이고 보관되지 않은 runs 만 삭제 (보관함 응답·나머지 테이블은 건드리지 않음)
  *   scope=auto         : is_auto=true  인 runs 만 삭제 + daily_stats (자동 롤업 기준) 재계산 대상이라 함께 초기화
  *
  * 브랜드 설정, 프롬프트, 스케줄, 경쟁사 정의는 건드리지 않는다.
@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/lib/server/db";
 import { and, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 
 export const dynamic = "force-dynamic";
 
@@ -36,9 +37,13 @@ export async function POST(
 
   try {
     if (scope === "manual") {
+      // 「수동 응답 삭제」는 화면에 보이는 수동 응답만 지운다 — 보관함에 있는 수동 응답은 남긴다
+      // (계획 geotracker-response-archive-260924 §S4). scope=auto·all 은 지금처럼 전부 지운다.
       const runsDeleted = await db
         .delete(schema.runs)
-        .where(and(eq(schema.runs.workspaceId, id), eq(schema.runs.isAuto, false)))
+        .where(
+          and(eq(schema.runs.workspaceId, id), eq(schema.runs.isAuto, false), notArchivedRunCondition()),
+        )
         .returning({ id: schema.runs.id });
       return NextResponse.json({
         ok: true,

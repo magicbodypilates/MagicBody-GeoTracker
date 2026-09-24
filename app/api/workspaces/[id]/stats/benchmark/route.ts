@@ -26,6 +26,7 @@ import { db, runStatsQuery, schema } from "@/lib/server/db";
 import { and, eq, gte, lt, ne, or, isNull, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
+import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
 import {
   STATS_HEAVY_MAX_DAYS,
@@ -60,6 +61,8 @@ export async function GET(
     gte(schema.runs.createdAt, from),
     lt(schema.runs.createdAt, to),
     qualityFilter,
+    // 보관 응답 제외 — 브랜드 집계·경쟁사 집계 두 쿼리가 이 배열을 함께 쓴다.
+    notArchivedRunCondition(),
   ];
   if (autoOnly) conditions.push(eq(schema.runs.isAuto, true));
   const __brandedView = sp.get("branded") === "true";

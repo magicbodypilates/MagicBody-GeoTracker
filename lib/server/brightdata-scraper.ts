@@ -9,7 +9,15 @@ const ProviderSchema = z.enum([
   "grok",
 ]);
 
-type Provider = z.infer<typeof ProviderSchema>;
+export type Provider = z.infer<typeof ProviderSchema>;
+
+/**
+ * 수집 대상 AI 이름인지 확인한다 — 자동 수집 엔진이 DB 에 저장된 문자열(스케줄의 providers)을
+ * Provider 로 좁힐 때 쓴다. 모르는 값은 false 라 제출 대상에서 빠진다.
+ */
+export function isKnownProvider(p: string): p is Provider {
+  return ProviderSchema.safeParse(p).success;
+}
 
 const OUTPUT_CACHE_TTL_MS = 1000 * 60 * 20;
 
@@ -112,14 +120,14 @@ type ScrapeRequest = {
   forceRefresh?: boolean;
 };
 
-type StructuredCitation = {
+export type StructuredCitation = {
   url: string;
   domain: string;
   title: string;
   description: string;
 };
 
-type NormalizedScrapeResult = {
+export type NormalizedScrapeResult = {
   provider: Provider;
   prompt: string;
   answer: string;
@@ -720,21 +728,436 @@ export async function runAiScraper(
     payload = await scrapeResponse.json();
   }
 
+  // payload 를 얻은 뒤의 판정(not-ready · 크롤러 오류 · 파싱 실패 · 인용 추출)은
+  // normalizeScrapePayload 로 옮겼다(계획 geotracker-collect-speed-260924 Step 1) — 자동 수집
+  // 엔진이 요청 번호로 나중에 내려받은 결과에도 같은 판정을 쓰기 위해서다. 판정 순서·오류 문구는
+  // 옮기기 전과 같다.
+  let normalized: NormalizedScrapeResult;
+  try {
+    normalized = normalizeScrapePayload({ provider: parsed, prompt: request.prompt, payload });
+  } catch (err) {
+    // § PERPLEXITY_COUNTRY_FALLBACK (2026-08-29)
+    // Perplexity 는 country 를 지정하면 Bright Data 스크래퍼가 선택자 타임아웃으로 실패한다.
+    // 한국 결과 확보가 우선이라 country 를 계속 보내되, 이 실패에 한해 country 없이 1회 재시도한다.
+    // (country 없이도 한국어 프롬프트면 한국 사이트 출처가 나오는 것을 실측 확인 — naver/tistory 등)
+    // 스크래퍼가 복구되면 첫 시도가 성공하므로 재시도 자체가 사라진다.
+    // effectiveCountry 기준으로 판단한다 — 실제로 country 를 보냈을 때만 재시도한다.
+    // (request.country 로 판단하면 억제 중에도 재귀가 돌아 무한 재시도가 된다)
+    // 크롤러 오류 코드가 세분돼도(가입 화면 차단·브라우저 끊김·선택자 시간 초과) 모두 크롤러
+    // 계열이라 옮기기 전과 똑같이 이 재시도에 들어온다.
+    if (
+      err instanceof ScrapeFailure &&
+      isCrawlerCode(err.code) &&
+      parsed === "perplexity" &&
+      effectiveCountry
+    ) {
+      markPerplexityCountryFailed();
+      console.warn(
+        `[PERPLEXITY_COUNTRY_FALLBACK] country=${request.country} 실패 → country 없이 재시도합니다. ` +
+          `이후 ${COUNTRY_FALLBACK_SUPPRESS_MS / 3600000}시간 동안은 country 를 생략해 바로 요청합니다.`,
+      );
+      return runAiScraper({ ...request, country: undefined, forceRefresh: true });
+    }
+    throw err;
+  }
+
+  inMemoryCache.set(cacheKey, {
+    expiresAt: Date.now() + OUTPUT_CACHE_TTL_MS,
+    value: normalized,
+  });
+
+  return normalized;
+}
+
+/* ============================================================
+ * 자동 수집 엔진용 단계별 호출 (계획 geotracker-collect-speed-260924 Step 1)
+ * ============================================================
+ * runAiScraper 는 "보내고 끝날 때까지 붙잡고 기다리는" 한 덩어리 호출이다. 자동 수집 엔진은
+ * 보내기·진행 확인·내려받기·취소를 따로 부르고, 요청 번호를 DB 에 남겨 재시작 뒤에도 이어서
+ * 받는다. 아래 함수들은 예외를 던지지 않고 결과를 값으로 돌려준다 — 엔진이 원인 코드별로
+ * 과금 여부를 가려 처리하기 때문이다(계획 v2 §7-4).
+ *
+ * 오류 문구에는 상태 코드와 가린 응답 본문만 담는다. 요청 헤더(인증 키)는 어떤 경우에도 넣지
+ * 않는다(redactErrorText).
+ */
+
+/** Bright Data 호출별 시간 제한(ms). 제출은 동기 요청 1분 + 여유. */
+export const BRIGHTDATA_TIMEOUTS_MS = {
+  submit: 90_000,
+  progress: 15_000,
+  download: 60_000,
+  cancel: 15_000,
+} as const;
+
+/** 수집기(크롤러)가 결과 대신 오류를 돌려준 경우의 세부 원인 — 계획 v2 §4 (M1 실측 문구 기준). */
+export type CrawlerErrorCode =
+  | "CRAWLER_AUTH_WALL" // "Auth wall: sign-up prompt detected" 등 가입·로그인 화면 차단
+  | "CRAWLER_BROWSER_DISCONNECTED" // "Browser disconnected"
+  | "CRAWLER_SELECTOR_TIMEOUT" // "waiting for selector … timeout 30000ms exceeded"
+  | "CRAWLER_ERROR"; // 그 밖의 수집기 오류
+
+export type ScrapeErrorCode =
+  | CrawlerErrorCode
+  | "NOT_READY"
+  | "PARSE_FAILURE"
+  | "SNAPSHOT_FAILED"
+  | "SNAPSHOT_CANCELED"
+  | "SNAPSHOT_MISSING"
+  | "TIMEOUT"
+  | "RATE_LIMITED"
+  | "AUTH_ERROR"
+  | "HTTP_4XX"
+  | "SUBMIT_UNKNOWN"
+  | "DOWNLOAD_FAILED"
+  | "NETWORK";
+
+/** 크롤러 계열 코드인지 — 접두사 "CRAWLER_" 로 판정한다. */
+export function isCrawlerCode(code: string): code is CrawlerErrorCode {
+  return code.startsWith("CRAWLER_");
+}
+
+// 단어 경계 필수 — "catalog index" 같은 문구가 "log in" 으로 오탐되지 않게 한다.
+// 경계는 \b 대신 "영숫자가 아닌 것"으로 본다: error_code 는 "login_required" 처럼 밑줄로 이어 쓰는데
+// \b 는 밑줄을 글자로 취급해 이런 코드를 놓치기 때문이다. 구분자도 공백·하이픈에 밑줄을 더한다.
+const AUTH_WALL_RE =
+  /(?<![A-Za-z0-9])(?:auth[\s_-]*wall|sign[\s_-]?up|log[\s_-]?in)(?![A-Za-z0-9])/i;
+const BROWSER_DISCONNECTED_RE = /browser[\s_-]+(?:has[\s_-]+)?disconnected/i;
+const SELECTOR_TIMEOUT_RE = /waiting[\s_-]+for[\s_-]+selector|timeout[\s_-]*\d+[\s_-]*ms[\s_-]+exceeded/i;
+
+/**
+ * 수집기 오류 문구 → 세부 코드. 입력은 레코드의 error 와 error_code 를 이어 붙인 문자열이다.
+ * 순서대로 첫 일치: 가입·로그인 화면 차단 → 브라우저 끊김 → 선택자 시간 초과 → 그 밖.
+ */
+export function classifyCrawlerError(text: string): CrawlerErrorCode {
+  const s = String(text ?? "");
+  if (AUTH_WALL_RE.test(s)) return "CRAWLER_AUTH_WALL";
+  if (BROWSER_DISCONNECTED_RE.test(s)) return "CRAWLER_BROWSER_DISCONNECTED";
+  if (SELECTOR_TIMEOUT_RE.test(s)) return "CRAWLER_SELECTOR_TIMEOUT";
+  return "CRAWLER_ERROR";
+}
+
+/**
+ * 원인 코드가 붙은 수집 실패. message 는 옮기기 전 runAiScraper 가 던지던 문구와 같다
+ * ("[NOT_READY] …" · "[CRAWLER_ERROR] …" · "[PARSE_FAILURE] …") — 수동 수집 경로의 로그·오류
+ * 응답이 바뀌지 않게 한다.
+ */
+export class ScrapeFailure extends Error {
+  constructor(
+    public readonly code: ScrapeErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ScrapeFailure";
+  }
+}
+
+const REDACTED = "[가림]";
+
+/**
+ * 저장·로그용 오류 문구를 만든다. DB(collection_items.last_error)와 로그에 남기 전에 반드시 거친다.
+ *   - Bright Data 키 값이 문자열에 있으면 가린다
+ *   - "Bearer" 뒤 값을 가린다
+ *   - URL 의 "?" 뒤(쿼리)를 지운다
+ *   - 32자 이상 영숫자·_·- 토큰을 가린다
+ *   - max 자로 자른다(글자 단위 — 한글·이모지가 반쪽으로 잘리지 않게)
+ * 요청 헤더는 어떤 호출에서도 이 문구에 넣지 않는다.
+ */
+export function redactErrorText(text: string, max = 300): string {
+  let s = String(text ?? "");
+  const key = getApiKey();
+  if (key && key.length >= 4) s = s.split(key).join(REDACTED);
+  s = s.replace(/\bBearer\s+[^\s"',;]+/gi, `Bearer ${REDACTED}`);
+  s = s.replace(/(https?:\/\/[^\s?#"'<>]*)\?[^\s"'<>]*/gi, "$1");
+  s = s.replace(/[A-Za-z0-9_-]{32,}/g, REDACTED);
+  const chars = Array.from(s);
+  return chars.length > max ? chars.slice(0, max).join("") : s;
+}
+
+function describeFetchError(err: unknown): string {
+  if (err instanceof Error) {
+    const causeCode =
+      err.cause && typeof err.cause === "object" && "code" in err.cause
+        ? String((err.cause as { code?: unknown }).code ?? "")
+        : "";
+    return redactErrorText(`${err.name}: ${err.message}${causeCode ? ` (${causeCode})` : ""}`);
+  }
+  return redactErrorText(String(err));
+}
+
+async function readBodyText(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
+function httpErrorMessage(status: number, body: string): string {
+  const redacted = redactErrorText(body);
+  return redacted ? `${status} ${redacted}` : String(status);
+}
+
+/**
+ * Retry-After 헤더 → 대기 ms. 초(정수)와 HTTP 날짜를 모두 해석하고, 못 읽으면 null.
+ * 과거 날짜는 0 으로 본다.
+ */
+export function parseRetryAfterMs(value: string | null | undefined, nowMs: number = Date.now()): number | null {
+  if (value == null) return null;
+  const v = value.trim();
+  if (!v) return null;
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  if (!Number.isFinite(at)) return null;
+  return Math.max(0, at - nowMs);
+}
+
+const MISSING_KEY_MESSAGE = "BRIGHT_DATA_KEY 미설정";
+
+export type SubmitResult =
+  /** 200 — 결과가 바로 왔다. 요청 번호가 없으니 받은 자리에서 저장까지 끝내야 한다. */
+  | { ok: true; kind: "payload"; payload: unknown }
+  /** 202 — 1분 안에 안 끝나 요청 번호를 받았다. 이후 진행 확인·내려받기로 받는다. */
+  | { ok: true; kind: "snapshot"; snapshotId: string }
+  /** 429 — 작업이 생기지 않았다(과금 없음). */
+  | { ok: false; code: "RATE_LIMITED"; retryAfterMs: number | null; message: string }
+  /** 인증 실패·입력 거절 — 작업이 생기지 않았다. */
+  | { ok: false; code: "AUTH_ERROR" | "HTTP_4XX"; message: string }
+  /** 5xx·네트워크·시간 초과 — 작업이 생겼을 수 있다(과금 여부 모름). */
+  | { ok: false; code: "SUBMIT_UNKNOWN"; message: string };
+
+/**
+ * 제출 — 지금 runAiScraper 의 제출과 같은 동기 요청(`/scrape`)이다(계획 v2 §2-4).
+ *   POST https://api.brightdata.com/datasets/v3/scrape?dataset_id=<id>&notify=false&include_errors=true&format=json
+ *   본문 { input: [buildInputRecord(provider, prompt, country)] } · 시간 제한 90초
+ * `/trigger` 로 바꿀 때는 이 함수만 바꾸면 되도록 제출을 여기에 격리한다(Step 10).
+ */
+export async function submitScrape(req: {
+  provider: Provider;
+  prompt: string;
+  country?: string;
+}): Promise<SubmitResult> {
+  if (!isKnownProvider(req.provider)) {
+    return { ok: false, code: "HTTP_4XX", message: "알 수 없는 AI 이름" };
+  }
+  if (!getApiKey()) return { ok: false, code: "AUTH_ERROR", message: MISSING_KEY_MESSAGE };
+
+  const datasetId = getDatasetId(req.provider);
+  const inputRecord = buildInputRecord(req.provider, req.prompt, req.country);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
+      {
+        method: "POST",
+        headers: withAuthHeaders(),
+        body: JSON.stringify({ input: [inputRecord] }),
+        signal: AbortSignal.timeout(BRIGHTDATA_TIMEOUTS_MS.submit),
+      },
+    );
+  } catch (err) {
+    return { ok: false, code: "SUBMIT_UNKNOWN", message: describeFetchError(err) };
+  }
+
+  try {
+    if (res.status === 202) {
+      const body = (await res.json()) as { snapshot_id?: unknown } | null;
+      const snapshotId = typeof body?.snapshot_id === "string" ? body.snapshot_id.trim() : "";
+      if (!snapshotId) {
+        // 작업은 생겼을 수 있는데 요청 번호가 없어 이어받을 수 없다 — 불명으로 센다.
+        return { ok: false, code: "SUBMIT_UNKNOWN", message: "202 요청 번호 없음" };
+      }
+      return { ok: true, kind: "snapshot", snapshotId };
+    }
+    if (res.ok) {
+      // runAiScraper 와 같이 202 가 아닌 2xx 는 결과 본문으로 본다.
+      const payload = await res.json();
+      return { ok: true, kind: "payload", payload };
+    }
+    const message = httpErrorMessage(res.status, await readBodyText(res));
+    if (res.status === 429) {
+      return {
+        ok: false,
+        code: "RATE_LIMITED",
+        retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")),
+        message,
+      };
+    }
+    if (res.status === 401 || res.status === 403) return { ok: false, code: "AUTH_ERROR", message };
+    if (res.status >= 400 && res.status < 500) return { ok: false, code: "HTTP_4XX", message };
+    return { ok: false, code: "SUBMIT_UNKNOWN", message };
+  } catch (err) {
+    // 본문을 읽다 끊겼거나(시간 초과 포함) 해석하지 못했다 — 작업이 생겼을 수 있다.
+    return { ok: false, code: "SUBMIT_UNKNOWN", message: describeFetchError(err) };
+  }
+}
+
+export type SnapshotProgressStatus = "starting" | "running" | "ready" | "failed" | "canceled";
+
+function normalizeProgressStatus(value: unknown): SnapshotProgressStatus {
+  const s = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (s === "starting" || s === "running" || s === "ready" || s === "failed") return s;
+  if (s === "canceled" || s === "cancelled") return "canceled";
+  // 모르는 상태는 아직 진행 중으로 본다 — 다음 확인에서 다시 본다.
+  return "running";
+}
+
+function readCount(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return undefined;
+}
+
+/**
+ * 진행 확인 — GET /datasets/v3/progress/<id> · 15초.
+ * 응답에 records·errors 숫자가 있으면 함께 돌려준다(M2 실측 필드). 결과가 비어 있는데 errors 가
+ * 있으면 normalizeScrapePayload 가 "수집 오류"로 분류하는 데 쓴다.
+ */
+export async function getSnapshotProgress(snapshotId: string): Promise<
+  | { ok: true; status: SnapshotProgressStatus; records?: number; errors?: number }
+  | { ok: false; code: "SNAPSHOT_MISSING" | "AUTH_ERROR" | "HTTP_4XX" | "NETWORK"; message: string }
+> {
+  if (!getApiKey()) return { ok: false, code: "AUTH_ERROR", message: MISSING_KEY_MESSAGE };
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.brightdata.com/datasets/v3/progress/${encodeURIComponent(snapshotId)}`,
+      {
+        method: "GET",
+        headers: withAuthHeaders(),
+        signal: AbortSignal.timeout(BRIGHTDATA_TIMEOUTS_MS.progress),
+      },
+    );
+  } catch (err) {
+    return { ok: false, code: "NETWORK", message: describeFetchError(err) };
+  }
+  try {
+    if (res.ok) {
+      const body = ((await res.json()) ?? {}) as Record<string, unknown>;
+      const out: { ok: true; status: SnapshotProgressStatus; records?: number; errors?: number } = {
+        ok: true,
+        status: normalizeProgressStatus(body.status),
+      };
+      const records = readCount(body.records);
+      const errors = readCount(body.errors);
+      if (records !== undefined) out.records = records;
+      if (errors !== undefined) out.errors = errors;
+      return out;
+    }
+    const message = httpErrorMessage(res.status, await readBodyText(res));
+    if (res.status === 404) return { ok: false, code: "SNAPSHOT_MISSING", message };
+    if (res.status === 401 || res.status === 403) return { ok: false, code: "AUTH_ERROR", message };
+    if (res.status >= 400 && res.status < 500) return { ok: false, code: "HTTP_4XX", message };
+    return { ok: false, code: "NETWORK", message };
+  } catch (err) {
+    return { ok: false, code: "NETWORK", message: describeFetchError(err) };
+  }
+}
+
+/**
+ * 결과 내려받기 — GET /datasets/v3/snapshot/<id>?format=json · 60초.
+ * 202 → NOT_READY(아직 준비 안 됨 — 다음 확인에서 다시) · 401/403 → AUTH_ERROR ·
+ * 그 밖 실패 → DOWNLOAD_FAILED · 예외 → NETWORK.
+ */
+export async function downloadSnapshotPayload(snapshotId: string): Promise<
+  | { ok: true; payload: unknown }
+  | { ok: false; code: "NOT_READY" | "DOWNLOAD_FAILED" | "AUTH_ERROR" | "NETWORK"; message: string }
+> {
+  if (!getApiKey()) return { ok: false, code: "AUTH_ERROR", message: MISSING_KEY_MESSAGE };
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.brightdata.com/datasets/v3/snapshot/${encodeURIComponent(snapshotId)}?format=json`,
+      {
+        method: "GET",
+        headers: withAuthHeaders(),
+        signal: AbortSignal.timeout(BRIGHTDATA_TIMEOUTS_MS.download),
+      },
+    );
+  } catch (err) {
+    return { ok: false, code: "NETWORK", message: describeFetchError(err) };
+  }
+  try {
+    if (res.status === 202) {
+      return { ok: false, code: "NOT_READY", message: httpErrorMessage(202, await readBodyText(res)) };
+    }
+    if (res.ok) {
+      return { ok: true, payload: await res.json() };
+    }
+    const message = httpErrorMessage(res.status, await readBodyText(res));
+    if (res.status === 401 || res.status === 403) return { ok: false, code: "AUTH_ERROR", message };
+    return { ok: false, code: "DOWNLOAD_FAILED", message };
+  } catch (err) {
+    return { ok: false, code: "NETWORK", message: describeFetchError(err) };
+  }
+}
+
+/**
+ * 작업 취소 요청 — POST /datasets/v3/snapshot/<id>/cancel · 15초.
+ * 대기 한도를 넘긴 작업을 정리하는 용도라 실패해도 수집 흐름을 막지 않는다 — 실패는 삼키고
+ * 코드만 로그 1줄을 남긴다(요청 번호·키는 로그에 남기지 않는다).
+ */
+export async function cancelSnapshot(snapshotId: string): Promise<void> {
+  if (!getApiKey()) {
+    console.warn("[brightdata] 작업 취소 요청 건너뜀 (키 없음)");
+    return;
+  }
+  try {
+    const res = await fetch(
+      `https://api.brightdata.com/datasets/v3/snapshot/${encodeURIComponent(snapshotId)}/cancel`,
+      {
+        method: "POST",
+        headers: withAuthHeaders(),
+        signal: AbortSignal.timeout(BRIGHTDATA_TIMEOUTS_MS.cancel),
+      },
+    );
+    if (!res.ok) console.warn(`[brightdata] 작업 취소 요청 실패 (HTTP ${res.status})`);
+  } catch {
+    console.warn("[brightdata] 작업 취소 요청 실패 (NETWORK)");
+  }
+}
+
+function toClassifyText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * 받은 결과(payload) → 정규화된 수집 결과. runAiScraper 의 "payload 를 얻은 뒤" 블록을 순서
+ * 그대로 옮긴 것이다: 첫 레코드 선택 → not-ready 감지 → 크롤러 오류(답변 필드 없음 + error/
+ * error_code) → answer_html 제거 → normalizeAnswer → 파싱 실패 → 인용 추출 → 결과 조립.
+ * 캐시 기록·perplexity 지역값 재시도는 넣지 않는다(호출부 몫).
+ *
+ * 옮기면서 달라진 것 두 가지(계획 v2 §4):
+ *   - 크롤러 오류 코드는 classifyCrawlerError 로 세분한다. 메시지 접두사는 그대로 "[CRAWLER_ERROR] …".
+ *   - 결과가 비었거나 메타 키뿐인데 진행 확인이 records 0 · errors > 0 이면 PARSE_FAILURE 가 아니라
+ *     CRAWLER_ERROR 로 본다(M2 — 수집기가 오류로 끝난 작업).
+ */
+export function normalizeScrapePayload(args: {
+  provider: Provider;
+  prompt: string;
+  payload: unknown;
+  progress?: { records?: number; errors?: number };
+}): NormalizedScrapeResult {
+  const { provider: parsed, prompt, payload, progress } = args;
+
   // Keep unsanitized first record for structured source extraction
   const rawFirst = Array.isArray(payload)
     ? (payload as Record<string, unknown>[])[0]
     : (payload as Record<string, unknown>);
   const rawRecord = (rawFirst ?? {}) as Record<string, unknown>;
 
-  // not-ready placeholder 감지 — normalizeAnswer 호출 전, 캐시 set(아래) 전에 차단.
+  // not-ready placeholder 감지 — normalizeAnswer 호출 전, 캐시 set(호출부) 전에 차단.
   // Bright Data 가 아직 데이터 미준비(placeholder)를 돌려주면 가짜 답변 저장을 막기 위해
-  // 즉시 throw 한다. 재시도하지 않는다: 재-POST 가 202 를 받으면 monitorUntilReady(~900s)에
-  // 재진입해 tick wall-clock(12h 주기)을 위협하기 때문(plan-v2 결정 2).
-  // 다음 tick 에서 자연 회수된다. throw 가 cache.set 보다 먼저 빠지므로 partial 미기록(M4).
-  // [NOT_READY] prefix 로 automation-runner 의 ProviderFailure.reason 에 기록되어
+  // 즉시 throw 한다(plan-v2 결정 1·2). [NOT_READY] prefix 로 ProviderFailure.reason 에 기록되어
   // network 실패와 집계상 구분 가능(R9/M5).
   if (isNotReadyPayload(rawRecord)) {
-    throw new Error(`[NOT_READY] Bright Data placeholder (provider=${parsed})`);
+    throw new ScrapeFailure("NOT_READY", `[NOT_READY] Bright Data placeholder (provider=${parsed})`);
   }
 
   // Bright Data 크롤러 오류 감지 (2026-08-29 추가).
@@ -742,7 +1165,7 @@ export async function runAiScraper(
   // 레코드를 돌려준다(예: "Crawler error: waiting for selector ... timeout 30000ms exceeded").
   // 이 문구는 NOT_READY_PATTERN 에 걸리지 않아 not-ready 검출을 통과했고, 그 결과 deep fallback 이
   // timestamp 를 답변으로 채택해 가짜 정상 run 이 쌓였다. 답변이 없는 상태에서 오류 필드가 있으면
-  // 즉시 실패로 처리해 run 을 저장하지 않는다(다음 tick 에서 자연 재시도).
+  // 즉시 실패로 처리해 run 을 저장하지 않는다.
   const crawlerError = rawRecord.error ?? rawRecord.error_code;
   const hasAnswerField = ANSWER_CANDIDATE_KEYS.some((key) => {
     const value = rawRecord[key];
@@ -758,22 +1181,11 @@ export async function runAiScraper(
     return false;
   });
   if (crawlerError && !hasAnswerField) {
-    // § PERPLEXITY_COUNTRY_FALLBACK (2026-08-29)
-    // Perplexity 는 country 를 지정하면 Bright Data 스크래퍼가 선택자 타임아웃으로 실패한다.
-    // 한국 결과 확보가 우선이라 country 를 계속 보내되, 이 실패에 한해 country 없이 1회 재시도한다.
-    // (country 없이도 한국어 프롬프트면 한국 사이트 출처가 나오는 것을 실측 확인 — naver/tistory 등)
-    // 스크래퍼가 복구되면 첫 시도가 성공하므로 재시도 자체가 사라진다.
-    // effectiveCountry 기준으로 판단한다 — 실제로 country 를 보냈을 때만 재시도한다.
-    // (request.country 로 판단하면 억제 중에도 재귀가 돌아 무한 재시도가 된다)
-    if (parsed === "perplexity" && effectiveCountry) {
-      markPerplexityCountryFailed();
-      console.warn(
-        `[PERPLEXITY_COUNTRY_FALLBACK] country=${request.country} 실패 → country 없이 재시도합니다. ` +
-          `이후 ${COUNTRY_FALLBACK_SUPPRESS_MS / 3600000}시간 동안은 country 를 생략해 바로 요청합니다.`,
-      );
-      return runAiScraper({ ...request, country: undefined, forceRefresh: true });
-    }
-    throw new Error(
+    const classifyText = [toClassifyText(rawRecord.error), toClassifyText(rawRecord.error_code)]
+      .filter(Boolean)
+      .join(" ");
+    throw new ScrapeFailure(
+      classifyCrawlerError(classifyText),
       `[CRAWLER_ERROR] Bright Data 수집 실패 (provider=${parsed}): ${String(crawlerError).slice(0, 300)}`,
     );
   }
@@ -787,10 +1199,18 @@ export async function runAiScraper(
 
   // 파싱 실패는 run 으로 저장하지 않는다 (2026-08-29).
   // 예전에는 실패 메시지를 answer 에 담아 그대로 저장했는데, 그러면 답변이 없는데도
-  // 정상 run 으로 집계돼 가시성 0점이 평균을 끌어내린다. throw 하면 automation-runner 가
-  // ProviderFailure 로 기록하고 다음 tick 에서 자연 재시도된다(not-ready 와 동일 처리).
+  // 정상 run 으로 집계돼 가시성 0점이 평균을 끌어내린다.
   if (answer.startsWith(PARSE_FAILURE_MARKER)) {
-    throw new Error(
+    const errorCount = progress?.errors ?? 0;
+    if (progress?.records === 0 && errorCount > 0) {
+      // M2 — 진행 확인이 "결과 0 · 오류 N" 이면 파싱 문제가 아니라 수집기가 오류로 끝낸 작업이다.
+      throw new ScrapeFailure(
+        "CRAWLER_ERROR",
+        `[CRAWLER_ERROR] Bright Data 수집 실패 (provider=${parsed}): progress: records 0 · errors ${errorCount}`,
+      );
+    }
+    throw new ScrapeFailure(
+      "PARSE_FAILURE",
       `[PARSE_FAILURE] 답변 필드를 찾지 못했다 (provider=${parsed}) — ${answer}`,
     );
   }
@@ -833,9 +1253,9 @@ export async function runAiScraper(
     ...new Set([...textSources, ...structuredCitations.map((c) => c.url)]),
   ];
 
-  const normalized: NormalizedScrapeResult = {
+  return {
     provider: parsed,
-    prompt: request.prompt,
+    prompt,
     answer,
     sources: allSources,
     citations: structuredCitations,
@@ -845,11 +1265,4 @@ export async function runAiScraper(
     raw: sanitizedPayload,
     createdAt: new Date().toISOString(),
   };
-
-  inMemoryCache.set(cacheKey, {
-    expiresAt: Date.now() + OUTPUT_CACHE_TTL_MS,
-    value: normalized,
-  });
-
-  return normalized;
 }

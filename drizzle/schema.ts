@@ -367,6 +367,164 @@ export const brandYoutubeVideos = pgTable(
 );
 
 /* ============================================================
+ * 자동 수집 대기열 — 계획 geotracker-collect-speed-260924 (Step 3 · 마이그레이션 0008)
+ * ============================================================
+ * 예전 엔진은 틱 하나가 모든 질문 × AI 를 메모리 반복문으로 몇 시간씩 붙잡았다. 새 엔진은
+ * 회차(collection_rounds)와 회차별 항목(collection_items)을 DB 에 두고, 1분마다 도는 짧은 두 줄기
+ * (보내기·거두기)가 항목 상태를 한 단계씩 옮긴다. Bright Data 요청 번호를 항목에 남겨 재시작·
+ * 배포 뒤에도 같은 번호로 이어서 받는다. 항목은 회차마다 따로 두고 덮어쓰지 않는다 — 회차별
+ * 비용·원인·결과가 섞이지 않게 하기 위해서다(검수 #9).
+ * 기존 표(runs·schedules 등)는 바꾸지 않는다.
+ */
+
+/** 회차 마감 요약 — 상태별 개수와 과금 추적 칸, AI별 원인 코드 개수. */
+export type CollectionRoundSummary = {
+  saved: number;
+  duplicate: number;
+  failed: number;
+  cancelled: number;
+  /** 200/202 로 접수가 확인된 제출 수 (과금 확정분) */
+  paidAttempts: number;
+  /** 접수 여부 불명 제출 수 (끊김·5xx·네트워크) — 과금 상한 계산에 포함 */
+  unknownSubmits: number;
+  /** 일반 재시도 수 (회차당 AI별 예산 안) */
+  paidRetries: number;
+  /** perplexity 지역값 없이 재시도 수 (예산 밖) */
+  countryFallbacks: number;
+  byProvider: Record<
+    string,
+    { saved: number; duplicate: number; failed: number; cancelled: number; failedByCode: Record<string, number> }
+  >;
+};
+
+/* collection_rounds — 자동 수집 회차 (계획 geotracker-collect-speed-260924) */
+export const collectionRounds = pgTable(
+  "collection_rounds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scheduleId: uuid("schedule_id").references(() => schedules.id, { onDelete: "set null" }),
+    /** cron | manual | first_run */
+    trigger: text("trigger").notNull(),
+    /** 즉시 실행·첫 회차 1, 정기 0 — 제출 순서에서 높은 쪽이 먼저 */
+    priority: integer("priority").notNull().default(0),
+    /** running | completed | skipped_overlap */
+    status: text("status").notNull(),
+    scheduledFor: timestamp("scheduled_for", { withTimezone: true }).notNull(),
+    /** 회차 예정 시각의 UTC 시 ("YYYY-MM-DDTHH") — 회차 내내 고정, runs.interval_slot 으로 저장 */
+    intervalSlot: text("interval_slot").notNull(),
+    /** 스케줄 값 사본 → runs.geolocation (지금과 같음) */
+    geolocation: text("geolocation"),
+    /** 회차 점수 기준(브랜드 설정·경쟁사 사본) — skipped_overlap 은 null */
+    scoringSnapshot: jsonb("scoring_snapshot").$type<ScoringSnapshot>(),
+    expectedItems: integer("expected_items").notNull().default(0),
+    summary: jsonb("summary").$type<CollectionRoundSummary>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => ({
+    occurrenceUnique: uniqueIndex("uq_collection_rounds_occurrence").on(t.scheduleId, t.scheduledFor),
+    /** 스케줄당 진행 중 회차는 1개 — DB 가 강제한다 */
+    oneRunning: uniqueIndex("uq_collection_rounds_one_running")
+      .on(t.scheduleId)
+      .where(sql`status = 'running'`),
+    workspaceCreatedIdx: index("idx_collection_rounds_workspace_created").on(t.workspaceId, t.createdAt),
+    statusIdx: index("idx_collection_rounds_status").on(t.status),
+  }),
+);
+
+/** 제출 시도 1회의 기록 — 돈이 들 수 있는 호출 **전에** 칸을 만들고 결과를 채운다(검수 #4). */
+export type CollectionAttempt = {
+  /** 1부터 — 제출 시도 순번 (무료 재대기 포함) */
+  n: number;
+  /** 실제로 보낸 지역값 (null = 보내지 않음) */
+  country: string | null;
+  /** claim 시각 ISO — 돈이 들 수 있는 구간의 시작 */
+  startedAt: string;
+  snapshotId?: string;
+  /** 200/202 를 받았으면 true */
+  accepted?: boolean;
+  finishedAt?: string;
+  outcome?: "saved" | "duplicate" | "retry" | "failed" | "requeued" | "unknown";
+  errorCode?: string;
+  /** redactErrorText 로 가린 300자 이내 */
+  error?: string;
+  progress?: { records?: number; errors?: number };
+  durationMs?: number;
+};
+
+/* collection_items — 회차별 불변 항목 (질문 × AI) */
+export const collectionItems = pgTable(
+  "collection_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    roundId: uuid("round_id")
+      .notNull()
+      .references(() => collectionRounds.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    intervalSlot: text("interval_slot").notNull(),
+    promptText: text("prompt_text").notNull(),
+    provider: text("provider").notNull(),
+    seq: integer("seq").notNull(),
+    /** 스케줄 geolocation ?? "KR" (지금 수집과 같음) */
+    countryRequested: text("country_requested"),
+    /** perplexity 지역값 재시도 뒤 true — 이후 이 항목은 지역값 없이 보낸다 */
+    dropCountry: boolean("drop_country").notNull().default(false),
+    /** queued | submitting | submitted | saved | duplicate | failed | cancelled */
+    status: text("status").notNull(),
+    /** Bright Data 요청 번호 (진행 중일 때) */
+    snapshotId: text("snapshot_id"),
+    /** 200/202 로 접수가 확인된 제출 */
+    paidAttempts: integer("paid_attempts").notNull().default(0),
+    /** 접수 여부 불명(끊김·5xx·네트워크) — 과금 상한에 포함 */
+    unknownSubmits: integer("unknown_submits").notNull().default(0),
+    /** 일반 재시도 0/1 */
+    paidRetries: integer("paid_retries").notNull().default(0),
+    /** perplexity 지역값 없이 재시도 0/1 (예산 밖) */
+    countryFallbacks: integer("country_fallbacks").notNull().default(0),
+    /** 429 재대기 */
+    freeRequeues: integer("free_requeues").notNull().default(0),
+    pollErrors: integer("poll_errors").notNull().default(0),
+    downloadErrors: integer("download_errors").notNull().default(0),
+    persistErrors: integer("persist_errors").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    submitStartedAt: timestamp("submit_started_at", { withTimezone: true }),
+    firstSubmittedAt: timestamp("first_submitted_at", { withTimezone: true }),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    nextPollAt: timestamp("next_poll_at", { withTimezone: true }),
+    pollDeadlineAt: timestamp("poll_deadline_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    /** redactErrorText 로 가린 300자 이내 */
+    lastError: text("last_error"),
+    attempts: jsonb("attempts").$type<CollectionAttempt[]>().notNull().default([]),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    durationMs: integer("duration_ms"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    roundUnique: uniqueIndex("uq_collection_items_round").on(t.roundId, t.promptText, t.provider),
+    comboIdx: index("idx_collection_items_combo").on(t.workspaceId, t.intervalSlot, t.promptText, t.provider),
+    queueIdx: index("idx_collection_items_queue").on(t.status, t.provider, t.nextAttemptAt),
+    pollIdx: index("idx_collection_items_poll").on(t.status, t.nextPollAt),
+  }),
+);
+
+/**
+ * 엔진 공용 작은 상태 — 키: perplexity_country_failed_at · auth_pause_until · rate_pause:<provider>
+ * · daily_rollup · process. 재시작해도 유지돼야 하는 값만 둔다(예전엔 메모리에 있어 배포마다 사라졌다).
+ */
+export const collectorState = pgTable("collector_state", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").$type<Record<string, unknown>>().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/* ============================================================
  * 타입 export — API 레이어에서 재사용
  * ============================================================ */
 export type Workspace = InferSelectModel<typeof workspaces>;
@@ -387,3 +545,8 @@ export type AuditHistoryEntry = InferSelectModel<typeof auditHistory>;
 export type NewAuditHistoryEntry = InferInsertModel<typeof auditHistory>;
 export type BrandYoutubeVideo = InferSelectModel<typeof brandYoutubeVideos>;
 export type NewBrandYoutubeVideo = InferInsertModel<typeof brandYoutubeVideos>;
+export type CollectionRound = InferSelectModel<typeof collectionRounds>;
+export type NewCollectionRound = InferInsertModel<typeof collectionRounds>;
+export type CollectionItem = InferSelectModel<typeof collectionItems>;
+export type NewCollectionItem = InferInsertModel<typeof collectionItems>;
+export type CollectorStateRow = InferSelectModel<typeof collectorState>;

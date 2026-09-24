@@ -57,6 +57,13 @@
       "when": 1790175295417,
       "tag": "0007_third-party-citation-classification",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790260633842,
+      "tag": "0008_collection_queue",
+      "breakpoints": true
     }
   ]
 }

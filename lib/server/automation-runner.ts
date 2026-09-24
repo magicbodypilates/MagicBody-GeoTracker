@@ -133,7 +133,7 @@ export async function runTick(): Promise<TickResult> {
   try {
     const kstHour = (now.getUTCHours() + 9) % 24;
     if (kstHour === 0 || kstHour === 1) {
-      const rollup = await runDailyRollup();
+      const rollup = await runDailyRollup(now);
       result.dailyRollup = rollup;
     }
   } catch (err) {
@@ -633,14 +633,13 @@ async function runOneProviderForPrompt(args: {
 }
 
 /**
- * 전날(KST 기준) runs 를 집계해 daily_stats 에 저장.
- * - 각 (workspace, provider, prompt_id[프롬프트 text 매칭]) 조합별 평균 가시성 · 언급률 등
- * - parse_quality='low' 제외
- * - ON CONFLICT 로 재실행 시 갱신
+ * 하루 집계 구간 — 어제(KST) 00:00 ~ 오늘(KST) 00:00 과 그 날짜 문자열(어제, KST).
+ *
+ * 날짜 문자열은 "어제 KST 자정"을 KST 로 옮긴 시각의 UTC 연·월·일로 만든다. 예전에는
+ * `d - 1` 로 만들어 매달 1일에 "YYYY-MM-00" 이 되어 그날 집계 INSERT 가 실패했다
+ * (계획 geotracker-collect-speed-260924 부록 D #1).
  */
-async function runDailyRollup(): Promise<{ date: string; rows: number }> {
-  // 어제(KST) 00:00 ~ 오늘(KST) 00:00 구간
-  const now = new Date();
+export function computeDailyRollupWindow(now: Date): { dateStr: string; fromUtc: Date; toUtc: Date } {
   const kstNowMs = now.getTime() + 9 * 60 * 60 * 1000;
   const kstNow = new Date(kstNowMs);
   const y = kstNow.getUTCFullYear();
@@ -649,10 +648,23 @@ async function runDailyRollup(): Promise<{ date: string; rows: number }> {
   // KST 자정을 UTC 로 변환 (KST = UTC+9 → KST 00:00 = UTC 전날 15:00)
   const kstMidnightTodayUtc = Date.UTC(y, m, d, -9, 0, 0);
   const kstMidnightYesterdayUtc = Date.UTC(y, m, d - 1, -9, 0, 0);
-  const fromUtc = new Date(kstMidnightYesterdayUtc);
-  const toUtc = new Date(kstMidnightTodayUtc);
+  const yesterdayKst = new Date(kstMidnightYesterdayUtc + 9 * 60 * 60 * 1000);
+  const dateStr = `${yesterdayKst.getUTCFullYear()}-${String(yesterdayKst.getUTCMonth() + 1).padStart(2, "0")}-${String(yesterdayKst.getUTCDate()).padStart(2, "0")}`;
+  return { dateStr, fromUtc: new Date(kstMidnightYesterdayUtc), toUtc: new Date(kstMidnightTodayUtc) };
+}
 
-  const dateStr = `${y}-${String(m + 1).padStart(2, "0")}-${String(d - 1).padStart(2, "0")}`;
+/**
+ * 전날(KST 기준) runs 를 집계해 daily_stats 에 저장.
+ * - 각 (workspace, provider, prompt_id[프롬프트 text 매칭]) 조합별 평균 가시성 · 언급률 등
+ * - parse_quality='low' 제외
+ * - ON CONFLICT 로 재실행 시 갱신
+ *
+ * export 하는 이유 — 새 수집 엔진(collector-engine.ts)이 날짜가 바뀐 뒤 하루 1회 부른다.
+ * now 를 받는 이유 — 엔진이 쓰는 기준 시각과 같은 날짜를 집계하고, 테스트가 날짜를 고정한다.
+ */
+export async function runDailyRollup(now: Date = new Date()): Promise<{ date: string; rows: number }> {
+  // 어제(KST) 00:00 ~ 오늘(KST) 00:00 구간
+  const { dateStr, fromUtc, toUtc } = computeDailyRollupWindow(now);
 
   // Drizzle 로 집계 — groupBy (workspace, provider)
   // 주의: prompt_id 는 runs 테이블에 없고 prompt_text 만 있음. prompts 테이블과 LEFT JOIN 으로 매칭.

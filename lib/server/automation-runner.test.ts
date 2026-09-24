@@ -21,6 +21,7 @@ import type { Citation } from "@/components/dashboard/types";
 import {
   DEFAULT_SCORING_SWITCH,
   SCORING_PROFILES,
+  computeDailyRollupWindow,
   resolveScoringProfile,
   resolveCitationJudgment,
   type ScoringSetSwitch,
@@ -388,5 +389,40 @@ describe("resolveCitationJudgment — 종합 배선 시나리오 (실제 runOneP
         "hasPressCitation",
       ].sort(),
     );
+  });
+});
+
+/**
+ * computeDailyRollupWindow — 하루 집계 날짜(계획 geotracker-collect-speed-260924 Step 2 · 부록 D #1).
+ * 예전에는 날짜 문자열을 `d - 1` 로 만들어 매달 1일에 "YYYY-MM-00" 이 되어 그날 집계가 실패했다.
+ */
+describe("computeDailyRollupWindow — 어제(KST) 날짜와 구간", () => {
+  it("매달 1일 — 2026-10-01 00:30 KST → 2026-09-30 (예전 버그: 2026-10-00)", () => {
+    const w = computeDailyRollupWindow(new Date("2026-10-01T00:30:00+09:00"));
+    expect(w.dateStr).toBe("2026-09-30");
+    expect(w.fromUtc.toISOString()).toBe("2026-09-29T15:00:00.000Z");
+    expect(w.toUtc.toISOString()).toBe("2026-09-30T15:00:00.000Z");
+  });
+
+  it("3월 1일 — 2026-03-01 00:30 KST → 2026-02-28 (윤년 아님)", () => {
+    expect(computeDailyRollupWindow(new Date("2026-03-01T00:30:00+09:00")).dateStr).toBe("2026-02-28");
+  });
+
+  it("윤년 3월 1일 — 2028-03-01 00:30 KST → 2028-02-29", () => {
+    expect(computeDailyRollupWindow(new Date("2028-03-01T00:30:00+09:00")).dateStr).toBe("2028-02-29");
+  });
+
+  it("해 넘김 — 2027-01-01 00:30 KST → 2026-12-31", () => {
+    expect(computeDailyRollupWindow(new Date("2027-01-01T00:30:00+09:00")).dateStr).toBe("2026-12-31");
+  });
+
+  it("평일 — 2026-09-24 10:00 KST → 2026-09-23, 구간은 정확히 24시간", () => {
+    const w = computeDailyRollupWindow(new Date("2026-09-24T10:00:00+09:00"));
+    expect(w.dateStr).toBe("2026-09-23");
+    expect(w.toUtc.getTime() - w.fromUtc.getTime()).toBe(24 * 3600_000);
+  });
+
+  it("UTC 로는 전날이지만 KST 로는 오늘인 시각 — 2026-09-24T16:00Z(= 09-25 01:00 KST) → 2026-09-24", () => {
+    expect(computeDailyRollupWindow(new Date("2026-09-24T16:00:00Z")).dateStr).toBe("2026-09-24");
   });
 });

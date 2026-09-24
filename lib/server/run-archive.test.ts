@@ -12,6 +12,7 @@ import {
   archiveActionSchema,
   archivedRunCondition,
   encodeArchiveCursor,
+  isLockTimeoutError,
   isValidUtcTimestamp,
   notArchivedRunCondition,
   notInTrackedListCondition,
@@ -185,5 +186,32 @@ describe("보관 API 본문", () => {
     expect(purgeBodySchema.safeParse({ promptTexts: ["가 질문"] }).success).toBe(true);
     expect(purgeBodySchema.safeParse({ promptTexts: [] }).success).toBe(false);
     expect(purgeBodySchema.safeParse({ promptTexts: ["가"], action: "purge" }).success).toBe(false);
+  });
+});
+
+describe("잠금 대기 한도 초과(55P03) 판정 — 결함 대장 RV1", () => {
+  it("cause.code === '55P03' → true (postgres.js 오류를 drizzle-orm 이 감싼 모양)", () => {
+    const err = Object.assign(new Error("Failed query: select 1 from pg_advisory_xact_lock(...)"), {
+      cause: { code: "55P03", message: "canceling statement due to lock timeout" },
+    });
+    expect(isLockTimeoutError(err)).toBe(true);
+  });
+
+  it("다른 postgres 오류 코드(예: 42703 컬럼 없음) → false", () => {
+    const err = Object.assign(new Error("Failed query: x"), { cause: { code: "42703" } });
+    expect(isLockTimeoutError(err)).toBe(false);
+  });
+
+  it("cause 가 없거나, 객체가 아니거나, code 칸이 없으면 → false", () => {
+    expect(isLockTimeoutError(new Error("plain"))).toBe(false);
+    expect(isLockTimeoutError(Object.assign(new Error("x"), { cause: "55P03" }))).toBe(false);
+    expect(isLockTimeoutError(Object.assign(new Error("x"), { cause: {} }))).toBe(false);
+  });
+
+  it("Error 가 아닌 값(문자열·null·undefined) → false", () => {
+    expect(isLockTimeoutError("55P03")).toBe(false);
+    expect(isLockTimeoutError(null)).toBe(false);
+    expect(isLockTimeoutError(undefined)).toBe(false);
+    expect(isLockTimeoutError({ code: "55P03" })).toBe(false);
   });
 });

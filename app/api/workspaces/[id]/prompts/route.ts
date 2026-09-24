@@ -15,7 +15,12 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { asc, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
-import { lockResponseArchive, restoreByTexts } from "@/lib/server/run-archive";
+import {
+  applyPromptLockTimeout,
+  isLockTimeoutError,
+  lockResponseArchive,
+  restoreByTexts,
+} from "@/lib/server/run-archive";
 
 export const dynamic = "force-dynamic";
 
@@ -41,9 +46,15 @@ export async function GET(
       .orderBy(asc(schema.prompts.createdAt));
     return NextResponse.json({ prompts: rows });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown";
-    console.error("[/api/workspaces/:id/prompts] GET 실패:", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 응답 본문엔 원문을 절대 싣지 않는다 — 서버 로그에만 남기고 클라이언트에는 고정 오류
+    // 코드만 반환한다(같은 파일 POST 와 동일한 이유 — CWE-209, 보안 점검 F1).
+    const cause = err instanceof Error ? err.cause : undefined;
+    console.error(
+      "[/api/workspaces/:id/prompts] GET 실패:",
+      err instanceof Error ? err.message : String(err),
+      cause !== undefined ? `cause: ${String(cause)}` : "",
+    );
+    return NextResponse.json({ error: "prompts_list_failed" }, { status: 500 });
   }
 }
 
@@ -68,6 +79,7 @@ export async function POST(
     // 있으면 재활성화"를 한 쿼리로 처리한다. 태그는 기존 값을 유지(재추가 요청의 tags 로
     // 덮어쓰지 않음) — active 만 되돌린다.
     const { prompt, restoredRuns } = await db.transaction(async (tx) => {
+      await applyPromptLockTimeout(tx);
       await lockResponseArchive(tx, id);
       const [saved] = await tx
         .insert(schema.prompts)
@@ -89,6 +101,16 @@ export async function POST(
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });
+    }
+    // 워크스페이스 잠금 대기 한도(applyPromptLockTimeout) 초과 — 다른 정리 작업(보관·영구 삭제 등)이
+    // 오래 잠금을 쥔 드문 상황. 재시도하면 대개 풀린다(결함 대장 RV1) — 500 이 아니라 그 뜻이 드러나는
+    // 코드 + 쉬운 안내로 알린다.
+    if (isLockTimeoutError(err)) {
+      console.warn("[/api/workspaces/:id/prompts] POST 잠금 대기 한도 초과 — 재시도 유도");
+      return NextResponse.json(
+        { error: "archive_lock_busy", hint: "다른 정리 작업이 진행 중이에요. 잠시 후 다시 시도해 주세요." },
+        { status: 409 },
+      );
     }
     // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — drizzle-orm 0.45 는 DB 오류를
     // DrizzleQueryError("Failed query: ...")로 감싸 err.message 에 쿼리 전문이 그대로

@@ -140,6 +140,9 @@ const H = vi.hoisted(() => {
       order.push(`restore:${wsId}:${texts.join("|")}`);
       return { affectedRuns: 3, affectedQuestions: 1, skippedInList: [] };
     }),
+    // RV1 수정 전에는 없던 단계 — 워크스페이스 잠금을 잡기 전에 대기 한도를 건다. order 에는
+    // 넣지 않는다(기존 lock/update/restore 순서 단언을 그대로 유지) — 호출 여부는 별도 단언.
+    applyPromptLockTimeout: vi.fn(async () => {}),
     reset: () => {
       store.prompts = [];
       store.runs = [];
@@ -150,10 +153,17 @@ const H = vi.hoisted(() => {
 
 vi.mock("@/lib/server/db", () => ({ db: H.db, schema: H.schema }));
 
-vi.mock("@/lib/server/run-archive", () => ({
-  lockResponseArchive: H.lockResponseArchive,
-  restoreByTexts: H.restoreByTexts,
-}));
+// isLockTimeoutError 는 실제 구현(순수 함수)을 그대로 쓴다 — 이 파일에 로직을 다시 베끼면
+// run-archive.ts 가 바뀔 때 조용히 어긋날 수 있다.
+vi.mock("@/lib/server/run-archive", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    lockResponseArchive: H.lockResponseArchive,
+    restoreByTexts: H.restoreByTexts,
+    applyPromptLockTimeout: H.applyPromptLockTimeout,
+  };
+});
 
 vi.mock("drizzle-orm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("drizzle-orm")>();
@@ -211,6 +221,7 @@ beforeEach(() => {
   H.reset();
   H.lockResponseArchive.mockClear();
   H.restoreByTexts.mockClear();
+  H.applyPromptLockTimeout.mockClear();
   getSessionMock.mockReset();
   assertWorkspaceAccessMock.mockReset();
   requireAdminMock.mockReset();
@@ -415,6 +426,8 @@ describe("PATCH /api/prompts/:id — 켜면 보관 응답 자동 복원 (응답 
     expect(body.prompt.active).toBe(true);
     expect(body.restoredRuns).toBe(3);
     expect(H.order).toEqual([`lock:${WS_A}`, "update", `restore:${WS_A}:꺼졌던 질문`]);
+    // 워크스페이스 잠금을 잡기 전에 대기 한도를 건다(결함 대장 RV1).
+    expect(H.applyPromptLockTimeout).toHaveBeenCalledTimes(1);
   });
 
   it("켜진 질문의 문구를 바꾸면 **바뀐 문구**를 되돌린다", async () => {
@@ -451,6 +464,32 @@ describe("PATCH /api/prompts/:id — 켜면 보관 응답 자동 복원 (응답 
     const res = await patchReq(uid(24), { active: true });
     expect(res.status).toBe(403);
     expect(H.lockResponseArchive).not.toHaveBeenCalled();
+    expect(H.restoreByTexts).not.toHaveBeenCalled();
+  });
+
+  it("워크스페이스 잠금 대기 한도 초과(55P03) → 409 + 쉬운 안내, SQL 원문 없음(결함 대장 RV1)", async () => {
+    seedPrompt(uid(25), WS_A, { text: "잠금 경합 질문", active: false });
+    // postgres.js 가 lock_timeout 만료 시 던지는 오류를 drizzle-orm 0.45 가 DrizzleQueryError 로
+    // 감싼 모양을 재현 — 원래 postgres 오류(code 포함)는 err.cause 에 남는다.
+    H.lockResponseArchive.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          "Failed query: select 1 from pg_advisory_xact_lock(hashtextextended('geo:response-archive:' || $1::text, 0))",
+        ),
+        { cause: { code: "55P03", message: "canceling statement due to lock timeout" } },
+      ),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await patchReq(uid(25), { active: true });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "archive_lock_busy",
+      hint: "다른 정리 작업이 진행 중이에요. 잠시 후 다시 시도해 주세요.",
+    });
+    expect(JSON.stringify(body)).not.toMatch(/pg_advisory_xact_lock|Failed query|lock_timeout/);
+    // 수정도 되돌리기도 일어나지 않는다(트랜잭션 전체 롤백) — 씨딩한 값 그대로.
+    expect(H.store.prompts.find((p) => p.id === uid(25))!.active).toBe(false);
     expect(H.restoreByTexts).not.toHaveBeenCalled();
   });
 });

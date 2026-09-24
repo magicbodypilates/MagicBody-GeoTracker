@@ -117,7 +117,19 @@ async function j<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { credentials: "include", ...init });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${url} → ${res.status}: ${text.slice(0, 200)}`);
+    // 서버가 쉬운 한국어 안내(hint)를 주면 그걸, 없으면 오류 코드를 메시지로 쓴다
+    // (components/dashboard/tabs/automation-server-tab.tsx 와 같은 방식) — 원문 JSON·상태
+    // 코드를 그대로 노출하지 않고 화면에 바로 보여줄 수 있는 문구로 바꾼다(응답 보관 §S8 RV1 —
+    // 예: 잠금 대기 한도 초과 시 "다른 정리 작업이 진행 중이에요...").
+    let friendly: string | undefined;
+    try {
+      const body = JSON.parse(text) as { hint?: unknown; error?: unknown };
+      if (typeof body.hint === "string") friendly = body.hint;
+      else if (typeof body.error === "string") friendly = body.error;
+    } catch {
+      // JSON 이 아니면 아래 기본 메시지로 폴백
+    }
+    throw new Error(friendly ?? `${init?.method ?? "GET"} ${url} → ${res.status}: ${text.slice(0, 200)}`);
   }
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }

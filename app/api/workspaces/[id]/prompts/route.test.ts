@@ -31,6 +31,8 @@ const H = vi.hoisted(() => {
   /** 호출 순서 기록 — 보관 잠금 → 추가(upsert) → 보관 응답 되돌리기(응답 보관 §S8). */
   const order: string[] = [];
   let restoredRunsNext = 0;
+  /** GET 목록 조회가 실패해야 하면 여기에 담는다 — 결함 대장 F1 재현용. */
+  let selectFailWith: Error | null = null;
 
   const insertBuilder = () => {
     let vals: Partial<PromptRow> | null = null;
@@ -77,6 +79,15 @@ const H = vi.hoisted(() => {
 
   const db = {
     insert: (_table: unknown) => insertBuilder(),
+    // GET 목록 조회 — select().from().where().orderBy(). F1(오류 시 원문 노출) 재현용으로 실패를 주입할 수 있다.
+    select: (_proj?: unknown) => ({
+      from: (_table: unknown) => ({
+        where: (_pred: unknown) => ({
+          orderBy: (_o: unknown) =>
+            selectFailWith ? Promise.reject(selectFailWith) : Promise.resolve([...store.prompts]),
+        }),
+      }),
+    }),
     // 라우트는 잠금·추가·되돌리기를 한 트랜잭션으로 묶는다 — 가짜는 같은 가짜 db 로 콜백을 부른다.
     transaction: <T,>(fn: (tx: unknown) => Promise<T>) => fn(db),
   };
@@ -96,6 +107,9 @@ const H = vi.hoisted(() => {
     setRestoredRuns: (n: number) => {
       restoredRunsNext = n;
     },
+    setSelectFail: (e: Error | null) => {
+      selectFailWith = e;
+    },
     lockResponseArchive: vi.fn(async (_tx: unknown, wsId: string) => {
       order.push(`lock:${wsId}`);
     }),
@@ -103,28 +117,40 @@ const H = vi.hoisted(() => {
       order.push(`restore:${wsId}:${texts.join("|")}`);
       return { affectedRuns: restoredRunsNext, affectedQuestions: restoredRunsNext > 0 ? 1 : 0, skippedInList: [] };
     }),
+    // RV1 수정 전에는 없던 단계 — 워크스페이스 잠금을 잡기 전에 대기 한도를 건다. 순서 검증용
+    // order 에는 넣지 않는다(기존 lock/upsert/restore 순서 단언을 그대로 유지하기 위함) — 호출
+    // 여부·횟수는 별도 단언으로 확인한다.
+    applyPromptLockTimeout: vi.fn(async () => {}),
     reset: () => {
       store.prompts = [];
       seq = 1;
       order.length = 0;
       restoredRunsNext = 0;
+      selectFailWith = null;
     },
   };
 });
 
 vi.mock("@/lib/server/db", () => ({ db: H.db, schema: H.schema }));
 
-vi.mock("@/lib/server/run-archive", () => ({
-  lockResponseArchive: H.lockResponseArchive,
-  restoreByTexts: H.restoreByTexts,
-}));
+// isLockTimeoutError 는 실제 구현(순수 함수)을 그대로 쓴다 — 로직을 이 파일에 다시 베끼면
+// run-archive.ts 가 바뀔 때 조용히 어긋날 수 있다.
+vi.mock("@/lib/server/run-archive", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    lockResponseArchive: H.lockResponseArchive,
+    restoreByTexts: H.restoreByTexts,
+    applyPromptLockTimeout: H.applyPromptLockTimeout,
+  };
+});
 
 vi.mock("@/lib/server/auth-guard", () => ({
   getSession: async () => ({ kind: "admin", role: 0 }),
   assertWorkspaceAccess: async () => null,
 }));
 
-const { POST } = await import("./route");
+const { GET, POST } = await import("./route");
 
 const WS = "11111111-1111-1111-1111-111111111111";
 
@@ -143,7 +169,9 @@ beforeEach(() => {
   H.reset();
   H.lockResponseArchive.mockClear();
   H.restoreByTexts.mockClear();
+  H.applyPromptLockTimeout.mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 describe("POST /api/workspaces/:id/prompts — 추가 = 없으면 생성, 있으면 재활성화", () => {
@@ -256,6 +284,8 @@ describe("POST /api/workspaces/:id/prompts — 보관 응답 자동 복원 (응�
     expect(body.restoredRuns).toBe(7);
     expect(body.prompt.text).toBe("다시 추가한 질문");
     expect(H.order).toEqual([`lock:${WS}`, "upsert", `restore:${WS}:다시 추가한 질문`]);
+    // 워크스페이스 잠금을 잡기 전에 대기 한도를 건다(결함 대장 RV1).
+    expect(H.applyPromptLockTimeout).toHaveBeenCalledTimes(1);
   });
 
   it("되돌릴 응답이 없으면 restoredRuns = 0", async () => {
@@ -276,5 +306,80 @@ describe("POST /api/workspaces/:id/prompts — 보관 응답 자동 복원 (응�
     } finally {
       H.db.insert = original;
     }
+  });
+
+  it("워크스페이스 잠금 대기 한도 초과(55P03) → 409 + 쉬운 안내, SQL 원문 없음(결함 대장 RV1)", async () => {
+    // postgres.js 가 lock_timeout 만료 시 던지는 오류를 drizzle-orm 0.45 가 DrizzleQueryError 로
+    // 감싼 모양을 재현 — 원래 postgres 오류(code 포함)는 err.cause 에 남는다.
+    H.lockResponseArchive.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          "Failed query: select 1 from pg_advisory_xact_lock(hashtextextended('geo:response-archive:' || $1::text, 0))",
+        ),
+        { cause: { code: "55P03", message: "canceling statement due to lock timeout" } },
+      ),
+    );
+    const res = await post({ text: "잠금 경합 질문", tags: [] });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "archive_lock_busy",
+      hint: "다른 정리 작업이 진행 중이에요. 잠시 후 다시 시도해 주세요.",
+    });
+    expect(JSON.stringify(body)).not.toMatch(/pg_advisory_xact_lock|Failed query|lock_timeout/);
+    // 추가 자체도, 되돌리기도 일어나지 않는다(트랜잭션 전체 롤백).
+    expect(H.store.prompts).toHaveLength(0);
+    expect(H.restoreByTexts).not.toHaveBeenCalled();
+  });
+
+  it("잠금 관련이 아닌 postgres 오류(예: 42703)는 여전히 일반 500 으로 떨어진다", async () => {
+    H.lockResponseArchive.mockRejectedValueOnce(
+      Object.assign(new Error("Failed query: select 1 from prompts"), {
+        cause: { code: "42703", message: 'column "x" does not exist' },
+      }),
+    );
+    const res = await post({ text: "다른 오류 질문", tags: [] });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "prompt_create_failed" });
+  });
+});
+
+describe("GET /api/workspaces/:id/prompts — 목록 조회", () => {
+  function get() {
+    return GET(new NextRequest(`http://localhost/api/workspaces/${WS}/prompts`), {
+      params: Promise.resolve({ id: WS }),
+    });
+  }
+
+  it("정상 조회 시 프롬프트 배열을 반환한다", async () => {
+    H.store.prompts.push({
+      id: "g1",
+      workspaceId: WS,
+      text: "조회용 질문",
+      tags: [],
+      active: true,
+      createdAt: new Date(),
+    });
+    const res = await get();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.prompts).toHaveLength(1);
+    expect(body.prompts[0].text).toBe("조회용 질문");
+  });
+
+  it("DB 오류 시 응답 본문에 원문 메시지 없이 고정 오류 코드만 반환한다(보안 점검 F1)", async () => {
+    // 실제로 postgres 오류 문구엔 테이블·컬럼명 등 내부 스키마 정보가 담길 수 있다(CWE-209).
+    H.setSelectFail(
+      new Error(
+        'Failed query: select * from "prompts" where "workspace_id" = $1 -- params: ["' +
+          WS +
+          '"] — column "workspace_id" does not exist',
+      ),
+    );
+    const res = await get();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|does not exist|params:/i);
+    expect(body).toEqual({ error: "prompts_list_failed" });
   });
 });

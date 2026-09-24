@@ -1678,7 +1678,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       })
       .catch((e) => {
         console.error("[dashboard] 서버 프롬프트 추가 실패:", e);
-        setMessage("⚠️ 서버 저장 실패 — 새로고침 시 사라질 수 있습니다");
+        // 서버가 쉬운 한국어 안내(hint)를 줬으면(예: 잠금 대기 한도 초과 — 결함 대장 RV1) 그대로
+        // 보여준다. 없으면 기존 일반 문구로 폴백(server-store.ts j() 참고).
+        setMessage(e instanceof Error && e.message ? e.message : "⚠️ 서버 저장 실패 — 새로고침 시 사라질 수 있습니다");
       });
     setMessage("추적 프롬프트가 추가되었습니다.");
   }

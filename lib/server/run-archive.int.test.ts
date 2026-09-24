@@ -442,6 +442,117 @@ describe.skipIf(!CFG.enabled)("응답 보관 통합 (로컬 DB)", () => {
     }
   });
 
+  it(
+    "11 · 잠금 대기 한도 초과(RV1): 다른 연결이 워크스페이스 잠금을 10초 넘게 쥐면 질문 추가는 한도 안에 " +
+      "쉬운 안내와 함께 끝나고 저장되지 않으며, 잠금이 풀리면 다시 보내 정상 저장된다",
+    async () => {
+      const ws = await makeWorkspace("11");
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let markLocked!: () => void;
+      const locked = new Promise<void>((resolve) => (markLocked = resolve));
+
+      // 연결 1 — 워크스페이스 잠금만 쥐고 질문 추가의 lock_timeout(10초)보다 오래 버틴다.
+      // 다른 정리 작업(예: 오래 걸리는 일괄 보관)이 잠금을 쥔 상황을 흉내낸다.
+      const t1 = inTx(async (tx) => {
+        await A.lockResponseArchive(tx, ws.id);
+        markLocked();
+        await gate;
+      });
+      await locked;
+
+      getSessionMock.mockResolvedValue(USER);
+      const { POST } = await import("@/app/api/workspaces/[id]/prompts/route");
+      const postOnce = () =>
+        POST(
+          new NextRequest(`http://localhost/api/workspaces/${ws.id}/prompts`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "가짜 잠금 대기 질문", tags: [] }),
+          }),
+          { params: Promise.resolve({ id: ws.id }) },
+        );
+
+      const startedAt = Date.now();
+      const res = await postOnce();
+      const elapsedMs = Date.now() - startedAt;
+      release();
+      await t1;
+
+      // 한도(10초) 안에 끝났고 — 실제로 기다렸다가(너무 빨리 끝나지 않았다) 오류로 마무리된다.
+      expect(elapsedMs).toBeGreaterThanOrEqual(9000);
+      expect(elapsedMs).toBeLessThan(20000);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "archive_lock_busy",
+        hint: "다른 정리 작업이 진행 중이에요. 잠시 후 다시 시도해 주세요.",
+      });
+      // 저장되지 않았다 — 트랜잭션 전체가 롤백된다.
+      const afterTimeout = await dbm.db
+        .select({ id: dbm.schema.prompts.id })
+        .from(dbm.schema.prompts)
+        .where(eq(dbm.schema.prompts.workspaceId, ws.id));
+      expect(afterTimeout).toHaveLength(0);
+
+      // 잠금이 풀린 뒤 다시 보내면 정상 저장된다.
+      const res2 = await postOnce();
+      expect(res2.status).toBe(201);
+      const body2 = await res2.json();
+      expect(body2.prompt.text).toBe("가짜 잠금 대기 질문");
+      expect(body2.prompt.active).toBe(true);
+      const afterRetry = await dbm.db
+        .select({ text: dbm.schema.prompts.text })
+        .from(dbm.schema.prompts)
+        .where(eq(dbm.schema.prompts.workspaceId, ws.id));
+      expect(afterRetry).toEqual([{ text: "가짜 잠금 대기 질문" }]);
+    },
+    25_000,
+  );
+
+  it("12 · PATCH 도 같은 잠금 대기 한도를 적용받는다 — 짧게 쥔 잠금은 기다렸다가 정상 처리된다(RV1 배선 확인)", async () => {
+    const ws = await makeWorkspace("12");
+    const p = await addPrompt(ws.id, "가짜 패치 대기 질문", false);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let markLocked!: () => void;
+    const locked = new Promise<void>((resolve) => (markLocked = resolve));
+
+    // 연결 1 — 짧게(10초 한도에 한참 못 미치게) 잠금만 쥔다.
+    const t1 = inTx(async (tx) => {
+      await A.lockResponseArchive(tx, ws.id);
+      markLocked();
+      await gate;
+    });
+    await locked;
+
+    getSessionMock.mockResolvedValue(USER);
+    const { PATCH } = await import("@/app/api/prompts/[id]/route");
+    let done = false;
+    const t2 = PATCH(
+      new NextRequest(`http://localhost/api/prompts/${p.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ active: true }),
+      }),
+      { params: Promise.resolve({ id: p.id }) },
+    ).then((res) => {
+      done = true;
+      return res;
+    });
+    await sleep(300);
+    const waited = !done;
+    release();
+    await t1;
+    const res = await t2;
+
+    expect(waited, "PATCH 이 잠금을 기다리지 않았다").toBe(true);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.prompt.active).toBe(true);
+  });
+
   it("재추가 자동 복원 — 질문 추가 API 가 보관 응답을 되돌리고 건수를 알린다(목록에 다시 들어온다)", async () => {
     const ws = await makeWorkspace("readd");
     await addPrompt(ws.id, "가짜 재추가 질문", false);

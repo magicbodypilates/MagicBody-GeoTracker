@@ -22,7 +22,12 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { and, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
-import { lockResponseArchive, restoreByTexts } from "@/lib/server/run-archive";
+import {
+  applyPromptLockTimeout,
+  isLockTimeoutError,
+  lockResponseArchive,
+  restoreByTexts,
+} from "@/lib/server/run-archive";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +77,7 @@ export async function PATCH(
     // 보관 응답을 되돌린다 — 질문 목록에 있는 질문의 응답은 보관 상태가 아니어야 한다(I1 · 계획
     // geotracker-response-archive-260924 §S8). 잠금은 같은 문구의 보관·영구 삭제와 겹치지 않게 한다.
     const { updated, restoredRuns } = await db.transaction(async (tx) => {
+      await applyPromptLockTimeout(tx);
       await lockResponseArchive(tx, target.workspaceId);
       const [row] = await tx
         .update(schema.prompts)
@@ -87,6 +93,15 @@ export async function PATCH(
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });
+    }
+    // 워크스페이스 잠금 대기 한도(applyPromptLockTimeout) 초과 — POST /api/workspaces/:id/prompts
+    // 와 같은 이유·같은 응답(결함 대장 RV1).
+    if (isLockTimeoutError(err)) {
+      console.warn("[/api/prompts/:id] PATCH 잠금 대기 한도 초과 — 재시도 유도");
+      return NextResponse.json(
+        { error: "archive_lock_busy", hint: "다른 정리 작업이 진행 중이에요. 잠시 후 다시 시도해 주세요." },
+        { status: 409 },
+      );
     }
     // 응답 본문엔 SQL 원문을 절대 싣지 않는다 — drizzle-orm 0.45 는 DB 오류를
     // DrizzleQueryError("Failed query: ...")로 감싸 err.message 에 쿼리 전문이 그대로

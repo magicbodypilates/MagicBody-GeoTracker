@@ -203,6 +203,32 @@ export async function applyArchiveReadTimeout(tx: ArchiveDb): Promise<void> {
   await tx.execute(sql.raw("set local statement_timeout = '10s'"));
 }
 
+/**
+ * 질문 추가·수정 트랜잭션의 잠금 대기 한도 — 보관 동작(applyArchiveTxTimeouts)과 값을 다르게 둔다.
+ * 일괄 보관(archive_all_untracked)은 문구 상한이 없어(F2) statement_timeout 30초에 가깝게 워크스페이스
+ * 잠금을 쥘 수 있다. 여기에 같은 5초를 걸면 정상적으로 오래 도는 일괄 보관 중에는 질문 추가가 거의
+ * 매번 실패한다(구현 보고서 §3-7 이 원래 타임아웃을 아예 안 건 이유). 10초로 넉넉히 둬 그런 정상
+ * 상황은 대체로 통과시키고, 그보다 오래 막힌 진짜 이상 상황만 오류로 끝낸다(결함 대장 RV1).
+ * statement_timeout 은 걸지 않는다 — 이 두 라우트는 항상 문구 하나만 다루는 가벼운 단일 행 갱신이라
+ * 잠금을 잡은 뒤의 실행 자체가 오래 걸릴 일이 없다(느려질 수 있는 건 잠금 대기뿐).
+ */
+export async function applyPromptLockTimeout(tx: ArchiveDb): Promise<void> {
+  await tx.execute(sql.raw("set local lock_timeout = '10s'"));
+}
+
+/**
+ * postgres 잠금 대기 한도 초과(55P03 lock_not_available)인지 — applyPromptLockTimeout 이 건 한도
+ * 안에 워크스페이스 잠금을 못 얻으면 이 코드로 실패한다. drizzle-orm 0.45 는 DB 오류를
+ * DrizzleQueryError 로 감싸 원래 postgres.js 오류(code 포함)를 err.cause 에 남긴다 — 다른
+ * 핸들러들의 SQL 원문 비노출 처리(F1)와 같은 전제.
+ */
+export function isLockTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const cause = err.cause;
+  if (!cause || typeof cause !== "object" || !("code" in cause)) return false;
+  return (cause as { code?: unknown }).code === "55P03";
+}
+
 /** DB 의 현재 트랜잭션 시각(마이크로초 UTC 문자열) — 일괄 보관 기준 시각으로 화면에 준다. */
 export async function readDbNow(ex: ArchiveDb): Promise<string> {
   const rows = (await ex.execute(sql`select ${utcText(sql`now()`)} as now`)) as unknown as { now: string }[];

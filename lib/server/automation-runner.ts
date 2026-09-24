@@ -802,17 +802,26 @@ export function computeDailyRollupWindow(now: Date): { dateStr: string; fromUtc:
  * now 를 받는 이유 — 엔진이 쓰는 기준 시각과 같은 날짜를 집계하고, 테스트가 날짜를 고정한다.
  *
  * daily_stats 는 수집 당시 집계다. 보관·영구 삭제를 반영하지 않는다. 화면에서 읽게 되면 runs 에서 다시 집계할 것.
+ *
+ * ⚠️ 2026-09-25 결함 수정 — daily_stats 의 기본키는 (date, workspace_id, provider, prompt_id) 라
+ * prompt_id 가 Postgres 기본키 제약으로 실제로는 NOT NULL(drizzle/schema.ts 의 컬럼 정의엔 `.notNull()`이
+ * 없어 겉으론 nullable 처럼 보이지만, 기본키에 들어간 컬럼은 항상 NOT NULL 이다). 옛 구현은 이 컬럼에
+ * 항상 null 을 넣어 모든 저장이 "null value in column prompt_id … violates not-null constraint" 로
+ * 실패했다(운영 daily_stats 0행). 프롬프트별로 실제 집계하도록 고친다.
  */
 export async function runDailyRollup(now: Date = new Date()): Promise<{ date: string; rows: number }> {
   // 어제(KST) 00:00 ~ 오늘(KST) 00:00 구간
   const { dateStr, fromUtc, toUtc } = computeDailyRollupWindow(now);
 
-  // Drizzle 로 집계 — groupBy (workspace, provider)
-  // 주의: prompt_id 는 runs 테이블에 없고 prompt_text 만 있음. prompts 테이블과 LEFT JOIN 으로 매칭.
+  // Drizzle 로 집계 — groupBy (workspace, provider, prompt_id)
+  // prompt_id 는 runs 테이블에 없고 prompt_text 만 있어 prompts 테이블과 INNER JOIN 으로 매칭한다.
+  // LEFT JOIN 이 아니라 INNER JOIN 인 이유 — prompt_id 는 daily_stats 기본키의 일부라 NULL 을 넣을
+  // 수 없다. 매칭되는 프롬프트가 없는 행(질문을 지운 뒤 남은 옛 응답)은 집계에서 그냥 뺀다.
   const rows = await db
     .select({
       workspaceId: schema.runs.workspaceId,
       provider: schema.runs.provider,
+      promptId: schema.prompts.id,
       sampleCount: sql<number>`count(*)::int`,
       avgVisibility: sql<number>`avg(${schema.runs.visibilityScore})::numeric(5,2)`,
       mentionRate: sql<number>`(count(*) filter (where array_length(${schema.runs.brandMentions}, 1) > 0))::numeric / count(*)::numeric`,
@@ -820,6 +829,13 @@ export async function runDailyRollup(now: Date = new Date()): Promise<{ date: st
       citedRate: sql<number>`(count(*) filter (where array_length(${schema.runs.citedBrandDomains}, 1) > 0))::numeric / count(*)::numeric`,
     })
     .from(schema.runs)
+    .innerJoin(
+      schema.prompts,
+      and(
+        eq(schema.prompts.workspaceId, schema.runs.workspaceId),
+        eq(schema.prompts.text, schema.runs.promptText),
+      ),
+    )
     .where(
       and(
         sql`${schema.runs.createdAt} >= ${fromUtc.toISOString()}::timestamptz`,
@@ -831,7 +847,7 @@ export async function runDailyRollup(now: Date = new Date()): Promise<{ date: st
         eq(schema.runs.isAuto, true),
       ),
     )
-    .groupBy(schema.runs.workspaceId, schema.runs.provider);
+    .groupBy(schema.runs.workspaceId, schema.runs.provider, schema.prompts.id);
 
   for (const r of rows) {
     await db
@@ -840,7 +856,7 @@ export async function runDailyRollup(now: Date = new Date()): Promise<{ date: st
         date: dateStr,
         workspaceId: r.workspaceId,
         provider: r.provider,
-        promptId: null,
+        promptId: r.promptId,
         sampleCount: r.sampleCount,
         avgVisibility: String(r.avgVisibility) as unknown as string,
         mentionRate: String(r.mentionRate) as unknown as string,

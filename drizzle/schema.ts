@@ -273,7 +273,12 @@ export const dailyStats = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     provider: text("provider").notNull(),
-    /** NULL 이면 프로바이더 단위 전체 집계, 아니면 프롬프트별 */
+    /**
+     * 프롬프트별 집계 대상. 기본키(date, workspace_id, provider, prompt_id)의 일부라
+     * Postgres 가 NOT NULL 을 강제한다(onDelete: "set null" 은 여기 도달할 일이 없다 —
+     * 프롬프트가 지워지면 그 prompt_id 를 가리키던 daily_stats 행도 없기 때문. 매칭되는
+     * 프롬프트가 없는 runs 는 애초에 집계에서 제외된다 — automation-runner.ts runDailyRollup 참고).
+     */
     promptId: uuid("prompt_id").references(() => prompts.id, {
       onDelete: "set null",
     }),

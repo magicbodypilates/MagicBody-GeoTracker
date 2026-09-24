@@ -153,26 +153,36 @@ export async function DELETE(
       if (adminGuard) return adminGuard;
     }
 
+    // 4) cascade(옵션) + daily_stats 정리 + prompt 삭제를 한 트랜잭션으로 — daily_stats.prompt_id
+    //    는 기본키(date, workspace_id, provider, prompt_id)의 일부라 Postgres 가 NOT NULL 을
+    //    강제한다. FK 의 ON DELETE SET NULL 이 그 값을 null 로 바꾸려 시도하면 제약 위반으로
+    //    프롬프트 삭제 자체가 실패한다(daily rollup 결함 수정 이후 daily_stats 에 실제 행이
+    //    쌓이기 시작하면서 새로 드러날 수 있는 경로). 프롬프트를 지우기 전에 그 프롬프트를
+    //    가리키던 하루 집계 행을 먼저 지운다.
     let runsDeleted = 0;
-    if (cascade) {
-      // 같은 prompt_text 의 runs 모두 삭제 (workspace 범위 한정 — 다른 워크스페이스 영향 없음)
-      const runsResult = await db
-        .delete(schema.runs)
-        .where(
-          and(
-            eq(schema.runs.workspaceId, target.workspaceId),
-            eq(schema.runs.promptText, target.text),
-          ),
-        )
-        .returning({ id: schema.runs.id });
-      runsDeleted = runsResult.length;
-    }
+    const deleted = await db.transaction(async (tx) => {
+      if (cascade) {
+        // 같은 prompt_text 의 runs 모두 삭제 (workspace 범위 한정 — 다른 워크스페이스 영향 없음)
+        const runsResult = await tx
+          .delete(schema.runs)
+          .where(
+            and(
+              eq(schema.runs.workspaceId, target.workspaceId),
+              eq(schema.runs.promptText, target.text),
+            ),
+          )
+          .returning({ id: schema.runs.id });
+        runsDeleted = runsResult.length;
+      }
 
-    // 4) prompt 자체 삭제
-    const [deleted] = await db
-      .delete(schema.prompts)
-      .where(eq(schema.prompts.id, id))
-      .returning();
+      await tx.delete(schema.dailyStats).where(eq(schema.dailyStats.promptId, id));
+
+      const [row] = await tx
+        .delete(schema.prompts)
+        .where(eq(schema.prompts.id, id))
+        .returning();
+      return row;
+    });
     if (!deleted) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
     return NextResponse.json({ ok: true, runsDeleted });

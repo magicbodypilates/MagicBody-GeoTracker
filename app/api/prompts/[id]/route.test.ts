@@ -48,6 +48,11 @@ const H = vi.hoisted(() => {
   const schema = {
     prompts: mkTable("prompts", ["id", "workspaceId", "text", "tags", "active"]),
     runs: mkTable("runs", ["id", "workspaceId", "promptText"]),
+    // DELETE 가 프롬프트를 지우기 전 daily_stats 를 함께 지운다(promptId 가 기본키의 일부라
+    // NOT NULL — 프롬프트 삭제 시 FK 의 ON DELETE SET NULL 이 그대로 걸리면 제약 위반이 난다).
+    // 이 시험에는 daily_stats 시드가 없어 실제 행 삭제는 검증하지 않고, 컬럼 참조가 죽지
+    // 않게 최소 모양만 갖춘다.
+    dailyStats: mkTable("dailyStats", ["date", "workspaceId", "provider", "promptId"]),
   };
 
   const tableOf = (t: { __table: string }) =>

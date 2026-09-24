@@ -1576,14 +1576,26 @@ export async function runDispatchPass(now: Date = new Date(), deps?: EngineDeps)
  * 거두기 줄기
  * ============================================================ */
 
-/** 0. 하루 집계 — KST 날짜가 바뀐 뒤 1회. 실패하면 다음 줄기에서 다시(날짜를 기록하지 않는다). */
+/**
+ * 0. 하루 집계 — KST 날짜가 바뀐 뒤 1회.
+ *
+ * 실패해도 "오늘 시도했다"는 기록을 먼저 남기고 나서 오류를 다시 던진다 — 틱은 1분마다
+ * 도니, 기록 없이 실패만 하면 다음 틱이 같은 실패를 또 반복해 [cron/tick] 오류 로그가
+ * 매분 쌓인다(2026-09-25 결함 수정). 하루 1회 시도 원칙은 유지 — 다음 날 date 가 바뀌면
+ * 다시 시도한다.
+ */
 async function maybeRunDailyRollup(pass: PassCtx, stats: HarvestStats): Promise<void> {
   const today = kstDateString(pass.now);
-  const st = await getStateValue<{ date?: string }>("daily_rollup");
+  const st = await getStateValue<{ date?: string; error?: string }>("daily_rollup");
   if (st?.date === today) return;
-  const r = await runDailyRollup(pass.now);
-  await setStateValue("daily_rollup", { date: today, rolledUp: r.date, rows: r.rows }, pass.now);
-  stats.dailyRollup = r;
+  try {
+    const r = await runDailyRollup(pass.now);
+    await setStateValue("daily_rollup", { date: today, rolledUp: r.date, rows: r.rows }, pass.now);
+    stats.dailyRollup = r;
+  } catch (err) {
+    await setStateValue("daily_rollup", { date: today, error: errorMessage(err) }, pass.now);
+    throw err; // runStep 이 잡아 pass.errors 에 담는다 — 오늘은 이걸로 끝, 로그도 한 번만.
+  }
 }
 
 type ReadyEntry = { item: CollectionItem; priority: number; progress: { records?: number; errors?: number } };

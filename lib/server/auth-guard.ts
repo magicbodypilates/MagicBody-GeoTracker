@@ -75,14 +75,18 @@ export async function assertWorkspaceAccess(
   return null;
 }
 
-/** 최고관리자 전용 작업 (삭제 · 초기화 등). 일반관리자 접근 시 403. */
+/**
+ * 삭제 권한(kind=admin) 전용 작업 (삭제 · 초기화 등). 그 외 세션은 403.
+ * 안내 문구는 중립으로 둔다 — 일반관리자에게 보이는 응답에 상위 권한의 존재·명칭을 드러내지 않는다.
+ * DB 를 보지 않으므로 라우트는 이 확인을 DB 접근 **전에** 둘 수 있다.
+ */
 export function requireAdmin(session: SessionInfo): NextResponse | null {
   if (!session) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   if (session.kind !== "admin") {
     return NextResponse.json(
-      { error: "forbidden", hint: "최고관리자 권한 필요" },
+      { error: "forbidden", hint: "이 작업을 할 권한이 없습니다" },
       { status: 403 },
     );
   }

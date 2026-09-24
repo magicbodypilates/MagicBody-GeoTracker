@@ -14,7 +14,7 @@ import { SCORE_SETS, type ScoreSetId } from "@/lib/server/visibility-score-sets"
 /** 운영/비운영 워크스페이스 구분 — UUID 를 코드에 두지 않고 is_production 으로 판정한다. */
 export type WorkspaceScope = "production" | "non-production";
 
-export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15" | "v16";
+export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15" | "v16" | "v17";
 
 export type RescoreJob = {
   /** 대상 창 시작(inclusive · timestamptz 비교) */
@@ -58,6 +58,10 @@ export type RescoreJob = {
    *
    * **선택 필드로 둔다** — v11~v15 는 이 필드 자체를 생략해(undefined) jobHash 가 흔들리지
    * 않는다(applyOwnedCitationJudgment 와 동일한 이유). v16 만 명시적으로 true.
+   *
+   * v17(2026-09-24 언론 배점 인상)도 같은 이유로 true 를 쓴다 — v17 의 소스 버전(16)도
+   * 이미 저장된 증거 컬럼을 그대로 읽는 편이 안전하다(v16 과 동일한 위험 ⓔ 회피 논리).
+   * v17 은 신설 잡이라 이 필드를 켜도 다른 잡의 jobHash 가 흔들릴 위험 자체가 없다.
    */
   reproFromStoredEvidence?: boolean;
 };
@@ -207,6 +211,33 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     workspaceScope: "production",
     reproFromStoredEvidence: true,
   },
+  /**
+   * 2026-09-24 언론 게재 배점 인상(사장님 지시: 35 → 45. 블로그·소셜 추천은 그대로 35).
+   * v16 이 이미 16 으로 올려 둔 행(대상 창은 v15·v16 과 완전히 동일 — 이미 버전 16인 행은
+   * 정의상 그 창 안에 있다)을 v17a 로 다시 계산한다. v16a·버전 16 은 그대로 둔다.
+   *
+   * reproFromStoredEvidence: true — v16 과 같은 이유로 reproBase·targetBase 둘 다 저장된
+   * 증거 컬럼에서 읽는다(deriveStoredEvidenceRowInputs 재사용 — v17 소스 행은 이미 v16
+   * 잡이 새 판정으로 채점해 뒀으므로 옛 판정(deriveRowInputs)도 citations 재판정
+   * (deriveNewJudgmentRowInputs)도 맞지 않는다).
+   *
+   * diagnosticSets 가 빈 목록인 이유는 v14~v16 과 같다 — 소스 버전 16 을 만든 경로는 v16
+   * 잡 하나뿐이라 선언 세트(v16a)가 곧 유일한 후보다.
+   */
+  v17: {
+    // v15·v16 과 완전히 같은 창 — 이미 버전 16으로 올라간 행은 전부 이 창 안에 있다.
+    fromUtc: "2026-09-20T15:00:00.000Z",
+    toUtc: null,
+    providers: null,
+    sourceVersions: [16],
+    diagnosticSets: [],
+    targetVersion: 17,
+    targetSet: "v17a",
+    informationalOnly: false,
+    autoOnly: true,
+    workspaceScope: "production",
+    reproFromStoredEvidence: true,
+  },
 };
 
 export const RESCORE_JOB_IDS = Object.keys(RESCORE_JOBS) as RescoreJobId[];
@@ -230,6 +261,7 @@ export function isRescoreJobId(value: unknown): value is RescoreJobId {
  * 순간 jobHash 가 "재현 세트가 없는 소스 버전" 예외를 던져 잡 목록을 읽는 모든 경로(meta·
  * preflight·sweep)가 깨진다. 등록해도 예외를 피하면 전 행이 unmapped-version 이 된다.
  * 같은 이유로 15 도 등록한다 — v16(sourceVersions: [15])이 같은 D0-b 함정에 걸린다.
+ * 같은 이유로 16 도 등록한다(2026-09-24) — v17(sourceVersions: [16])이 같은 함정에 걸린다.
  */
 export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   8: "legacy8",
@@ -237,6 +269,7 @@ export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   12: "v12b",
   14: "v14a",
   15: "v15a",
+  16: "v16a",
 };
 
 export function reproSetForVersion(version: number): ScoreSetId | null {

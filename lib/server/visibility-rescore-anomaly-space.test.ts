@@ -272,7 +272,7 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
   });
 
   it("모든 잡의 소스 버전이 전부 재현 세트에 매핑돼 있다(매핑 누락 시 전량 skip 이 된다)", () => {
-    for (const jobId of ["v11", "v12", "v12t", "v13", "v14", "v15", "v16"] as const) {
+    for (const jobId of ["v11", "v12", "v12t", "v13", "v14", "v15", "v16", "v17"] as const) {
       for (const version of RESCORE_JOBS[jobId].sourceVersions) {
         expect(REPRO_SET_BY_VERSION[version]).toBeDefined();
       }
@@ -352,5 +352,175 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
     expect(declared).toBe(0); // v15a — 언론 배점 없음
     expect(target).toBe(35); // v16a — 언론 배점 35
     expect(target).toBeGreaterThanOrEqual(declared);
+  });
+
+  /**
+   * ⛔⛔ 2026-09-24 언론 게재 배점 인상(35→45) — 착수 전 검증 의무 항목.
+   *
+   * v17 잡은 v16 과 달리 **선언 세트 자체가 cap 에 걸리는 v16a** 다(SCORE_SETS 의
+   * "v16a·v17a 는 예외다" 문단 참조 — 브랜드 분기에서 긍정+적극추천+언론(또는 소셜)은
+   * 34+48+35=117 로 100 에 cap 된다). v16 잡(선언 세트 v15a)은 이 문제가 없었다 — v15a 는
+   * 어떤 분기에서도 cap 에 안 걸린다. v17 이 처음으로 "cap 에 걸리는 세트를 재현(repro)
+   * 대상으로 쓰는" 잡이다.
+   *
+   * 이 테스트가 실제로 증명하는 것 — cap 이 저장 점수(=100)를 여러 다른 원인(예: 34+48+35
+   * 도, 다른 조합의 34+48+45+…도)으로 뭉갤 수 있다면 resolveByReproduction 이 후보를
+   * 잘못 넓혀 targetScore 가 갈리는 ambiguous-target 이 나야 한다. 아래 전수 루프가 단 한
+   * 건도 그런 사례 없이 항상 resolved 로 끝난다는 것을 실제로 돌려서 확인한다(이론적
+   * 근거는 SCORE_SETS 상단 문단 — isStronglyRecommended=false 의 합은 어떤 신호
+   * 조합에서도 100 미만이라 capped 100 과 혼동되지 않고, isTopRanked 는 브랜드 분기
+   * 점수에 아예 관여하지 않는다).
+   */
+  it("v17 잡 조합(v16a → v17a · 진단 없음)은 언론·소셜 신호 4조합 모두에서 입력 전수 resolved — v16a 의 cap-hit 가 재현을 모호하게 만들지 않는다", () => {
+    const job = RESCORE_JOBS.v17;
+    expect(job.targetSet).toBe("v17a");
+    expect(job.sourceVersions).toEqual([16]);
+    let checked = 0;
+    let capHitObserved = 0;
+    const pressSocialCombos: Array<{ hasPressCitation: boolean; hasSocialCitation: boolean }> = [
+      { hasPressCitation: false, hasSocialCitation: false },
+      { hasPressCitation: true, hasSocialCitation: false },
+      { hasPressCitation: false, hasSocialCitation: true },
+      { hasPressCitation: true, hasSocialCitation: true },
+    ];
+    for (const rawBase of inputSpace()) {
+      for (const signal of pressSocialCombos) {
+        const base: BaseVisibilityInputs = { ...rawBase, ...signal };
+        for (const flags of RANKING_COMBOS) {
+          const storedScore = calcVisibilityWithSet({ ...base, ...flags }, SCORE_SETS.v16a);
+          if (storedScore === 100 && base.isBrandedQuery) capHitObserved += 1;
+          const res = resolveWithDiagnostics({
+            reproBase: base,
+            targetBase: base,
+            storedScore,
+            declaredSetId: "v16a",
+            diagnosticSetIds: job.diagnosticSets,
+            targetSetId: job.targetSet,
+          });
+          if (res.status !== "resolved") {
+            throw new Error(
+              `${res.status} 발생 — declared=v16a target=v17a stored=${storedScore} signal=${JSON.stringify(signal)} base=${JSON.stringify(base)}`,
+            );
+          }
+          expect(res.targetScore).not.toBeNull();
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(4000);
+    // cap-hit(100) 조합이 실제로 이 입력 공간에 존재한다는 것도 함께 확인한다 — 그렇지
+    // 않으면 위 루프가 "cap 에 안 걸리는 쉬운 케이스만 통과했다"는 반증이 안 된다.
+    expect(capHitObserved).toBeGreaterThan(0);
+  });
+
+  /**
+   * 위 전수 테스트가 고정하는 성질을 가장 좁은 구체 사례로도 직접 고정한다 — 브랜드
+   * 질의·긍정·적극추천·언론 인용 조합(34+48+35=117→100)이 v17 재산출에서 실제로 어떻게
+   * 풀리는지 한눈에 보이게 한다.
+   */
+  it("v17 — 브랜드 분기 cap 충돌(v16a 34+48+35=117→100) 저장 점수도 no-candidate·ambiguous-target 없이 100(min(127,100))으로 해소된다", () => {
+    const base: BaseVisibilityInputs = {
+      mentions: 1,
+      firstPos: 0,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "positive",
+      isBrandedQuery: true,
+      hasPressCitation: true,
+      hasSocialCitation: false,
+    };
+    // 저장 시점(v16 잡)의 실제 계산 — 긍정(34)+적극추천(48)+언론(35) = 117 → cap 100.
+    const storedScore = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: true },
+      SCORE_SETS.v16a,
+    );
+    expect(storedScore).toBe(100);
+
+    // isStronglyRecommended=false 는 같은 신호에서도 100 에 닿지 못한다(34+35=69) — 그래서
+    // 위 100 을 재현하는 후보가 strongRec=true 하나로만 좁혀진다(isTopRanked 는 무관).
+    const falseRepro = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: false },
+      SCORE_SETS.v16a,
+    );
+    expect(falseRepro).toBe(69);
+    expect(falseRepro).not.toBe(storedScore);
+
+    const res = resolveWithDiagnostics({
+      reproBase: base,
+      targetBase: base,
+      storedScore,
+      declaredSetId: "v16a",
+      diagnosticSetIds: RESCORE_JOBS.v17.diagnosticSets,
+      targetSetId: RESCORE_JOBS.v17.targetSet,
+    });
+    expect(res.status).toBe("resolved");
+    // v17a 목표: 34+48+45 = 127 → cap 100 (언론 배점이 45 로 올라도 여전히 cap 에 걸린다).
+    expect(res.targetScore).toBe(100);
+    expect(res.candidateCount).toBe(2); // isStronglyRecommended=true × isTopRanked(false/true) 2개.
+  });
+
+  it("v17 — 소셜(블로그·소셜 추천)은 배점이 그대로(35)라 언론과 달리 cap 충돌 조합이라도 target 이 declared 와 같다", () => {
+    const base: BaseVisibilityInputs = {
+      mentions: 1,
+      firstPos: 0,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "positive",
+      isBrandedQuery: true,
+      hasPressCitation: false,
+      hasSocialCitation: true,
+    };
+    const storedScore = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: true },
+      SCORE_SETS.v16a,
+    );
+    expect(storedScore).toBe(100); // 34+48+35(소셜) = 117 → cap 100, 언론과 동일 구조.
+
+    const res = resolveWithDiagnostics({
+      reproBase: base,
+      targetBase: base,
+      storedScore,
+      declaredSetId: "v16a",
+      diagnosticSetIds: RESCORE_JOBS.v17.diagnosticSets,
+      targetSetId: RESCORE_JOBS.v17.targetSet,
+    });
+    expect(res.status).toBe("resolved");
+    // v17a 의 브랜드 소셜 배점은 v16a 와 같은 35 다 — 34+48+35 = 117 → 여전히 cap 100.
+    expect(res.targetScore).toBe(100);
+  });
+
+  it("v17 — 언급 0 분기: 언론이 소셜을 앞지른다(45 > 35, v16a 에서는 35=35 로 동률이었다)", () => {
+    const base: BaseVisibilityInputs = {
+      mentions: 0,
+      firstPos: -1,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "not-mentioned",
+      isBrandedQuery: false,
+      hasPressCitation: true,
+      hasSocialCitation: false,
+    };
+    const declaredV16a = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: false },
+      SCORE_SETS.v16a,
+    );
+    const targetV17a = calcVisibilityWithSet(
+      { ...base, isTopRanked: false, isStronglyRecommended: false },
+      SCORE_SETS.v17a,
+    );
+    expect(declaredV16a).toBe(35);
+    expect(targetV17a).toBe(45);
+    expect(targetV17a).toBeGreaterThan(declaredV16a);
+
+    const socialBase: BaseVisibilityInputs = {
+      ...base,
+      hasPressCitation: false,
+      hasSocialCitation: true,
+    };
+    const socialTarget = calcVisibilityWithSet(
+      { ...socialBase, isTopRanked: false, isStronglyRecommended: false },
+      SCORE_SETS.v17a,
+    );
+    expect(socialTarget).toBe(35); // 블로그·소셜 추천은 그대로 35 — 언론(45)보다 낮아졌다(우선순위는 여전히 언론 동일값이 아니라 else-if 순서로 결정).
   });
 });

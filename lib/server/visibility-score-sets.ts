@@ -20,7 +20,8 @@ export type ScoreSetId =
   | "full83"
   | "v14a"
   | "v15a"
-  | "v16a";
+  | "v16a"
+  | "v17a";
 
 export type Sentiment = "positive" | "neutral" | "negative" | "not-mentioned";
 
@@ -104,17 +105,30 @@ export type ScoreSet = {
  *             소셜 4개 필드에 전부 35 를 채운 유일한 세트다. v15a·버전 15 로 이미 저장된
  *             과거 구간은 그대로 두고, 재산출 잡 v16(소스 버전 15 → 목표 16)이 이 값으로
  *             다시 계산한다 — v15a 는 건드리지 않는다.
+ *   v17a    — 2026-09-24 언론 게재 배점 인상(사장님 지시). 기본 14개 필드 + 블로그·소셜
+ *             2개 필드(genNoMentionSocial·brandSocial=35)는 v16a 를 그대로 복제한다.
+ *             언론 2개 필드(genNoMentionPress·brandPress)만 35→45 로 올린다 — 블로그·소셜
+ *             추천은 사장님이 "그대로 두라"고 명시했다. v16a·버전 16 으로 이미 저장된 구간은
+ *             그대로 두고, 재산출 잡 v17(소스 버전 16 → 목표 17)이 이 값으로 다시
+ *             계산한다 — v16a 는 건드리지 않는다.
  *
- * 분기별 합계는 v16a 를 제외한 모든 세트에서 100 미만이라 cap 이 정보를 잘라 역산
- * 불변식을 깨지 않는다(아래 "어느 세트도 cap 에 걸리지 않는다" 테스트가 v16a 를 제외한
- * 나머지에서 이 성질을 고정한다). ⚠️ v16a 는 예외다(2026-09-24 결함 수정으로 명시) —
- * 브랜드 분기는 sentiment·추천이 URL/인용/언론/소셜 신호와 더해지는 구조라(else-if 가
- * 아니다) 긍정(34)+적극추천(48)+언론 또는 소셜(35)을 함께 만족하면 117 로 cap(100)에
+ * 분기별 합계는 v16a·v17a 를 제외한 모든 세트에서 100 미만이라 cap 이 정보를 잘라 역산
+ * 불변식을 깨지 않는다(아래 "어느 세트도 cap 에 걸리지 않는다" 테스트가 이 둘을 제외한
+ * 나머지에서 이 성질을 고정한다). ⚠️ v16a·v17a 는 예외다(2026-09-24 결함 수정으로 v16a
+ * 명시, 2026-09-24 배점 인상으로 v17a 추가) — 브랜드 분기는 sentiment·추천이 URL/인용/
+ * 언론/소셜 신호와 더해지는 구조라(else-if 가 아니다) 긍정(34)+적극추천(48)+언론 또는
+ * 소셜을 함께 만족하면 v16a 는 117(=34+48+35), v17a 는 127(=34+48+45)로 둘 다 cap(100)에
  * 걸린다(visibility-score-sets.test.ts 의 "브랜드 질의 — 긍정+적극추천+언론(또는 소셜)은
- * 100 을 넘어 cap 에 걸린다" 테스트가 이 조합을 고정한다). 지금은 안전하다 — v16a 는
- * targetSet 으로만 쓰이고 REPRO_SET_BY_VERSION(visibility-rescore-jobs.ts)에 소스
- * (declaredSetId)로 등록된 적이 없어 역산이 이 세트를 재현 대상으로 삼지 않는다. v16a 가
- * 앞으로 어떤 잡의 재현 대상(소스 세트)이 되는 순간 이 예외는 실제 문제가 된다.
+ * 100 을 넘어 cap 에 걸린다" 테스트가 이 조합을 두 세트 모두에서 고정한다).
+ *
+ * v16a 는 이제 REPRO_SET_BY_VERSION(visibility-rescore-jobs.ts)에 소스(declaredSetId,
+ * 버전 16)로 등록돼 있다 — v17 잡이 그 재현 대상이다. 위 cap-hit 이 재현 모호성
+ * (ambiguous-target)을 만드는지는 이론이 아니라 전수 테스트로 확인했다
+ * (visibility-rescore-anomaly-space.test.ts "v17 잡 조합") — 결론은 안전: 브랜드 분기에서
+ * cap 에 걸리는 조합은 오직 isStronglyRecommended=true 뿐이고(같은 신호에서
+ * isStronglyRecommended=false 의 합은 항상 100 미만이라 같은 저장 점수를 재현할 수 없다),
+ * isTopRanked 는 애초에 브랜드 분기 점수에 관여하지 않는다 — 그래서 후보가 좁혀져도 목표
+ * 점수가 갈리지 않는다.
  *
  * genNoMentionPress·brandPress 는 어떤 세트에도 명시하지
  * 않는다 — calcVisibilityWithSet 이 `?? 0` 으로 기본값을 채우므로 "이번 판은 전 세트 0"과
@@ -256,6 +270,30 @@ export const SCORE_SETS: Record<ScoreSetId, ScoreSet> = {
     // 쌓이면 재조정한다.
     genNoMentionPress: 35,
     brandPress: 35,
+    genNoMentionSocial: 35,
+    brandSocial: 35,
+  },
+  v17a: {
+    // 14개 기본 필드는 v16a(= v15a = v14a)와 완전히 동일 — 이번 판도 언론·블로그·소셜을
+    // 뺀 배점 구조는 건드리지 않는다.
+    brandPositive: 34,
+    brandStrong: 48,
+    brandBodyUrl: 15,
+    brandCitation: 8,
+    genNoMentionBodyUrl: 55,
+    genNoMentionCitation: 45,
+    genBase: 66,
+    genFirstPos: 9,
+    genMidPos: 7,
+    genMentions3: 7,
+    genMentions2: 3,
+    genPositive: 9,
+    genNeutral: 8,
+    genTopRanked: 8,
+    // 언론 게재 배점 인상(2026-09-24 사장님 지시) — 35 → 45. 블로그·소셜 추천은 "그대로
+    // 두라"는 명시적 지시라 v16a 값(35)을 그대로 복제한다.
+    genNoMentionPress: 45,
+    brandPress: 45,
     genNoMentionSocial: 35,
     brandSocial: 35,
   },

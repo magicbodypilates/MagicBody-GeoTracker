@@ -32,12 +32,22 @@ function inWindow(iso: string, jobId: RescoreJobId): boolean {
 }
 
 describe("잡 id 는 닫힌 집합", () => {
-  it("등록된 일곱 잡만 통과(2026-09-23 v16 추가)", () => {
-    expect(RESCORE_JOB_IDS.sort()).toEqual(["v11", "v12", "v12t", "v13", "v14", "v15", "v16"]);
+  it("등록된 여덟 잡만 통과(2026-09-24 v17 추가)", () => {
+    expect(RESCORE_JOB_IDS.sort()).toEqual([
+      "v11",
+      "v12",
+      "v12t",
+      "v13",
+      "v14",
+      "v15",
+      "v16",
+      "v17",
+    ]);
     for (const id of RESCORE_JOB_IDS) expect(isRescoreJobId(id)).toBe(true);
     expect(isRescoreJobId("v15")).toBe(true);
     expect(isRescoreJobId("v16")).toBe(true);
-    expect(isRescoreJobId("v17")).toBe(false);
+    expect(isRescoreJobId("v17")).toBe(true);
+    expect(isRescoreJobId("v18")).toBe(false);
     expect(isRescoreJobId("v14t")).toBe(false);
     expect(isRescoreJobId("v13t")).toBe(false);
     expect(isRescoreJobId("v15t")).toBe(false);
@@ -81,21 +91,24 @@ describe("잡 정의 불변식", () => {
     }
   });
 
-  it("REPRO_SET_BY_VERSION 은 8·10·12·14·15 를 매핑한다(11·13·112 는 재산출 대상 밖) — D0-b", () => {
+  it("REPRO_SET_BY_VERSION 은 8·10·12·14·15·16 을 매핑한다(11·13·112 는 재산출 대상 밖) — D0-b", () => {
     expect(REPRO_SET_BY_VERSION).toEqual({
       8: "legacy8",
       10: "full10",
       12: "v12b",
       14: "v14a",
       15: "v15a",
+      16: "v16a",
     });
-    // 12 는 v14 잡의, 14 는 v15 잡의, 15 는 v16 잡의 소스 버전이라 재현 세트가 반드시 있어야 한다.
+    // 12 는 v14 잡의, 14 는 v15 잡의, 15 는 v16 잡의, 16 은 v17 잡의 소스 버전이라
+    // 재현 세트가 반드시 있어야 한다.
     expect(reproSetForVersion(12)).toBe("v12b");
     expect(reproSetForVersion(14)).toBe("v14a"); // D0-b — 등록 전엔 여기가 null 이었다
     expect(reproSetForVersion(15)).toBe("v15a"); // 2026-09-23 — v16 을 위해 신규 등록
+    expect(reproSetForVersion(16)).toBe("v16a"); // 2026-09-24 — v17 을 위해 신규 등록
     expect(reproSetForVersion(11)).toBeNull();
     expect(reproSetForVersion(13)).toBeNull();
-    expect(reproSetForVersion(16)).toBeNull(); // 16은 목표 버전일 뿐 아직 소스가 된 잡이 없다
+    expect(reproSetForVersion(17)).toBeNull(); // 17은 목표 버전일 뿐 아직 소스가 된 잡이 없다
     expect(reproSetForVersion(112)).toBeNull();
     expect(reproSetForVersion(114)).toBeNull();
     expect(reproSetForVersion(0)).toBeNull();
@@ -108,13 +121,14 @@ describe("잡 정의 불변식", () => {
     expect(ms(v11.toUtc as string)).toBeLessThanOrEqual(ms(v12.fromUtc));
   });
 
-  it("workspaceScope — 운영 잡 6개 · 카나리 1개", () => {
+  it("workspaceScope — 운영 잡 7개 · 카나리 1개", () => {
     expect(RESCORE_JOBS.v11.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v13.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v14.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v15.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v16.workspaceScope).toBe("production");
+    expect(RESCORE_JOBS.v17.workspaceScope).toBe("production");
     expect(RESCORE_JOBS.v12t.workspaceScope).toBe("non-production");
   });
 
@@ -133,10 +147,10 @@ describe("잡 정의 불변식", () => {
     expect(byVersion.get(16)).toEqual(["v16"]);
   });
 
-  it("applyOwnedCitationJudgment — v15 만 true, 나머지는 없거나(undefined) false(v16 포함)", () => {
-    // v11~v14·v16 은 필드 자체를 생략한다(jobHash 가 job 객체 전체를 해시하므로, 이미 운영에
-    // 적용된 잡에 필드를 추가하면 지문이 바뀐다 — 아래 "지문 고정 앵커" 참조). v16 은 이
-    // 필드가 아니라 reproFromStoredEvidence 로 새 판정을 반영한다(아래 별도 테스트).
+  it("applyOwnedCitationJudgment — v15 만 true, 나머지는 없거나(undefined) false(v16·v17 포함)", () => {
+    // v11~v14·v16·v17 은 필드 자체를 생략한다(jobHash 가 job 객체 전체를 해시하므로, 이미
+    // 운영에 적용된 잡에 필드를 추가하면 지문이 바뀐다 — 아래 "지문 고정 앵커" 참조). v16·
+    // v17 은 이 필드가 아니라 reproFromStoredEvidence 로 새 판정을 반영한다(아래 별도 테스트).
     for (const id of RESCORE_JOB_IDS) {
       expect(!!RESCORE_JOBS[id].applyOwnedCitationJudgment).toBe(id === "v15");
     }
@@ -144,14 +158,16 @@ describe("잡 정의 불변식", () => {
     expect(RESCORE_JOBS.v14.applyOwnedCitationJudgment).toBeUndefined();
     expect(RESCORE_JOBS.v15.applyOwnedCitationJudgment).toBe(true);
     expect(RESCORE_JOBS.v16.applyOwnedCitationJudgment).toBeUndefined();
+    expect(RESCORE_JOBS.v17.applyOwnedCitationJudgment).toBeUndefined();
   });
 
-  it("reproFromStoredEvidence — v16 만 true, 나머지는 없거나(undefined) false", () => {
+  it("reproFromStoredEvidence — v16·v17 만 true, 나머지는 없거나(undefined) false", () => {
     for (const id of RESCORE_JOB_IDS) {
-      expect(!!RESCORE_JOBS[id].reproFromStoredEvidence).toBe(id === "v16");
+      expect(!!RESCORE_JOBS[id].reproFromStoredEvidence).toBe(id === "v16" || id === "v17");
     }
     expect(RESCORE_JOBS.v15.reproFromStoredEvidence).toBeUndefined();
     expect(RESCORE_JOBS.v16.reproFromStoredEvidence).toBe(true);
+    expect(RESCORE_JOBS.v17.reproFromStoredEvidence).toBe(true);
   });
 
   /**
@@ -315,6 +331,56 @@ describe("잡 정의 불변식", () => {
     expect(RESCORE_JOBS.v16.diagnosticSets).toEqual([]);
   });
 
+  /**
+   * ⛔ 2026-09-24 언론 게재 배점 인상 — v17 은 v16 이 이미 16 으로 올려 둔 행을 v17a 로
+   * 다시 계산한다. v16 자신의 창 정의가 "이미 버전 16인 행은 이 창 안에 있다"를 보장하므로
+   * v17 은 그 창을 그대로 복제한다(하한·상한·provider 전부 동일 — v11/v13·v15/v16 관례와
+   * 같다).
+   */
+  it("v17 은 소스 버전·목표가 v16 과 다르고, 대상 창·provider·scope·reproFromStoredEvidence 등 나머지 정의는 v16 과 완전히 같다", () => {
+    const a = RESCORE_JOBS.v16;
+    const b = RESCORE_JOBS.v17;
+    const scopeOf = (job: typeof a) => ({
+      fromUtc: job.fromUtc,
+      toUtc: job.toUtc,
+      providers: job.providers,
+      informationalOnly: job.informationalOnly,
+      autoOnly: job.autoOnly,
+      workspaceScope: job.workspaceScope,
+      diagnosticSets: job.diagnosticSets,
+      reproFromStoredEvidence: job.reproFromStoredEvidence,
+    });
+    expect(scopeOf(b)).toEqual(scopeOf(a));
+
+    expect(b.sourceVersions).toEqual([16]);
+    expect(b.sourceVersions).toEqual([a.targetVersion]);
+    expect(b.targetVersion).toBe(17);
+    expect(b.targetSet).toBe("v17a");
+    expect(b.sourceVersions).not.toContain(b.targetVersion);
+    expect(b.reproFromStoredEvidence).toBe(true);
+    expect(b.applyOwnedCitationJudgment).toBeUndefined();
+
+    // D0-b 회귀 — 16 이 REPRO_SET_BY_VERSION 에 없으면 여기서 throw 했다.
+    expect(() => jobHash("v17")).not.toThrow();
+    expect(jobHash("v17")).toMatch(/^[0-9a-f]{12}$/);
+    expect(jobHash("v17")).not.toBe(jobHash("v16"));
+  });
+
+  it("v17 의 진단 세트도 v14~v16 과 같은 이유로 비어 있다(소스 세트가 하나뿐)", () => {
+    expect(RESCORE_JOBS.v17.diagnosticSets).toEqual([]);
+  });
+
+  /**
+   * ⛔ 2026-09-24 — v11·v13(운영 적용 완료)의 지문이 REPRO_SET_BY_VERSION 에 16 을 새로
+   * 등록해도 흔들리지 않는지 직접 고정한다. jobHash 는 잡의 sourceVersions 로 재현 매핑을
+   * 좁혀서 넣으므로(payload.reproSets), v11·v13 의 sourceVersions([8, 10])에 16 이 없으면
+   * 이 등록은 두 잡의 해시에 아무 영향이 없어야 한다.
+   */
+  it("REPRO_SET_BY_VERSION 에 16 을 등록해도 이미 적용된 잡(v11·v13)의 지문은 흔들리지 않는다", () => {
+    expect(jobHash("v11")).toBe("31f27e90090d");
+    expect(jobHash("v13")).toBe("555add07a5c6");
+  });
+
   it("카나리 잡은 운영 잡 v12 와 범위 정의가 동일하다(스코프만 다름)", () => {
     const withoutScope = (job: (typeof RESCORE_JOBS)[RescoreJobId]) => {
       const clone: Record<string, unknown> = { ...job };
@@ -460,10 +526,10 @@ describe("jobHash / configFingerprint", () => {
     );
   });
 
-  it("모든 등록 잡의 해시가 서로 다르다(v15·v16 포함)", () => {
+  it("모든 등록 잡의 해시가 서로 다르다(v15·v16·v17 포함)", () => {
     const hashes = RESCORE_JOB_IDS.map((id) => jobHash(id));
     expect(new Set(hashes).size).toBe(hashes.length);
-    expect(hashes.length).toBe(7);
+    expect(hashes.length).toBe(8);
   });
 });
 
@@ -561,6 +627,14 @@ describe("검증 창 — 잡 정의에서 파생", () => {
    */
   it("v16: 검증 창이 v15 와 완전히 같다(대상 정의가 같으므로)", () => {
     expect(buildVerificationWindows("v16")).toEqual(buildVerificationWindows("v15"));
+  });
+
+  /**
+   * v17 은 v16 과 대상 창이 완전히 같은 잡이다(v11/v13·v15/v16 관례와 동일 — 정의를
+   * 복제했으므로 검증 창도 완전히 같아야 한다).
+   */
+  it("v17: 검증 창이 v16 과 완전히 같다(대상 정의가 같으므로)", () => {
+    expect(buildVerificationWindows("v17")).toEqual(buildVerificationWindows("v16"));
   });
 
   it("v12: provider 를 좁히지 않으므로 other-providers 창이 없다", () => {

@@ -710,9 +710,9 @@ describe("(i) 도달 제어·인증 게이트", () => {
   });
 
   it("없는 잡 id → 400", async () => {
-    // ⛔ D0-b(계획 §5 Step 6) — v15 는 이제 등록된 잡이다. 2026-09-23 개정으로 v16 도
-    // 등록됐다. 존재하지 않는 잡 id 예시는 v17 으로.
-    expect((await POST(post({ job: "v17" }))).status).toBe(400);
+    // ⛔ D0-b(계획 §5 Step 6) — v15 는 이제 등록된 잡이다. 2026-09-23 개정으로 v16 도,
+    // 2026-09-24 개정으로 v17 도 등록됐다. 존재하지 않는 잡 id 예시는 v18 로.
+    expect((await POST(post({ job: "v18" }))).status).toBe(400);
     expect((await POST(post({ job: "v14t" }))).status).toBe(400);
     expect((await POST(post({ job: "v13t" }))).status).toBe(400);
     expect((await POST(post({ job: "v15t" }))).status).toBe(400);
@@ -1976,5 +1976,200 @@ describe("v16 잡 — 소스 버전 15 하나 · v15a → v16a(reproFromStoredEv
     expect(b.anomalies).toHaveLength(0);
     expect(b.changes[0].before).toBe(0);
     expect(b.changes[0].after).toBe(35); // v16a.genNoMentionSocial — citations 재분류가 잡아야 한다.
+  });
+});
+
+/* ============================================================
+ * v17 잡 — 2026-09-24 언론 게재 배점 인상(사장님 지시: 35 → 45)
+ *
+ * v16 과 소스·구조가 같다(reproFromStoredEvidence — 저장된 증거 컬럼만으로 v16a 재현·
+ * v17a 목표를 계산). 이 블록의 핵심은 (a) 언론 배점만 45 로 오르고 블로그·소셜(35)은
+ * 그대로인지 (b) v16a 자신이 브랜드 분기에서 cap(100)에 걸리는 세트인데도 그 cap-hit
+ * 행을 재현 대상(소스)으로 삼을 때 no-candidate·ambiguous-target 없이 실제로 라우트를
+ * 통과하는지(순수 함수 전수 테스트는 visibility-rescore-anomaly-space.test.ts, 이 블록은
+ * DB 경로까지 포함한 end-to-end 확인) 를 검증한다.
+ * ============================================================ */
+
+describe("v17 잡 — 소스 버전 16 하나 · v16a → v17a(reproFromStoredEvidence, 언론 배점 인상)", () => {
+  // v15·v16 과 완전히 같은 창(대상 창 하한 KST 2026-09-21 00:00).
+  const v17At = (m: number) => new Date(new Date("2026-09-21T03:00:00.000Z").getTime() + m * 60_000);
+  const OWNED_ID = "dQw4w9WgXcQ";
+
+  it("meta: 소스 버전 16 · 목표 v17a · jobHash 가 v16 과 다르다(D0-b 회귀 없음)", async () => {
+    const body = await (await POST(post({ job: "v17", meta: true }))).json();
+    expect(body.mode).toBe("meta");
+    expect(body.sourceVersions).toEqual([16]);
+    expect(body.targetVersion).toBe(17);
+    expect(body.targetSet).toBe("v17a");
+    expect(body.jobHash).toBe(jobHash("v17"));
+    expect(body.jobHash).not.toBe(jobHash("v16"));
+  });
+
+  it("증거가 전혀 없으면 점수는 그대로(0)지만 버전만 17로 전진한다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 0,
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+    });
+    const b = await (await POST(post({ job: "v17", apply: true, batchSize: 200 }))).json();
+    expect(b.processed).toBe(1);
+    expect(b.updated).toBe(1);
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(0);
+    expect(r.scoreVersion).toBe(17);
+  });
+
+  it("저장된 언론 증거가 있으면 v17a 배점(45)이 실제로 반영된다(v16a 에선 35 였다)", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 35, // v16a 시점: 언론 배점 35 로 이미 저장돼 있었다.
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedPressDomains: ["press-wire.example"], // v16 채점 시점에 이미 저장된 증거.
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(35);
+    expect(b.changes[0].after).toBe(45); // v17a.genNoMentionPress
+  });
+
+  it("저장된 소셜 증거가 있으면 v17a 에서도 배점은 그대로 35다 — 언론만 오르고 소셜은 안 오른다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 35,
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedSocialDomains: ["instagram.com"],
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(35);
+    expect(b.changes[0].after).toBe(35); // v17a.genNoMentionSocial — 그대로.
+  });
+
+  it("우리 채널 인용(citedOwnedVideoIds)만 있으면 점수는 그대로 45 — 배점을 건드리지 않았다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 45, // v16a.genNoMentionCitation — v16 채점 시점에 이미 이 값으로 저장됨.
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedOwnedVideoIds: [OWNED_ID],
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0].before).toBe(45);
+    expect(b.changes[0].after).toBe(45); // "우리 채널 인용 45점, 기존 그대로" — 사장님 지시(v16 과 동일)
+  });
+
+  /**
+   * ⭐⭐ 핵심 — v16a 자신이 브랜드 분기에서 cap(100)에 걸리는 세트인데도, 그 cap-hit 행을
+   * v17 이 재현 대상(선언 세트)으로 삼을 때 재현이 모호해지지 않는지 실제 라우트로 확인한다
+   * (SCORE_SETS.ts 상단 docblock "v16a·v17a 는 예외다" 문단·이론적 근거는
+   * visibility-rescore-anomaly-space.test.ts 의 "v17 잡 조합" 전수 테스트).
+   *
+   * 브랜드 질의 · 긍정 · 적극추천 · 언론 인용 — v16a 계산: 34+48+35=117 → cap 100. 이
+   * storedScore(100)를 seedRun 으로 직접 시드해 "그때 실제로 이렇게 저장됐다"를 재현한다.
+   * isStronglyRecommended 는 DB 에 없는 값이라(역산 대상) 라우트가 4개 조합을 전부 시도해
+   * storedScore 를 재현하는 조합만 남기고 목표 점수를 계산한다 — 그 과정이 no-candidate나
+   * ambiguous-target 없이 끝나야 이 테스트가 통과한다.
+   */
+  it("브랜드 질의 cap 충돌(v16a 34+48+35=117→100) 저장 행도 anomaly 없이 v17a(min(127,100)=100)로 해소된다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 100, // v16a — 긍정+적극추천+언론 조합이 cap 에 걸려 실제로 100 으로 저장됐다.
+      createdAt: v17At(1),
+      promptText: BRANDED_PROMPT,
+      sentiment: "positive",
+      answer: GEN_ANSWER, // "요가원" 브랜드 언급 포함 — mentions >= 1.
+      citedPressDomains: ["press-wire.example"],
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0); // no-candidate·ambiguous-target 이 아니다.
+    expect(b.changes).toHaveLength(1);
+    expect(b.changes[0].before).toBe(100);
+    expect(b.changes[0].after).toBe(100); // 34+48+45=127 → 여전히 cap 100.
+  });
+
+  it("apply 로도 dry-run 과 동일하게 적용된다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 35,
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedPressDomains: ["press-wire.example"],
+    });
+    const applied = await (await POST(post({ job: "v17", apply: true, batchSize: 200 }))).json();
+    expect(applied.updated).toBe(1);
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(45);
+    expect(r.scoreVersion).toBe(17);
+  });
+
+  it("v17 은 증거 컬럼을 다시 쓰지 않는다(UPDATE SET 절에서 제외) — 이미 맞는 증거를 그대로 둔다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 35, // v16a 시점 저장값(언론 배점 35) — v17 이 45 로 올리는 대상.
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citedPressDomains: ["press-wire.example"],
+    });
+    await POST(post({ job: "v17", apply: true, batchSize: 200 }));
+    expect(H.updateSetKeys.length).toBeGreaterThan(0);
+    expect(H.store.runs[0].visibilityScore).toBe(45); // 점수는 실제로 올라간다.
+    for (const keys of H.updateSetKeys) {
+      expect(keys).not.toContain("citedOwnedVideoIds");
+      expect(keys).not.toContain("citedPressDomains");
+      expect(keys).not.toContain("citedSocialDomains");
+      expect(keys).toContain("visibilityScore");
+      expect(keys).toContain("scoreVersion");
+    }
+    expect(H.store.runs[0].citedPressDomains).toEqual(["press-wire.example"]);
+  });
+
+  it("아직 버전 15인 행은 v17 대상이 아니다(소스 버전이 16 하나뿐)", async () => {
+    seedRun(1, {
+      version: 15,
+      score: 0,
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.processed).toBe(0); // selector 가 버전 16 만 골라내므로 이 행은 애초에 안 걸린다.
+  });
+
+  it("응답에 cfgFingerprint 가 실린다 · ownedVideoFingerprint 는 null(라이브 소유 목록을 조회하지 않는다)", async () => {
+    seedRun(1, { version: 16, createdAt: v17At(1), score: 0, answer: "무관" });
+    const b = await (await POST(post({ job: "v17", dryRun: true }))).json();
+    expect(b.cfgFingerprint).toMatch(/^[0-9a-f]{12}$/);
+    // v17 은 reproFromStoredEvidence 라 applyOwnedCitationJudgment 를 쓰지 않고, 그래서
+    // 라이브 소유 영상 목록을 조회하지 않는다(저장된 증거만 읽는다) — v14·v16 과 같은 이유로 null.
+    expect(b.ownedVideoFingerprint).toBeNull();
+  });
+
+  /**
+   * v16 은 이 행을 채점할 때 이미 citations 재분류 구제 경로(deriveStoredEvidenceRowInputs)로
+   * hasSocialCitation=true 를 잡아 35 를 저장했다 — 그러나 증거 컬럼 자체는 다시 쓰지
+   * 않으므로(위 "v16 은 증거 컬럼을 다시 쓰지 않는다" 테스트) citedSocialDomains 는 버전이
+   * 16 으로 올라간 뒤에도 여전히 비어 있을 수 있다. v17 이 이 행을 다시 처리할 때도 같은
+   * 재분류 구제 경로가 필요하다 — 이 테스트가 v17 에서도 그 구제 경로가 여전히 동작하는지
+   * 고정한다(재분류가 깨지면 reproBase 가 hasSocialCitation=false 로 잘못 판정해 v16a 로
+   * 35 를 재현하지 못하고 no-candidate 가 난다).
+   */
+  it("citedSocialDomains 가 비어 있는 행도 v17 에서 citations 에서 소셜 증거를 다시 분류한다", async () => {
+    seedRun(1, {
+      version: 16,
+      score: 35, // v16 채점 시점: citations 재분류로 hasSocialCitation=true 를 잡아 35 로 저장됨.
+      createdAt: v17At(1),
+      answer: "무관한 답변(브랜드 미언급)",
+      citations: [
+        { url: "https://www.instagram.com/p/AbCdEfGhIjK/", title: "요가원 추천 게시물", description: null },
+      ],
+      // citedSocialDomains 를 의도적으로 생략 — seedRun 기본값([])이 미저장 행을 재현한다.
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0); // 재분류가 깨지면 no-candidate 가 나 여기서 실패한다.
+    expect(b.changes[0].before).toBe(35);
+    expect(b.changes[0].after).toBe(35); // v17a.genNoMentionSocial 도 35 — 소셜은 안 올랐다.
   });
 });

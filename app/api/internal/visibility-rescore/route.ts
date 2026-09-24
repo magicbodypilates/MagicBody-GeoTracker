@@ -388,7 +388,7 @@ type TargetRow = {
   createdAtUs: string;
   /**
    * 저장된 증거 컬럼(2026-09-23 제3자 인용 판정 재설계) — job.reproFromStoredEvidence 인
-   * 잡(v16)만 읽는다. 그 외 잡은 이 세 필드를 쓰지 않는다(citations 에서 다시 판정한다).
+   * 잡(v16·v17)만 읽는다. 그 외 잡은 이 세 필드를 쓰지 않는다(citations 에서 다시 판정한다).
    */
   citedOwnedVideoIds: string[];
   citedPressDomains: string[];
@@ -902,8 +902,8 @@ export async function POST(req: NextRequest) {
         isAuto: schema.runs.isAuto,
         createdAt: schema.runs.createdAt,
         createdAtUs: cursorTimestampProjection,
-        // v16(reproFromStoredEvidence) 전용 — 다른 잡은 이 세 필드를 읽지 않는다. 모든 잡이
-        // 같은 쿼리를 공유하므로 조건부로 넣지 않고 항상 함께 가져온다(작은 text[] 3개).
+        // reproFromStoredEvidence 잡(v16·v17) 전용 — 다른 잡은 이 세 필드를 읽지 않는다.
+        // 모든 잡이 같은 쿼리를 공유하므로 조건부로 넣지 않고 항상 함께 가져온다(작은 text[] 3개).
         citedOwnedVideoIds: schema.runs.citedOwnedVideoIds,
         citedPressDomains: schema.runs.citedPressDomains,
         citedSocialDomains: schema.runs.citedSocialDomains,
@@ -986,7 +986,7 @@ export async function POST(req: NextRequest) {
 
       // ⛔ D0(계획 §3-3) — reproBase 는 "그때 저장된 점수를 실제로 만든" 판정, targetBase 는
       // job 성격에 따라 셋 중 하나로 갈라진다:
-      //   1. job.reproFromStoredEvidence(v16) — 저장된 증거 컬럼에서 reproBase·targetBase
+      //   1. job.reproFromStoredEvidence(v16·v17) — 저장된 증거 컬럼에서 reproBase·targetBase
       //      **둘 다** 같은 함수로 만든다(deriveStoredEvidenceRowInputs). 이 잡의 소스 행은
       //      이미 새 판정으로 계산돼 있어 옛 판정(deriveRowInputs)을 쓰면 안 맞는다.
       //   2. job.applyOwnedCitationJudgment(v15) — reproBase 는 옛 판정, targetBase 만

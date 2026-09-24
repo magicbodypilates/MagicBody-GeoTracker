@@ -109,10 +109,13 @@ describe("전 세트 × 전 조합 열거: 0..100 이탈 없음", () => {
 
   it("어느 세트도 cap 에 걸리지 않는다(분기별 최대 합계 < 100) — 역산 불변식의 전제", () => {
     // ⛔ 2026-09-24 결함 수정 — v16a 는 이 불변식의 알려진 예외라 루프에서 뺀다(위 SCORE_SETS
-    // docblock의 "v16a 는 예외다" 문단 · 아래 "v16a — 언론·블로그·소셜 배점" describe 의
+    // docblock의 "v16a·v17a 는 예외다" 문단 · 아래 "v16a — 언론·블로그·소셜 배점" describe 의
     // "브랜드 질의 — 긍정+적극추천+언론(또는 소셜)은 100 을 넘어 cap 에 걸린다" 테스트가
-    // 그 cap-hit 자체를 별도로 고정한다). 나머지 세트는 실제로 이 불변식을 지켜야 한다.
-    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a")) {
+    // 그 cap-hit 자체를 별도로 고정한다). v17a 도 같은 이유로 뺀다(언론 배점 인상으로
+    // 34+48+45=127 이라 v16a 보다도 더 크게 cap 에 걸린다) — 아래 "v17a — 언론 배점 45"
+    // describe 의 동일한 구조 테스트가 이 cap-hit 을 따로 고정한다. 나머지 세트는 실제로
+    // 이 불변식을 지켜야 한다.
+    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a" && id !== "v17a")) {
       const c = SCORE_SETS[setId];
       // 브랜드 분기 최대 — sentiment·추천은 if/if 로 더해지고, URL·인용·언론·소셜은
       // else-if 로 그중 하나만 선택된다(calcVisibilityWithSet 참조). brandBodyUrl 만
@@ -158,6 +161,9 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     // 언론·블로그·소셜 필드(else-if 대체 신호)를 애초에 더하지 않으므로 그 값(35)이 붙어도
     // 안 바뀐다. v16a 고유 배점은 아래 "v16a — 언론·블로그·소셜 배점" describe 가 따로 덮는다.
     v16a: { brand: 97, gen: 99, noMention: 55 },
+    // v17a 도 같은 이유로 이 검산표는 v16a 와 같다(언론 배점 인상 45 도 else-if 대체 신호라
+    // 이 표에 안 잡힌다). v17a 고유 배점은 아래 "v17a — 언론 배점 45" describe 가 따로 덮는다.
+    v17a: { brand: 97, gen: 99, noMention: 55 },
   };
 
   it("검산표와 정확히 일치", () => {
@@ -848,12 +854,13 @@ describe("v15a — 값만 보면 v14a 와 완전히 동일(계획 v2 §4-3)", ()
   });
 });
 
-describe("언론 인용 신호(hasPressCitation) — v16a 를 제외한 전 세트 배점 0", () => {
-  it("v16a 를 제외한 등록 세트에서 있으나 없으나 점수가 바뀌지 않는다(genNoMentionPress·brandPress = 0)", () => {
-    // v16a 는 2026-09-23 사장님 결정으로 실제 배점(35)이 들어간 유일한 세트다 — 그 배점
-    // 확정·우선순위·cap 동작은 아래 "v16a — 언론·블로그·소셜 배점" describe 가 전담해서
+describe("언론 인용 신호(hasPressCitation) — v16a·v17a 를 제외한 전 세트 배점 0", () => {
+  it("v16a·v17a 를 제외한 등록 세트에서 있으나 없으나 점수가 바뀌지 않는다(genNoMentionPress·brandPress = 0)", () => {
+    // v16a 는 2026-09-23 사장님 결정으로 실제 배점(35)이 들어간 첫 세트고, v17a 는
+    // 2026-09-24 언론 배점 인상(45)이 들어간 세트다 — 그 배점 확정·우선순위·cap 동작은
+    // 각각 아래 "v16a — 언론·블로그·소셜 배점"·"v17a — 언론 배점 45" describe 가 전담해서
     // 검증하므로, 여기서는 "배점 0" 전제가 여전히 성립하는 나머지 세트만 돈다.
-    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a")) {
+    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a" && id !== "v17a")) {
       const set = SCORE_SETS[setId];
 
       const gen0Base = {
@@ -1198,5 +1205,163 @@ describe("v16a — 언론·블로그·소셜 배점 35/35, 그 외 14개 필드�
         true,
       ),
     ).toBe(22);
+  });
+});
+
+/* ============================================================
+ * ⑧ v17a — 언론 게재 배점 인상(2026-09-24 사장님 결정: 35 → 45)
+ * ============================================================ */
+
+describe("v17a — 언론 배점 45, 블로그·소셜은 35 그대로, 그 외 14개 필드는 v16a 와 동일", () => {
+  it("기본 14개 필드 + 블로그·소셜 2개 필드는 v16a 와 완전히 같다 — 언론 2개 필드만 올랐다", () => {
+    const UNCHANGED_KEYS = [
+      "brandPositive",
+      "brandStrong",
+      "brandBodyUrl",
+      "brandCitation",
+      "genNoMentionBodyUrl",
+      "genNoMentionCitation",
+      "genBase",
+      "genFirstPos",
+      "genMidPos",
+      "genMentions3",
+      "genMentions2",
+      "genPositive",
+      "genNeutral",
+      "genTopRanked",
+      "genNoMentionSocial",
+      "brandSocial",
+    ] as const;
+    for (const key of UNCHANGED_KEYS) {
+      expect(SCORE_SETS.v17a[key]).toBe(SCORE_SETS.v16a[key]);
+    }
+    expect(SCORE_SETS.v17a.genNoMentionCitation).toBe(45);
+    expect(SCORE_SETS.v17a.genNoMentionSocial).toBe(35);
+    expect(SCORE_SETS.v17a.brandSocial).toBe(35);
+  });
+
+  it("언론 2개 필드(genNoMentionPress·brandPress)는 45, 블로그·소셜은 35다", () => {
+    expect(SCORE_SETS.v17a.genNoMentionPress).toBe(45);
+    expect(SCORE_SETS.v17a.brandPress).toBe(45);
+    expect(SCORE_SETS.v17a.genNoMentionSocial).toBe(35);
+    expect(SCORE_SETS.v17a.brandSocial).toBe(35);
+    // v16a 대비 델타 — 언론만 +10, 블로그·소셜은 델타 0. 두 필드 모두 선택 필드(number |
+    // undefined)라 산술 전에 v16a 쪽 기준값으로 직접 비교한다(non-null 단언 대신).
+    expect(SCORE_SETS.v17a.genNoMentionPress).toBe((SCORE_SETS.v16a.genNoMentionPress ?? 0) + 10);
+    expect(SCORE_SETS.v17a.brandPress).toBe((SCORE_SETS.v16a.brandPress ?? 0) + 10);
+    expect(SCORE_SETS.v17a.genNoMentionSocial).toBe(SCORE_SETS.v16a.genNoMentionSocial ?? 0);
+    expect(SCORE_SETS.v17a.brandSocial).toBe(SCORE_SETS.v16a.brandSocial ?? 0);
+  });
+
+  it("일반 질의 · 언급 0 — 언론이 45로 실제 반영된다(v16a 에선 35 였다), 소셜은 그대로 35", () => {
+    const base = {
+      mentions: 0,
+      firstPos: -1,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "not-mentioned" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: false,
+      isBrandedQuery: false,
+    };
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: true, hasSocialCitation: false }, SCORE_SETS.v17a),
+    ).toBe(45);
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: false, hasSocialCitation: true }, SCORE_SETS.v17a),
+    ).toBe(35);
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: false, hasSocialCitation: false }, SCORE_SETS.v17a),
+    ).toBe(0);
+    // v16a 로 같은 입력을 계산하면(선언 세트 재현 관점) 여전히 35 — v16a 는 안 바뀌었다.
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: true, hasSocialCitation: false }, SCORE_SETS.v16a),
+    ).toBe(35);
+  });
+
+  it("일반 질의 · 언급 0 — 본문URL(55) > 참고자료(45) > 언론(45) > 소셜(35) > 없음(0), 우선순위 유지", () => {
+    const base = {
+      mentions: 0,
+      firstPos: -1,
+      sentiment: "not-mentioned" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: false,
+      isBrandedQuery: false,
+    };
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: true, hasCitationOnly: true, hasPressCitation: true, hasSocialCitation: true },
+        SCORE_SETS.v17a,
+      ),
+    ).toBe(55);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: true, hasPressCitation: true, hasSocialCitation: true },
+        SCORE_SETS.v17a,
+      ),
+    ).toBe(45); // 참고자료 — 언론(45)과 값이 같아졌지만 else-if 우선순위상 참고자료가 먼저다.
+    // 언론·소셜이 둘 다 있으면 언론이 우선(else-if 순서) — 이번엔 값도 달라 결과로 구분된다.
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: false, hasPressCitation: true, hasSocialCitation: true },
+        SCORE_SETS.v17a,
+      ),
+    ).toBe(45);
+    expect(
+      calcVisibilityWithSet(
+        { ...base, hasBodyUrl: false, hasCitationOnly: false, hasPressCitation: false, hasSocialCitation: true },
+        SCORE_SETS.v17a,
+      ),
+    ).toBe(35);
+  });
+
+  it("브랜드 질의 — 긍정+적극추천+언론은 100 을 넘어 cap 에 걸린다(34+48+45=127→100), 소셜은 v16a 와 같은 117→100", () => {
+    // v16a 는 언론·소셜이 값이 같아(35=35) cap 에 걸리는 지점도 같았다(117→100). v17a 는
+    // 언론만 45 로 올라 127→100 으로 cap 에 더 깊이 걸리지만, Math.min 의 결과(100)는
+    // 똑같아서 저장 점수만 보면 두 초과폭(117 vs 127)을 구분할 수 없다 — 바로 이 성질이
+    // "재현 모호성" 우려의 근원이라 visibility-rescore-anomaly-space.test.ts 의 "v17 잡
+    // 조합" 전수 테스트가 실제로 ambiguous-target 이 나지 않는지 별도로 검증한다.
+    const base = {
+      mentions: 1,
+      firstPos: 0,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "positive" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: true,
+      isBrandedQuery: true,
+    };
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: true, hasSocialCitation: false }, SCORE_SETS.v17a),
+    ).toBe(100);
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: false, hasSocialCitation: true }, SCORE_SETS.v17a),
+    ).toBe(100);
+    // v16a 로 같은 입력 — 117→100 으로 동일한 cap 값에 도달(초과폭만 다르다).
+    expect(
+      calcVisibilityWithSet({ ...base, hasPressCitation: true, hasSocialCitation: false }, SCORE_SETS.v16a),
+    ).toBe(100);
+  });
+
+  it("언급 1회 이상 분기에서는 v17a 에서도 언론·소셜 신호가 무시된다(URL 신호와 동일 취급 — D5)", () => {
+    const base = {
+      mentions: 1,
+      firstPos: 0,
+      hasBodyUrl: false,
+      hasCitationOnly: false,
+      sentiment: "neutral" as Sentiment,
+      isTopRanked: false,
+      isStronglyRecommended: false,
+      isBrandedQuery: false,
+    };
+    const off = calcVisibilityWithSet(
+      { ...base, hasPressCitation: false, hasSocialCitation: false },
+      SCORE_SETS.v17a,
+    );
+    const on = calcVisibilityWithSet(
+      { ...base, hasPressCitation: true, hasSocialCitation: true },
+      SCORE_SETS.v17a,
+    );
+    expect(on).toBe(off);
   });
 });

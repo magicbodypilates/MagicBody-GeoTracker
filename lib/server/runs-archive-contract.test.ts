@@ -87,7 +87,14 @@ const CLASSIFICATION: Record<string, Rule> = {
     why: "재산출 실행 — 대상 선택은 포함, 리포트는 선택 함수(buildReportConditions) 경유로 제외",
     needs: [{ what: "buildReportConditions(", re: /buildReportConditions\(/g, min: 1 }],
   },
-  "app/api/prompts/[id]/route.ts": { kind: "include", why: "질문 제거 + 데이터 삭제(보관 응답도 함께 삭제)" },
+  "app/api/prompts/[id]/route.ts": {
+    kind: "include",
+    why: "질문 제거 + 데이터 삭제(보관 응답도 함께 삭제) · 켜기 경로 — 켜면 보관 응답을 되돌린다(I1)",
+    needs: [
+      { what: "lockResponseArchive(", re: /lockResponseArchive\(/g, min: 1 },
+      { what: "restoreByTexts(", re: /restoreByTexts\(/g, min: 1 },
+    ],
+  },
   // ── 해당 없음
   "app/api/admin/import/route.ts": { kind: "none", why: "가져오기 — 항상 새 워크스페이스" },
   "app/api/runs/[id]/route.ts": { kind: "none", why: "단건 조회·삭제(화면 호출처 없음)" },
@@ -145,6 +152,29 @@ describe("runs 를 만지는 파일 — 분류표와 전수 대조", () => {
       }
     });
   }
+});
+
+describe("워크스페이스 잠금을 잡는 곳 6군데 (계획 §2-5 — I1 을 지키는 경합 방지)", () => {
+  const read = (f: string) => readFileSync(join(ROOT, f), "utf8");
+
+  it("보관·일괄 보관·되돌리기·영구 삭제 — 실행 함수 4개가 모두 첫 문장에서 잠금을 잡는다", () => {
+    const src = read("lib/server/run-archive.ts");
+    for (const fn of ["archiveByTexts", "archiveAllUntracked", "restoreByTexts", "purgeUntracked"]) {
+      const m = new RegExp(`export async function ${fn}\\([^)]*\\)[^{]*\\{\\s*await lockResponseArchive\\(tx, workspaceId\\);`).exec(src);
+      expect(m, `${fn} 의 첫 문장이 lockResponseArchive 가 아니다`).not.toBeNull();
+    }
+  });
+
+  it("질문 추가(POST)·질문 수정(PATCH) — 트랜잭션 안에서 잠금 → 수정 → 되돌리기", () => {
+    for (const f of ["app/api/workspaces/[id]/prompts/route.ts", "app/api/prompts/[id]/route.ts"]) {
+      const src = read(f);
+      const lockAt = src.indexOf("await lockResponseArchive(tx,");
+      const restoreAt = src.indexOf("restoreByTexts(tx,");
+      expect(lockAt, `${f}: 트랜잭션 안 잠금이 없다`).toBeGreaterThan(-1);
+      expect(restoreAt, `${f}: 되돌리기가 없다`).toBeGreaterThan(lockAt);
+      expect(src).toContain("db.transaction(");
+    }
+  });
 });
 
 describe("보관 조건의 단일 정의", () => {

@@ -1,7 +1,8 @@
 /**
  * /api/prompts/[id] — 개별 프롬프트 수정/삭제
  *
- * PATCH  — text / tags / active 일부 또는 전체 수정
+ * PATCH  — text / tags / active 일부 또는 전체 수정. 켜짐·문구가 바뀌어 결과가 켜진 질문이면 그 문구의
+ *          보관 응답을 같은 트랜잭션에서 되돌리고 restoredRuns(건수)를 싣는다(응답 보관 §S8).
  * DELETE — 프롬프트 제거. ?cascade=true 면 같은 prompt_text 의 runs 도 함께 삭제 (admin 전용).
  *          연관된 schedules.promptIds 는 UUID 배열이라 cascade 안 됨 — 호출 측이 스케줄 업데이트 필요.
  *
@@ -21,6 +22,7 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { and, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
+import { lockResponseArchive, restoreByTexts } from "@/lib/server/run-archive";
 
 export const dynamic = "force-dynamic";
 
@@ -54,13 +56,34 @@ export async function PATCH(
 
     const body = await req.json();
     const parsed = UpdatePromptSchema.parse(body);
-    const [updated] = await db
-      .update(schema.prompts)
-      .set(parsed)
-      .where(eq(schema.prompts.id, id))
-      .returning();
+
+    // 태그만 바꾸면 질문 목록(켜짐·문구)이 그대로라 보관과 무관하다 — 예전처럼 바로 저장한다.
+    if (parsed.active === undefined && parsed.text === undefined) {
+      const [updated] = await db
+        .update(schema.prompts)
+        .set(parsed)
+        .where(eq(schema.prompts.id, id))
+        .returning();
+      if (!updated) return NextResponse.json({ error: "not_found" }, { status: 404 });
+      return NextResponse.json({ prompt: updated, restoredRuns: 0 });
+    }
+
+    // 켜짐·문구가 바뀌면 한 트랜잭션: 보관 잠금 → 수정 → 결과가 켜진 질문이면 그 문구(바뀐 문구)의
+    // 보관 응답을 되돌린다 — 질문 목록에 있는 질문의 응답은 보관 상태가 아니어야 한다(I1 · 계획
+    // geotracker-response-archive-260924 §S8). 잠금은 같은 문구의 보관·영구 삭제와 겹치지 않게 한다.
+    const { updated, restoredRuns } = await db.transaction(async (tx) => {
+      await lockResponseArchive(tx, target.workspaceId);
+      const [row] = await tx
+        .update(schema.prompts)
+        .set(parsed)
+        .where(eq(schema.prompts.id, id))
+        .returning();
+      if (!row) return { updated: null, restoredRuns: 0 };
+      const restored = row.active ? await restoreByTexts(tx, row.workspaceId, [row.text]) : null;
+      return { updated: row, restoredRuns: restored?.affectedRuns ?? 0 };
+    });
     if (!updated) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    return NextResponse.json({ prompt: updated });
+    return NextResponse.json({ prompt: updated, restoredRuns });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });

@@ -1,12 +1,17 @@
-import { useMemo, useState } from "react";
-import type { ScrapeRun } from "@/components/dashboard/types";
+import { useEffect, useMemo, useState } from "react";
+import type { ArchiveActionResult, ArchiveCounts, ScrapeRun } from "@/components/dashboard/types";
 import { VISIBLE_PROVIDERS, PROVIDER_LABELS, type Provider } from "@/components/dashboard/types";
 import type { RunDelta } from "@/components/dashboard/types";
 import { splitAnswerSections } from "@/components/dashboard/answer-utils";
 import { isBrandedPrompt } from "@/lib/client/branded-prompt";
 import { isRelatedCitation, isUrlMatchingCitedKeys } from "@/components/dashboard/citation-utils";
 import { RangeSelector } from "@/components/dashboard/range-selector";
+import { ResponseArchivePanel } from "@/components/dashboard/response-archive-panel";
 import { toKstDateKey } from "@/lib/client/date-kst";
+import { fetchResponseArchive } from "@/lib/client/server-store";
+import { buildArchiveConfirm, buildPurgeConfirm, splitTrackedGroups } from "@/lib/client/response-archive-utils";
+
+type ArchiveAction = (texts: string[]) => Promise<ArchiveActionResult | null>;
 
 type ReputationSourcesTabProps = {
   runs: ScrapeRun[];
@@ -19,7 +24,22 @@ type ReputationSourcesTabProps = {
   windowDays?: number;
   /** 기간 선택 변경 콜백 — 부모가 전역 runs 를 재로드 */
   onWindowDaysChange?: (days: number) => void;
+  /* ── 응답 보관함 (계획 geotracker-response-archive-260924 §5-1) ── */
+  /** 질문 목록(켜진 질문)의 문구 — 있을 때만 「질문 목록에 없음」 표시·질문 필터를 그린다 */
+  trackedPrompts?: string[];
+  /** 서버 워크스페이스 — 없으면(데모) 보관함 탭을 그리지 않는다 */
+  workspaceId?: string;
+  onArchivePrompts?: ArchiveAction;
+  onArchiveAllUntracked?: (asOf: string) => Promise<ArchiveActionResult | null>;
+  onRestorePrompts?: ArchiveAction;
+  /** 영구 삭제 — 삭제 권한이 있을 때만 준다(없으면 버튼도 설명도 그리지 않는다) */
+  onPurgePrompts?: ArchiveAction;
+  /** 보관·되돌리기·영구 삭제·자동 복원 뒤 +1 — 보관함 숫자·패널을 다시 읽는다 */
+  archiveRefreshKey?: number;
 };
+
+type ResponseTab = "auto-info" | "auto-branded" | "manual" | "archive";
+type TrackedFilter = "all" | "tracked" | "untracked";
 
 function normalizeAnswerForDisplay(answer: string): string {
   let text = answer;
@@ -521,32 +541,96 @@ export function ReputationSourcesTab({
   onResetManualResponses,
   windowDays,
   onWindowDaysChange,
+  trackedPrompts,
+  workspaceId,
+  onArchivePrompts,
+  onArchiveAllUntracked,
+  onRestorePrompts,
+  onPurgePrompts,
+  archiveRefreshKey = 0,
 }: ReputationSourcesTabProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
   const [filterSentiment, setFilterSentiment] = useState<string>("all");
-  // 1단 3분할 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답
-  const [responseTab, setResponseTab] = useState<"auto-info" | "auto-branded" | "manual">("auto-info");
+  // 하위 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답 / 보관함
+  const [responseTab, setResponseTab] = useState<ResponseTab>("auto-info");
   const [sortField, setSortField] = useState<"date" | "score">("date");
+  // 질문 필터 — 질문 목록에 있는 질문만 / 없는 질문만 (trackedPrompts 가 있을 때만 쓴다)
+  const [trackedFilter, setTrackedFilter] = useState<TrackedFilter>("all");
+  // 보관함 숫자(보관한 질문 수) — 탭 막대 「보관함 (N)」
+  const [archivedQuestions, setArchivedQuestions] = useState<number | null>(null);
+  // 요청 중인 질문 — 그 질문의 동작 버튼을 잠근다
+  const [busyPrompts, setBusyPrompts] = useState<Set<string>>(new Set());
+
+  const archiveEnabled = !!workspaceId && !!onArchivePrompts && !!onRestorePrompts && !!onArchiveAllUntracked;
+  const trackedSet = useMemo(() => (trackedPrompts ? new Set(trackedPrompts) : null), [trackedPrompts]);
+  const activeTab: ResponseTab = responseTab === "archive" && !archiveEnabled ? "auto-info" : responseTab;
+
+  // 보관함 숫자 — 워크스페이스·보관 동작이 바뀔 때 counts 만 읽는다(패널이 열려 있으면 패널이 알려 준다)
+  useEffect(() => {
+    if (!archiveEnabled || !workspaceId) return;
+    let cancelled = false;
+    fetchResponseArchive(workspaceId, "archived")
+      .then((res) => {
+        if (!cancelled) setArchivedQuestions(res.counts.archivedQuestions);
+      })
+      .catch(() => {
+        // 숫자만 못 읽은 것 — 탭은 그대로 쓸 수 있다
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [archiveEnabled, workspaceId, archiveRefreshKey]);
 
   // Apply filters — 응답 목록 자체도 탭별 분리 (사용자가 헷갈리지 않게)
   const filteredRuns = useMemo(() => {
     let list = [...runs];
-    if (responseTab === "auto-info") {
+    if (activeTab === "auto-info") {
       list = list.filter(
         (r) => r.auto === true && (brandTerms.length === 0 || !isBrandedPrompt(r.prompt, brandTerms)),
       );
-    } else if (responseTab === "auto-branded") {
+    } else if (activeTab === "auto-branded") {
       list = list.filter(
         (r) => r.auto === true && brandTerms.length > 0 && isBrandedPrompt(r.prompt, brandTerms),
       );
-    } else {
+    } else if (activeTab === "manual") {
       list = list.filter((r) => r.auto !== true);
+    } else {
+      list = [];
     }
     if (filterProvider !== "all") list = list.filter((r) => r.provider === filterProvider);
     if (filterSentiment !== "all") list = list.filter((r) => r.sentiment === filterSentiment);
+    if (trackedPrompts && trackedFilter !== "all") {
+      const split = splitTrackedGroups(list, trackedPrompts);
+      list = trackedFilter === "tracked" ? split.tracked : split.untracked;
+    }
     return list;
-  }, [runs, filterProvider, filterSentiment, responseTab, brandTerms]);
+  }, [runs, filterProvider, filterSentiment, activeTab, brandTerms, trackedPrompts, trackedFilter]);
+
+  async function runPromptAction(prompt: string, fn: () => Promise<unknown>) {
+    setBusyPrompts((b) => new Set(b).add(prompt));
+    try {
+      await fn();
+    } finally {
+      setBusyPrompts((b) => {
+        const n = new Set(b);
+        n.delete(prompt);
+        return n;
+      });
+    }
+  }
+
+  function archiveGroup(prompt: string) {
+    if (!onArchivePrompts) return;
+    if (!window.confirm(buildArchiveConfirm(prompt))) return;
+    void runPromptAction(prompt, () => onArchivePrompts([prompt]));
+  }
+
+  function purgeGroup(prompt: string) {
+    if (!onPurgePrompts) return;
+    if (!window.confirm(buildPurgeConfirm(prompt))) return;
+    void runPromptAction(prompt, () => onPurgePrompts([prompt]));
+  }
 
   // Group runs by prompt
   const promptGroups = useMemo(() => {
@@ -623,17 +707,59 @@ export function ReputationSourcesTab({
     return m;
   }, [runDeltas]);
 
+  // 기간 선택 — 보관함 탭에서는 숨긴다(보관함은 기간과 상관없이 전체를 다룬다)
   const rangeSelector =
-    windowDays != null && onWindowDaysChange ? (
+    activeTab !== "archive" && windowDays != null && onWindowDaysChange ? (
       <div className="flex justify-end">
         <RangeSelector value={windowDays} onChange={onWindowDaysChange} />
       </div>
     ) : null;
 
+  const tabButton = (key: ResponseTab, label: string) => (
+    <button
+      type="button"
+      onClick={() => setResponseTab(key)}
+      aria-pressed={activeTab === key}
+      className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+        activeTab === key ? "bg-th-accent text-th-text-inverse shadow-sm" : "text-th-text-secondary hover:bg-th-card-hover"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  // 하위 탭 막대 — 응답이 하나도 없어도(전부 보관해도) 항상 그린다. 그래야 보관함으로 가는 길이 남는다.
+  const tabBar = (
+    <div className="grid grid-cols-2 gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1 sm:flex">
+      {tabButton("auto-info", "일반 응답 (자동)")}
+      {tabButton("auto-branded", "brand 응답 (자동)")}
+      {tabButton("manual", "수동 응답")}
+      {archiveEnabled && tabButton("archive", archivedQuestions ? `보관함 (${archivedQuestions})` : "보관함")}
+    </div>
+  );
+
+  if (activeTab === "archive" && archiveEnabled && workspaceId && onArchivePrompts && onRestorePrompts && onArchiveAllUntracked) {
+    return (
+      <div className="space-y-4">
+        {tabBar}
+        <ResponseArchivePanel
+          workspaceId={workspaceId}
+          refreshKey={archiveRefreshKey}
+          onArchive={onArchivePrompts}
+          onArchiveAllUntracked={onArchiveAllUntracked}
+          onRestore={onRestorePrompts}
+          onPurge={onPurgePrompts}
+          onCountsChange={(c: ArchiveCounts) => setArchivedQuestions(c.archivedQuestions)}
+        />
+      </div>
+    );
+  }
+
   if (runs.length === 0) {
     return (
       <div className="space-y-4">
         {rangeSelector}
+        {tabBar}
         <div className="rounded-lg border border-th-border bg-th-card-alt p-8 text-center">
         <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-th-accent-soft">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-th-text-accent">
@@ -652,46 +778,15 @@ export function ReputationSourcesTab({
     <div className="space-y-4">
       {rangeSelector}
 
-      {/* ── 1단 3분할 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답 ── */}
-      <div className="flex gap-0.5 rounded-lg border border-th-border bg-th-card-alt p-1">
-        <button
-          onClick={() => setResponseTab("auto-info")}
-          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            responseTab === "auto-info"
-              ? "bg-th-accent text-th-text-inverse shadow-sm"
-              : "text-th-text-secondary hover:bg-th-card-hover"
-          }`}
-        >
-          일반 응답 (자동)
-        </button>
-        <button
-          onClick={() => setResponseTab("auto-branded")}
-          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            responseTab === "auto-branded"
-              ? "bg-th-accent text-th-text-inverse shadow-sm"
-              : "text-th-text-secondary hover:bg-th-card-hover"
-          }`}
-        >
-          brand 응답 (자동)
-        </button>
-        <button
-          onClick={() => setResponseTab("manual")}
-          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            responseTab === "manual"
-              ? "bg-th-accent text-th-text-inverse shadow-sm"
-              : "text-th-text-secondary hover:bg-th-card-hover"
-          }`}
-        >
-          수동 응답
-        </button>
-      </div>
+      {/* ── 하위 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답 / 보관함 ── */}
+      {tabBar}
 
       {/* ── Insight cards ── */}
       {insights && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
           <InsightMini
             label="평균 점수"
-            value={`${insights.avgScore}/${responseTab === "auto-branded" ? "55" : "100"}`}
+            value={`${insights.avgScore}/${activeTab === "auto-branded" ? "55" : "100"}`}
             accent
           />
           <InsightMini label="브랜드 언급" value={`${insights.brandMentioned}/${filteredRuns.length}`} />
@@ -779,11 +874,25 @@ export function ReputationSourcesTab({
           <option value="score">정렬: 점수순</option>
         </select>
 
+        {/* 질문 필터 — 질문 목록에 있는 질문·없는 질문 */}
+        {trackedPrompts && (
+          <select
+            value={trackedFilter}
+            onChange={(e) => setTrackedFilter(e.target.value as TrackedFilter)}
+            className="bd-input rounded-lg px-2.5 py-1.5 text-xs"
+            aria-label="질문 목록 필터"
+          >
+            <option value="all">모든 질문</option>
+            <option value="tracked">목록에 있는 질문만</option>
+            <option value="untracked">목록에 없는 질문만</option>
+          </select>
+        )}
+
         <span className="ml-auto text-xs text-th-text-muted">
           <span className="font-semibold text-th-text">{filteredRuns.length}</span> responses across{" "}
           <span className="font-semibold text-th-text">{promptGroups.length}</span> prompt{promptGroups.length > 1 ? "s" : ""}
         </span>
-        {onResetManualResponses && responseTab === "manual" && runs.some((r) => r.auto !== true) && (
+        {onResetManualResponses && activeTab === "manual" && runs.some((r) => r.auto !== true) && (
           <button
             type="button"
             onClick={onResetManualResponses}
@@ -814,41 +923,87 @@ export function ReputationSourcesTab({
             ? Math.round(groupDeltas.reduce((a, b) => a + b, 0) / groupDeltas.length)
             : null;
 
+          // 질문 목록에 없는 질문 — 목록에서 지웠거나, 목록에 넣지 않고 한 번 실행해 본 질문
+          const untrackedGroup = !!trackedSet && !trackedSet.has(prompt);
+          const groupBusy = busyPrompts.has(prompt);
+
           return (
             <div key={prompt} className="rounded-xl border border-th-border bg-th-card-alt">
-              {/* Prompt header */}
-              <button
-                onClick={() =>
-                  setExpandedGroups((prev) => ({ ...prev, [prompt]: !open }))
-                }
-                className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-th-card-hover transition-colors rounded-t-xl"
-              >
-                <span className="mt-0.5 text-xs text-th-text-muted">{open ? "▼" : "▶"}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium leading-snug text-th-text">
-                    {prompt.length > 120 ? prompt.slice(0, 117) + "…" : prompt}
-                  </div>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    {providers.map((p) => (
-                      <ProviderBadge key={p} provider={p} />
-                    ))}
-                    <span className="text-xs text-th-text-muted">
-                      {groupRuns.length} response{groupRuns.length > 1 ? "s" : ""}
-                    </span>
-                    <span className="text-xs text-th-text-muted">·</span>
-                    <span className={`text-xs font-semibold ${scoreColor}`}>
-                      Avg: {avgScore}/100
-                    </span>
-                    {avgDelta != null && avgDelta !== 0 && (
-                      <span className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs font-bold ${
-                        avgDelta > 0 ? "bg-th-success-soft text-th-success" : "bg-th-danger-soft text-th-danger"
-                      }`}>
-                        {avgDelta > 0 ? "↑" : "↓"}{Math.abs(avgDelta)}
+              {/* Prompt header — 접기 버튼과 동작 버튼을 형제로 둔다(버튼 안에 버튼을 넣지 않는다) */}
+              <div className="flex flex-wrap items-start rounded-t-xl hover:bg-th-card-hover transition-colors">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpandedGroups((prev) => ({ ...prev, [prompt]: !open }))
+                  }
+                  aria-expanded={open}
+                  className="flex min-w-0 flex-1 basis-[16rem] items-start gap-3 px-4 py-3 text-left"
+                >
+                  <span className="mt-0.5 text-xs text-th-text-muted">{open ? "▼" : "▶"}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="break-words text-sm font-medium leading-snug text-th-text">
+                      {prompt.length > 120 ? prompt.slice(0, 117) + "…" : prompt}
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      {untrackedGroup && (
+                        <span
+                          className="rounded-full border border-th-border bg-th-card px-2 py-0.5 text-[11px] font-medium text-th-text-muted"
+                          title="질문 목록에서 지웠거나, 목록에 넣지 않고 한 번 실행해 본 질문입니다"
+                        >
+                          질문 목록에 없음
+                        </span>
+                      )}
+                      {providers.map((p) => (
+                        <ProviderBadge key={p} provider={p} />
+                      ))}
+                      <span className="text-xs text-th-text-muted">
+                        {groupRuns.length} response{groupRuns.length > 1 ? "s" : ""}
                       </span>
+                      <span className="text-xs text-th-text-muted">·</span>
+                      <span className={`text-xs font-semibold ${scoreColor}`}>
+                        Avg: {avgScore}/100
+                      </span>
+                      {avgDelta != null && avgDelta !== 0 && (
+                        <span className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs font-bold ${
+                          avgDelta > 0 ? "bg-th-success-soft text-th-success" : "bg-th-danger-soft text-th-danger"
+                        }`}>
+                          {avgDelta > 0 ? "↑" : "↓"}{Math.abs(avgDelta)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+                {untrackedGroup && archiveEnabled && (
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-4 pb-3 sm:pt-3">
+                    <button
+                      type="button"
+                      disabled={groupBusy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        archiveGroup(prompt);
+                      }}
+                      className="rounded-md border border-th-border bg-th-card px-2.5 py-1 text-xs text-th-text-secondary hover:bg-th-card-hover disabled:cursor-not-allowed disabled:opacity-50"
+                      title="이 질문의 응답을 모두 보관함으로 옮깁니다(보관함에서 되돌릴 수 있습니다)"
+                    >
+                      보관함으로
+                    </button>
+                    {onPurgePrompts && (
+                      <button
+                        type="button"
+                        disabled={groupBusy}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          purgeGroup(prompt);
+                        }}
+                        className="rounded-md border border-th-danger/40 bg-th-card px-2.5 py-1 text-xs text-th-danger hover:bg-th-danger-soft disabled:cursor-not-allowed disabled:opacity-50"
+                        title="이 질문의 응답을 모두 영구 삭제합니다(되돌릴 수 없습니다)"
+                      >
+                        영구 삭제
+                      </button>
                     )}
                   </div>
-                </div>
-              </button>
+                )}
+              </div>
 
               {/* Model cards */}
               {open && (

@@ -6,6 +6,8 @@
  *   화면(GET /prompts 를 active 로만 거른 목록)에는 꺼짐이라는 개념이 안 보이므로, 과거에
  *   제거됐던 문구를 다시 추가하면 유니크 제약(uq_prompts_workspace_text)에 막혀 영영 안
  *   보이는 문제가 있었다 — ON CONFLICT DO UPDATE 로 해결(아래 POST 주석 참고).
+ *   보관함에 그 문구의 응답이 있으면 같은 트랜잭션에서 되돌리고 응답에 restoredRuns(건수)를 싣는다
+ *   (계획 geotracker-response-archive-260924 §S8).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -13,6 +15,7 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { asc, eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import { lockResponseArchive, restoreByTexts } from "@/lib/server/run-archive";
 
 export const dynamic = "force-dynamic";
 
@@ -55,23 +58,34 @@ export async function POST(
   try {
     const body = await req.json();
     const parsed = CreatePromptSchema.parse(body);
+    // 한 트랜잭션: 보관 잠금 → 추가(없으면 생성·있으면 다시 켜기) → 그 문구의 보관 응답 되돌리기.
+    //   - 잠금: 다른 관리자가 같은 문구를 보관·영구 삭제하는 동작과 겹치지 않게 줄을 세운다
+    //     (계획 geotracker-response-archive-260924 §2-5 — 켜기 커밋 전 상태를 본 영구 삭제가 방금
+    //     켠 질문의 응답을 지우는 경합을 막는다).
+    //   - 되돌리기: 질문 목록에 있는 질문의 응답은 보관 상태가 아니어야 한다(I1). 되돌린 건수는
+    //     restoredRuns 로 알려 화면이 안내한다(숨은 동작이 아니다).
     // ON CONFLICT DO UPDATE — select-then-insert 방식의 경합(TOCTOU) 없이 "없으면 생성,
     // 있으면 재활성화"를 한 쿼리로 처리한다. 태그는 기존 값을 유지(재추가 요청의 tags 로
     // 덮어쓰지 않음) — active 만 되돌린다.
-    const [prompt] = await db
-      .insert(schema.prompts)
-      .values({
-        workspaceId: id,
-        text: parsed.text,
-        tags: parsed.tags,
-        active: true,
-      })
-      .onConflictDoUpdate({
-        target: [schema.prompts.workspaceId, schema.prompts.text],
-        set: { active: true },
-      })
-      .returning();
-    return NextResponse.json({ prompt }, { status: 201 });
+    const { prompt, restoredRuns } = await db.transaction(async (tx) => {
+      await lockResponseArchive(tx, id);
+      const [saved] = await tx
+        .insert(schema.prompts)
+        .values({
+          workspaceId: id,
+          text: parsed.text,
+          tags: parsed.tags,
+          active: true,
+        })
+        .onConflictDoUpdate({
+          target: [schema.prompts.workspaceId, schema.prompts.text],
+          set: { active: true },
+        })
+        .returning();
+      const restored = await restoreByTexts(tx, id, [parsed.text]);
+      return { prompt: saved, restoredRuns: restored.affectedRuns };
+    });
+    return NextResponse.json({ prompt, restoredRuns }, { status: 201 });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });

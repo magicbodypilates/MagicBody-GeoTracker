@@ -28,6 +28,9 @@ type PromptRow = {
 const H = vi.hoisted(() => {
   const store: { prompts: PromptRow[] } = { prompts: [] };
   let seq = 1;
+  /** 호출 순서 기록 — 보관 잠금 → 추가(upsert) → 보관 응답 되돌리기(응답 보관 §S8). */
+  const order: string[] = [];
+  let restoredRunsNext = 0;
 
   const insertBuilder = () => {
     let vals: Partial<PromptRow> | null = null;
@@ -42,6 +45,7 @@ const H = vi.hoisted(() => {
         return api;
       },
       returning() {
+        order.push("upsert");
         const existing = store.prompts.find(
           (r) => r.workspaceId === vals!.workspaceId && r.text === vals!.text,
         );
@@ -73,6 +77,8 @@ const H = vi.hoisted(() => {
 
   const db = {
     insert: (_table: unknown) => insertBuilder(),
+    // 라우트는 잠금·추가·되돌리기를 한 트랜잭션으로 묶는다 — 가짜는 같은 가짜 db 로 콜백을 부른다.
+    transaction: <T,>(fn: (tx: unknown) => Promise<T>) => fn(db),
   };
 
   const schema = {
@@ -86,14 +92,32 @@ const H = vi.hoisted(() => {
     store,
     db,
     schema,
+    order,
+    setRestoredRuns: (n: number) => {
+      restoredRunsNext = n;
+    },
+    lockResponseArchive: vi.fn(async (_tx: unknown, wsId: string) => {
+      order.push(`lock:${wsId}`);
+    }),
+    restoreByTexts: vi.fn(async (_tx: unknown, wsId: string, texts: string[]) => {
+      order.push(`restore:${wsId}:${texts.join("|")}`);
+      return { affectedRuns: restoredRunsNext, affectedQuestions: restoredRunsNext > 0 ? 1 : 0, skippedInList: [] };
+    }),
     reset: () => {
       store.prompts = [];
       seq = 1;
+      order.length = 0;
+      restoredRunsNext = 0;
     },
   };
 });
 
 vi.mock("@/lib/server/db", () => ({ db: H.db, schema: H.schema }));
+
+vi.mock("@/lib/server/run-archive", () => ({
+  lockResponseArchive: H.lockResponseArchive,
+  restoreByTexts: H.restoreByTexts,
+}));
 
 vi.mock("@/lib/server/auth-guard", () => ({
   getSession: async () => ({ kind: "admin", role: 0 }),
@@ -117,6 +141,8 @@ function post(body: unknown) {
 
 beforeEach(() => {
   H.reset();
+  H.lockResponseArchive.mockClear();
+  H.restoreByTexts.mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -215,6 +241,38 @@ describe("POST /api/workspaces/:id/prompts — 추가 = 없으면 생성, 있으
       const body = await res.json();
       expect(JSON.stringify(body)).not.toMatch(/uq_prompts_workspace_text|Failed query/);
       expect(body.error).toBe("prompt_create_failed");
+    } finally {
+      H.db.insert = original;
+    }
+  });
+});
+
+describe("POST /api/workspaces/:id/prompts — 보관 응답 자동 복원 (응답 보관 §S8)", () => {
+  it("한 트랜잭션에서 잠금 → 추가 → 그 문구 되돌리기 순서로 부르고, 되돌린 건수를 restoredRuns 로 싣는다", async () => {
+    H.setRestoredRuns(7);
+    const res = await post({ text: "다시 추가한 질문", tags: [] });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.restoredRuns).toBe(7);
+    expect(body.prompt.text).toBe("다시 추가한 질문");
+    expect(H.order).toEqual([`lock:${WS}`, "upsert", `restore:${WS}:다시 추가한 질문`]);
+  });
+
+  it("되돌릴 응답이 없으면 restoredRuns = 0", async () => {
+    const res = await post({ text: "처음 추가하는 질문", tags: [] });
+    expect(res.status).toBe(201);
+    expect((await res.json()).restoredRuns).toBe(0);
+  });
+
+  it("추가가 실패하면 되돌리기를 부르지 않는다(트랜잭션 전체 실패 → 500)", async () => {
+    const original = H.db.insert;
+    H.db.insert = (() => ({
+      values: () => ({ onConflictDoUpdate: () => ({ returning: () => Promise.reject(new Error("Failed query: x")) }) }),
+    })) as unknown as typeof H.db.insert;
+    try {
+      const res = await post({ text: "실패 질문", tags: [] });
+      expect(res.status).toBe(500);
+      expect(H.restoreByTexts).not.toHaveBeenCalledWith(expect.anything(), WS, ["실패 질문"]);
     } finally {
       H.db.insert = original;
     }

@@ -15,7 +15,18 @@ import {
   purgeWorkspace,
   setCachedWorkspaceId,
   DEFAULT_RUNS_WINDOW_DAYS,
+  archivePromptResponses,
+  archiveAllUntracked as serverArchiveAllUntracked,
+  restorePromptResponses,
+  purgePromptResponses,
 } from "@/lib/client/server-store";
+import { createRequestGeneration } from "@/lib/client/request-generation";
+import {
+  archiveDoneMessage,
+  purgeDoneMessage,
+  readdRestoredMessage,
+  restoreDoneMessage,
+} from "@/lib/client/response-archive-utils";
 import { isBrandedPrompt } from "@/lib/client/branded-prompt";
 import { toKstDateKey } from "@/lib/client/date-kst";
 import { DEMO_STATE } from "@/lib/demo-data";
@@ -42,7 +53,7 @@ import { GscPerformanceTab } from "@/components/dashboard/tabs/gsc-performance-t
 import { Ga4ReferralTab } from "@/components/dashboard/tabs/ga4-referral-tab";
 import { NaverAiTab } from "@/components/dashboard/tabs/naver-ai-tab";
 import { BingCitationsTab } from "@/components/dashboard/tabs/bing-citations-tab";
-import type { AppState, Battlecard, Citation, Provider, RunDelta, ScrapeRun, TabKey, Workspace } from "@/components/dashboard/types";
+import type { AppState, ArchiveActionResult, Battlecard, Citation, Provider, RunDelta, ScrapeRun, TabKey, Workspace } from "@/components/dashboard/types";
 import { VISIBLE_PROVIDERS, PROVIDER_LABELS, tabsForRole } from "@/components/dashboard/types";
 import { useAuth } from "@/components/auth/auth-context";
 import { splitAnswerSections } from "@/components/dashboard/answer-utils";
@@ -556,6 +567,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const bumpStatsRefresh = useCallback(() => setStatsRefreshNonce((n) => n + 1), []);
 
   /**
+   * 응답 목록 재조회 세대 번호 (응답 보관 §S9).
+   * 탭 전환·60초 재조회는 출발 때 세대를 잡고 도착 때 최신이 아니면 결과를 버린다. 보관·되돌리기·
+   * 영구 삭제·응답 삭제·자동 복원은 시작과 끝에 무효화한다 — 그래야 보관한 질문이 옛 목록으로
+   * 잠깐 다시 나타나지 않는다(변경 중에 출발한 재조회까지 버린다).
+   */
+  const runsGenRef = useRef(createRequestGeneration());
+  /** 보관·되돌리기·영구 삭제·자동 복원 뒤 +1 — AI 응답 탭의 보관함 숫자·패널이 다시 읽는다. */
+  const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
+
+  /**
    * Load app state — Phase 5A 이후 서버 DB 에서 로드.
    * IndexedDB 는 폴백 캐시로만 유지 (서버 오류 시 참조).
    * brand / prompts / competitors / runs / auditHistory → 서버 기준
@@ -630,9 +651,10 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const wsId = serverWsId;
     let cancelled = false;
     (async () => {
+      const gen = runsGenRef.current.capture();
       try {
         const fresh = await loadFromServer(wsId, runsWindowDays);
-        if (cancelled) return;
+        if (cancelled || !runsGenRef.current.isCurrent(gen)) return;
         setState((prev) => ({
           ...prev,
           runs: fresh.runs ?? prev.runs,
@@ -662,9 +684,10 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const wsId = serverWsId;
     let cancelled = false;
     const refetch = async () => {
+      const gen = runsGenRef.current.capture();
       try {
         const fresh = await loadFromServer(wsId, runsWindowDays);
-        if (cancelled) return;
+        if (cancelled || !runsGenRef.current.isCurrent(gen)) return;
         setState((prev) => ({
           ...prev,
           runs: fresh.runs ?? prev.runs,
@@ -680,6 +703,33 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       clearInterval(t);
     };
   }, [serverWsId, loaded, demoMode, runsWindowDays]);
+
+  /**
+   * 응답 목록만 지금 다시 읽는다 — 보관·되돌리기 등 변경 동작이 끝난 뒤 부른다.
+   * 출발 때 새 세대를 잡으므로(변경 동작의 끝 무효화 뒤) 그 결과는 반영된다.
+   */
+  const reloadRunsNow = useCallback(async () => {
+    if (demoMode || !serverWsId) return;
+    const wsId = serverWsId;
+    const gen = runsGenRef.current.capture();
+    try {
+      const fresh = await loadFromServer(wsId, runsWindowDays);
+      if (!runsGenRef.current.isCurrent(gen)) return;
+      setState((prev) => ({ ...prev, runs: fresh.runs ?? prev.runs }));
+    } catch (e) {
+      console.warn("[dashboard] 응답 목록 다시 읽기 실패:", e instanceof Error ? e.message : e);
+    }
+  }, [demoMode, serverWsId, runsWindowDays]);
+
+  /** 응답 목록을 바꾸는 동작의 공통 흐름 — 시작·끝(성공·실패 모두)에 재조회 세대를 무효화한다. */
+  const withRunsMutation = useCallback(async <T,>(op: () => Promise<T>): Promise<T> => {
+    runsGenRef.current.invalidate();
+    try {
+      return await op();
+    } finally {
+      runsGenRef.current.invalidate();
+    }
+  }, []);
 
   /**
    * 브랜드 설정 debounced 서버 동기화 (600ms)
@@ -940,6 +990,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }, [state.runs]);
 
   const latestRun = informationalAutoRuns[0];
+
+  /** 질문 목록(켜진 질문)의 문구 — AI 응답 탭의 「질문 목록에 없음」 표시·질문 필터 기준(응답 보관 §5-1). */
+  const trackedPromptTexts = useMemo(() => state.customPrompts.map((p) => p.text), [state.customPrompts]);
 
   /** Compute score deltas: 일반 검색 응답 한정 (brand prompt 는 점수 의미가 달라 비교 부적절) */
   const runDeltas: RunDelta[] = useMemo(() => {
@@ -1611,10 +1664,22 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts] };
     });
     // 서버 동기 (실패 시 UI 롤백은 하지 않고 경고만 — 낙관 업데이트 유지)
-    addPromptIfNew(serverWsId, { text: cleaned, tags: [] }).catch((e) => {
-      console.error("[dashboard] 서버 프롬프트 추가 실패:", e);
-      setMessage("⚠️ 서버 저장 실패 — 새로고침 시 사라질 수 있습니다");
-    });
+    // 보관함에 있던 이 질문의 응답을 서버가 함께 되돌렸으면(restoredRuns > 0) 안내를 바꾸고 목록·통계·
+    // 보관함을 다시 읽는다(응답 보관 §S9). 응답 목록이 바뀌는 동작이라 재조회 세대 흐름으로 감싼다.
+    const wsId = serverWsId;
+    withRunsMutation(() => addPromptIfNew(wsId, { text: cleaned, tags: [] }))
+      .then((saved) => {
+        if (saved.restoredRuns > 0) {
+          setMessage(readdRestoredMessage(saved.restoredRuns));
+          void reloadRunsNow();
+          bumpStatsRefresh();
+          setArchiveRefreshKey((k) => k + 1);
+        }
+      })
+      .catch((e) => {
+        console.error("[dashboard] 서버 프롬프트 추가 실패:", e);
+        setMessage("⚠️ 서버 저장 실패 — 새로고침 시 사라질 수 있습니다");
+      });
     setMessage("추적 프롬프트가 추가되었습니다.");
   }
 
@@ -1677,21 +1742,25 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     // 서버 DB 에 저장된 응답이면 (id 있음) DELETE API 호출 → 통계도 즉시 반영됨.
     // 통계 API 들이 runs 테이블을 직접 쿼리하므로 별도 캐시 무효화 불필요.
+    // 응답 목록이 바뀌는 동작이라 재조회 세대 흐름으로 감싼다(삭제 중 출발한 재조회가 되살리지 않게).
     if (target.id && serverWsId) {
-      try {
-        const response = await fetch(
-          `${BP}/api/workspaces/${serverWsId}/runs/${target.id}`,
-          { method: "DELETE" },
-        );
-        if (!response.ok && response.status !== 404) {
-          const err = await response.json().catch(() => ({}));
-          setMessage(`응답 삭제 실패: ${err.error ?? response.status}`);
-          return;
+      const wsId = serverWsId;
+      const runId = target.id;
+      const failed = await withRunsMutation(async () => {
+        try {
+          const response = await fetch(`${BP}/api/workspaces/${wsId}/runs/${runId}`, { method: "DELETE" });
+          if (!response.ok && response.status !== 404) {
+            const err = await response.json().catch(() => ({}));
+            setMessage(`응답 삭제 실패: ${err.error ?? response.status}`);
+            return true;
+          }
+          return false;
+        } catch (err) {
+          setMessage(`응답 삭제 오류: ${err instanceof Error ? err.message : "unknown"}`);
+          return true;
         }
-      } catch (err) {
-        setMessage(`응답 삭제 오류: ${err instanceof Error ? err.message : "unknown"}`);
-        return;
-      }
+      });
+      if (failed) return;
     }
 
     setState((prev) => ({
@@ -1700,6 +1769,91 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }));
     bumpStatsRefresh();
     setMessage("응답 삭제됨");
+  }
+
+  /* ── 응답 보관함 (계획 geotracker-response-archive-260924 §S9) ──
+   * 확인 창은 화면 부품이 띄우고, 여기 핸들러는 확인 없이 실행한다. 실패하면 안내 문구만 바꾼다. */
+
+  /** 질문(문구) 단위로 응답을 보관함으로 — 켜진 질문은 서버가 건너뛴다. */
+  async function archivePrompts(texts: string[]): Promise<ArchiveActionResult | null> {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return null; }
+    if (!serverWsId || texts.length === 0) return null;
+    const wsId = serverWsId;
+    try {
+      const res = await withRunsMutation(() => archivePromptResponses(wsId, texts));
+      const skipped = new Set(res.skippedInList);
+      const moved = new Set(texts.filter((t) => !skipped.has(t)));
+      setState((prev) => ({ ...prev, runs: prev.runs.filter((r) => !moved.has(r.prompt)) }));
+      bumpStatsRefresh();
+      setArchiveRefreshKey((k) => k + 1);
+      setMessage(archiveDoneMessage(res.affectedRuns, res.skippedInList));
+      void reloadRunsNow();
+      return res;
+    } catch (e) {
+      console.error("[dashboard] 보관 실패:", e);
+      setMessage("보관하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      return null;
+    }
+  }
+
+  /** 질문 목록에 없는 응답을 모두 보관함으로 — asOf(보관함 ①을 불러온 시각)까지 생긴 응답만. */
+  async function archiveAllUntrackedPrompts(asOf: string): Promise<ArchiveActionResult | null> {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return null; }
+    if (!serverWsId) return null;
+    const wsId = serverWsId;
+    try {
+      const res = await withRunsMutation(() => serverArchiveAllUntracked(wsId, asOf));
+      bumpStatsRefresh();
+      setArchiveRefreshKey((k) => k + 1);
+      setMessage(archiveDoneMessage(res.affectedRuns));
+      void reloadRunsNow();
+      return res;
+    } catch (e) {
+      console.error("[dashboard] 모두 보관 실패:", e);
+      setMessage("보관하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      return null;
+    }
+  }
+
+  /** 보관함에서 되돌리기 — 목록·통계에 그대로 다시 들어간다. */
+  async function restorePrompts(texts: string[]): Promise<ArchiveActionResult | null> {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return null; }
+    if (!serverWsId || texts.length === 0) return null;
+    const wsId = serverWsId;
+    try {
+      const res = await withRunsMutation(() => restorePromptResponses(wsId, texts));
+      bumpStatsRefresh();
+      setArchiveRefreshKey((k) => k + 1);
+      setMessage(restoreDoneMessage(res.affectedRuns));
+      void reloadRunsNow();
+      return res;
+    } catch (e) {
+      console.error("[dashboard] 되돌리기 실패:", e);
+      setMessage("되돌리지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      return null;
+    }
+  }
+
+  /** 영구 삭제(되돌릴 수 없음) — 삭제 권한이 있을 때만 화면에 버튼이 있다. */
+  async function purgePrompts(texts: string[]): Promise<ArchiveActionResult | null> {
+    if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return null; }
+    if (!serverWsId || texts.length === 0) return null;
+    const wsId = serverWsId;
+    try {
+      const res = await withRunsMutation(() => purgePromptResponses(wsId, texts));
+      const skipped = new Set(res.skippedInList);
+      const removed = new Set(texts.filter((t) => !skipped.has(t)));
+      setState((prev) => ({ ...prev, runs: prev.runs.filter((r) => !removed.has(r.prompt)) }));
+      bumpStatsRefresh();
+      setArchiveRefreshKey((k) => k + 1);
+      setMessage(purgeDoneMessage(res.affectedRuns));
+      void reloadRunsNow();
+      return res;
+    } catch (e) {
+      console.error("[dashboard] 영구 삭제 실패:", e);
+      setMessage("영구 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      return null;
+    }
   }
 
   function extractNicheQueries(payload: unknown) {
@@ -2381,6 +2535,13 @@ ${exampleJson}
           onResetManualResponses={handleResetManualResponses}
           windowDays={runsWindowDays}
           onWindowDaysChange={setRunsWindowDays}
+          trackedPrompts={trackedPromptTexts}
+          workspaceId={demoMode ? undefined : serverWsId ?? undefined}
+          onArchivePrompts={archivePrompts}
+          onArchiveAllUntracked={archiveAllUntrackedPrompts}
+          onRestorePrompts={restorePrompts}
+          onPurgePrompts={!demoMode && auth.kind === "admin" ? purgePrompts : undefined}
+          archiveRefreshKey={archiveRefreshKey}
         />
       );
     }

@@ -114,24 +114,46 @@ const H = vi.hoisted(() => {
     return api;
   };
 
+  /** 호출 순서 기록 — 보관 잠금 → 수정 → 보관 응답 되돌리기(응답 보관 §S8). */
+  const order: string[] = [];
+
   const db = {
     select: (proj?: Record<string, { name: string }>) => selectBuilder(proj),
-    update: (t: { __table: string }) => updateBuilder(t),
+    update: (t: { __table: string }) => {
+      order.push("update");
+      return updateBuilder(t);
+    },
     delete: (t: { __table: string }) => deleteBuilder(t),
+    // PATCH 가 켜짐·문구를 바꿀 때 잠금·수정·되돌리기를 한 트랜잭션으로 묶는다 — 같은 가짜로 콜백을 부른다.
+    transaction: <T,>(fn: (tx: unknown) => Promise<T>) => fn(db),
   };
 
   return {
     store,
     db,
     schema,
+    order,
+    lockResponseArchive: vi.fn(async (_tx: unknown, wsId: string) => {
+      order.push(`lock:${wsId}`);
+    }),
+    restoreByTexts: vi.fn(async (_tx: unknown, wsId: string, texts: string[]) => {
+      order.push(`restore:${wsId}:${texts.join("|")}`);
+      return { affectedRuns: 3, affectedQuestions: 1, skippedInList: [] };
+    }),
     reset: () => {
       store.prompts = [];
       store.runs = [];
+      order.length = 0;
     },
   };
 });
 
 vi.mock("@/lib/server/db", () => ({ db: H.db, schema: H.schema }));
+
+vi.mock("@/lib/server/run-archive", () => ({
+  lockResponseArchive: H.lockResponseArchive,
+  restoreByTexts: H.restoreByTexts,
+}));
 
 vi.mock("drizzle-orm", async (importOriginal) => {
   const actual = await importOriginal<typeof import("drizzle-orm")>();
@@ -187,6 +209,8 @@ function deleteReq(id: string, qs = "") {
 
 beforeEach(() => {
   H.reset();
+  H.lockResponseArchive.mockClear();
+  H.restoreByTexts.mockClear();
   getSessionMock.mockReset();
   assertWorkspaceAccessMock.mockReset();
   requireAdminMock.mockReset();
@@ -374,5 +398,59 @@ describe("DELETE /api/prompts/:id — 워크스페이스 권한 확인", () => {
     } finally {
       H.db.select = original;
     }
+  });
+});
+
+describe("PATCH /api/prompts/:id — 켜면 보관 응답 자동 복원 (응답 보관 §S8)", () => {
+  beforeEach(() => {
+    getSessionMock.mockResolvedValue({ kind: "user", role: 1, uid: "u1" });
+    assertWorkspaceAccessMock.mockResolvedValue(null);
+  });
+
+  it("다시 켜기(active=true) → 잠금 → 수정 → 그 문구 되돌리기 순서 · restoredRuns", async () => {
+    seedPrompt(uid(20), WS_A, { text: "꺼졌던 질문", active: false });
+    const res = await patchReq(uid(20), { active: true });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.prompt.active).toBe(true);
+    expect(body.restoredRuns).toBe(3);
+    expect(H.order).toEqual([`lock:${WS_A}`, "update", `restore:${WS_A}:꺼졌던 질문`]);
+  });
+
+  it("켜진 질문의 문구를 바꾸면 **바뀐 문구**를 되돌린다", async () => {
+    seedPrompt(uid(21), WS_A, { text: "옛 문구", active: true });
+    const res = await patchReq(uid(21), { text: "새 문구" });
+    expect(res.status).toBe(200);
+    expect(H.restoreByTexts).toHaveBeenCalledTimes(1);
+    expect(H.restoreByTexts.mock.calls[0].slice(1)).toEqual([WS_A, ["새 문구"]]);
+  });
+
+  it("끄기(active=false) → 잠금·수정은 하되 되돌리지 않는다 · restoredRuns 0", async () => {
+    seedPrompt(uid(22), WS_A, { text: "끌 질문", active: true });
+    const res = await patchReq(uid(22), { active: false });
+    expect(res.status).toBe(200);
+    expect((await res.json()).restoredRuns).toBe(0);
+    expect(H.lockResponseArchive).toHaveBeenCalledTimes(1);
+    expect(H.restoreByTexts).not.toHaveBeenCalled();
+  });
+
+  it("태그만 바꾸면 잠금·되돌리기 없이 저장 · restoredRuns 0", async () => {
+    seedPrompt(uid(23), WS_A, { text: "태그 질문", active: true });
+    const res = await patchReq(uid(23), { tags: ["새 태그"] });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.prompt.tags).toEqual(["새 태그"]);
+    expect(body.restoredRuns).toBe(0);
+    expect(H.lockResponseArchive).not.toHaveBeenCalled();
+    expect(H.restoreByTexts).not.toHaveBeenCalled();
+  });
+
+  it("권한이 없으면 잠금·되돌리기까지 가지 않는다", async () => {
+    seedPrompt(uid(24), WS_B, { text: "남의 질문", active: false });
+    assertWorkspaceAccessMock.mockResolvedValue(NextResponse.json({ error: "forbidden" }, { status: 403 }));
+    const res = await patchReq(uid(24), { active: true });
+    expect(res.status).toBe(403);
+    expect(H.lockResponseArchive).not.toHaveBeenCalled();
+    expect(H.restoreByTexts).not.toHaveBeenCalled();
   });
 });

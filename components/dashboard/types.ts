@@ -162,6 +162,50 @@ export const SCHEDULE_OPTIONS: { value: ScheduleInterval; label: string; desc: s
   { value: 86400000, label: "매일", desc: "하루 1회 실행" },
 ];
 
+/* ============================================================
+ * 응답 보관함 (계획 geotracker-response-archive-260924 §S9)
+ * ============================================================ */
+
+/** 보관함 보기 — untracked = 아직 정리하지 않은 질문 · archived = 보관한 질문 */
+export type ArchiveView = "archived" | "untracked";
+
+/** 보관함의 질문 한 줄 — 문구 단위로 묶은 응답 건수·기간 */
+export type ArchiveQuestionItem = {
+  promptText: string;
+  runCount: number;
+  autoCount: number;
+  manualCount: number;
+  /** 가장 이른·늦은 응답 시각 (UTC ISO 문자열, 마이크로초 포함) */
+  firstAt: string;
+  lastAt: string;
+  /** view=archived 일 때 보관한 시각(가장 최근) — untracked 는 null */
+  archivedAt: string | null;
+  /** 켜진 질문 목록에 같은 문구가 있는가(보관함 ②의 예외 표시용) */
+  inList: boolean;
+};
+
+export type ArchiveCounts = { archivedQuestions: number; untrackedQuestions: number; untrackedRuns: number };
+
+export type ArchiveListResponse = {
+  view: ArchiveView;
+  /** 최대 200 */
+  items: ArchiveQuestionItem[];
+  nextCursor: string | null;
+  /** 일괄 보관 기준 시각 (DB 시각, 마이크로초 포함 UTC 문자열) */
+  asOf: string;
+  counts: ArchiveCounts;
+};
+
+export type ArchiveActionResult = {
+  ok: true;
+  action: "archive" | "archive_all_untracked" | "restore" | "purge";
+  affectedRuns: number;
+  affectedQuestions: number;
+  skippedInList: string[];
+  /** purge 만 */
+  deletedAlerts?: number;
+};
+
 /** Computed delta for a prompt+provider pair between runs */
 export type RunDelta = {
   prompt: string;

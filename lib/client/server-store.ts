@@ -18,6 +18,9 @@
 
 import type {
   AppState,
+  ArchiveActionResult,
+  ArchiveListResponse,
+  ArchiveView,
   BrandConfig,
   Competitor,
   ScrapeRun,
@@ -92,6 +95,8 @@ type ServerRun = {
   isAuto: boolean;
   intervalSlot: string | null;
   createdAt: string;
+  /** 보관 시각 — null·없음 = 보관 안 함. 목록 API 는 기본으로 보관 응답을 빼고 준다. */
+  archivedAt?: string | null;
 };
 
 type ServerAudit = {
@@ -354,13 +359,14 @@ export async function upsertBrand(wsId: string, brand: BrandConfig): Promise<voi
 export async function addPromptIfNew(
   wsId: string,
   prompt: TaggedPrompt,
-): Promise<ServerPrompt> {
-  const res = await j<{ prompt: ServerPrompt }>(`${BP}/api/workspaces/${wsId}/prompts`, {
+): Promise<ServerPrompt & { restoredRuns: number }> {
+  const res = await j<{ prompt: ServerPrompt; restoredRuns?: number }>(`${BP}/api/workspaces/${wsId}/prompts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: prompt.text, tags: prompt.tags ?? [] }),
   });
-  return res.prompt;
+  // 보관함에 있던 이 문구의 응답을 서버가 함께 되돌렸으면 그 건수(응답 보관 §S8). 옛 서버면 0.
+  return { ...res.prompt, restoredRuns: res.restoredRuns ?? 0 };
 }
 
 /** 텍스트로 찾아 제거. API 는 ID 기반이므로 먼저 목록 조회 후 매칭. */
@@ -468,6 +474,60 @@ export async function appendRun(wsId: string, run: ScrapeRun): Promise<void> {
       createdAt: run.createdAt,
     }),
   });
+}
+
+/* ==========================================================
+ * 응답 보관함 (계획 geotracker-response-archive-260924 §S9)
+ * ========================================================== */
+
+/** 보관함 한 쪽 — view=untracked(아직 정리하지 않은 질문) · archived(보관한 질문). 200개씩. */
+export async function fetchResponseArchive(
+  wsId: string,
+  view: ArchiveView,
+  cursor?: string | null,
+): Promise<ArchiveListResponse> {
+  const qs = new URLSearchParams({ view });
+  if (cursor) qs.set("cursor", cursor);
+  return j<ArchiveListResponse>(`${BP}/api/workspaces/${wsId}/response-archive?${qs.toString()}`);
+}
+
+async function postArchiveAction(wsId: string, body: unknown): Promise<ArchiveActionResult> {
+  return j<ArchiveActionResult>(`${BP}/api/workspaces/${wsId}/response-archive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** 질문(문구) 단위로 응답을 보관함으로 — 켜진 질문은 서버가 건너뛰고 skippedInList 로 알린다. */
+export function archivePromptResponses(wsId: string, promptTexts: string[]): Promise<ArchiveActionResult> {
+  return postArchiveAction(wsId, { action: "archive", promptTexts });
+}
+
+/** 보관함에서 되돌리기. */
+export function restorePromptResponses(wsId: string, promptTexts: string[]): Promise<ArchiveActionResult> {
+  return postArchiveAction(wsId, { action: "restore", promptTexts });
+}
+
+/** 목록 밖 응답을 모두 보관함으로 — asOf(보관함 ①을 불러온 시각)까지 생긴 응답만. */
+export function archiveAllUntracked(wsId: string, asOf: string): Promise<ArchiveActionResult> {
+  return postArchiveAction(wsId, { action: "archive_all_untracked", asOf });
+}
+
+/** 영구 삭제(되돌릴 수 없음) — 삭제 권한이 있는 세션만 서버가 받아 준다. */
+export function purgePromptResponses(wsId: string, promptTexts: string[]): Promise<ArchiveActionResult> {
+  return j<ArchiveActionResult>(`${BP}/api/workspaces/${wsId}/response-archive/purge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ promptTexts }),
+  });
+}
+
+/** 보관함 「응답 보기」 — 그 문구의 보관 응답 최근 limit 건(읽기 전용). */
+export async function fetchArchivedRunsForPrompt(wsId: string, text: string, limit = 20): Promise<ScrapeRun[]> {
+  const qs = new URLSearchParams({ archived: "only", prompt: text, limit: String(limit) });
+  const { runs } = await j<{ runs: ServerRun[] }>(`${BP}/api/workspaces/${wsId}/runs?${qs.toString()}`);
+  return runs.map((r) => scrapeRunFromServer(r));
 }
 
 export async function recordAudit(

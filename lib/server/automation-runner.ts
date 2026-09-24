@@ -849,35 +849,45 @@ export async function runDailyRollup(now: Date = new Date()): Promise<{ date: st
     )
     .groupBy(schema.runs.workspaceId, schema.runs.provider, schema.prompts.id);
 
-  for (const r of rows) {
-    await db
-      .insert(schema.dailyStats)
-      .values({
-        date: dateStr,
-        workspaceId: r.workspaceId,
-        provider: r.provider,
-        promptId: r.promptId,
-        sampleCount: r.sampleCount,
-        avgVisibility: String(r.avgVisibility) as unknown as string,
-        mentionRate: String(r.mentionRate) as unknown as string,
-        positiveSentimentRate: String(r.positiveRate) as unknown as string,
-        citedOfficialRate: String(r.citedRate) as unknown as string,
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.dailyStats.date,
-          schema.dailyStats.workspaceId,
-          schema.dailyStats.provider,
-          schema.dailyStats.promptId,
-        ],
-        set: {
-          sampleCount: r.sampleCount,
-          avgVisibility: String(r.avgVisibility) as unknown as string,
-          mentionRate: String(r.mentionRate) as unknown as string,
-          positiveSentimentRate: String(r.positiveRate) as unknown as string,
-          citedOfficialRate: String(r.citedRate) as unknown as string,
-        },
-      });
+  // ⚠️ 2026-09-25 결함 2 수정 — 그룹 저장 전체를 한 트랜잭션으로 묶는다. 전에는 그룹마다
+  // 개별 insert 라 루프 중간(N번째)에 오류가 나면 1~N-1번째는 이미 커밋된 채로 예외가
+  // 올라갔고, 호출측(maybeRunDailyRollup)의 catch 가 이를 "오늘은 시도했다(실패)"로
+  // 기록해 나머지(N+1번째 이후) 그룹은 그날 다시 시도되지 않았다(부분 성공이 영구
+  // 미완성으로 굳음). 트랜잭션으로 묶으면 전부 성공하거나 전부 롤백되므로, 실패 시엔
+  // 정말 아무것도 저장되지 않은 채로 "실패"가 기록되어 상태와 사실이 일치한다.
+  if (rows.length > 0) {
+    await db.transaction(async (tx) => {
+      for (const r of rows) {
+        await tx
+          .insert(schema.dailyStats)
+          .values({
+            date: dateStr,
+            workspaceId: r.workspaceId,
+            provider: r.provider,
+            promptId: r.promptId,
+            sampleCount: r.sampleCount,
+            avgVisibility: String(r.avgVisibility) as unknown as string,
+            mentionRate: String(r.mentionRate) as unknown as string,
+            positiveSentimentRate: String(r.positiveRate) as unknown as string,
+            citedOfficialRate: String(r.citedRate) as unknown as string,
+          })
+          .onConflictDoUpdate({
+            target: [
+              schema.dailyStats.date,
+              schema.dailyStats.workspaceId,
+              schema.dailyStats.provider,
+              schema.dailyStats.promptId,
+            ],
+            set: {
+              sampleCount: r.sampleCount,
+              avgVisibility: String(r.avgVisibility) as unknown as string,
+              mentionRate: String(r.mentionRate) as unknown as string,
+              positiveSentimentRate: String(r.positiveRate) as unknown as string,
+              citedOfficialRate: String(r.citedRate) as unknown as string,
+            },
+          });
+      }
+    });
   }
 
   return { date: dateStr, rows: rows.length };

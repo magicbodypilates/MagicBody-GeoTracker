@@ -1166,4 +1166,65 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(queueItems.filter((i) => i.status === "failed")).toHaveLength(2);
     expect(await runsOf(wsQueue.id)).toHaveLength(0);
   }, 60_000);
+
+  it("u · 요청 번호 경로 내용 없는 답 — 거두기에서 질문 되돌림 → 2분 뒤 재제출 → 두 번째도 실패 → failed · 회차 완료 · 요약 EMPTY_ANSWER", async () => {
+    // Codex 1차 검수 C5 — inline 200 첫 실패만 보던 "t" 를 보완해 요청 번호(snapshot) 경로를 끝까지 돌린다.
+    const ws = await makeWorkspace("u");
+    const [promptText] = promptTexts("u", 1);
+    await makePrompts(ws.id, [promptText]);
+    const s = await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60) });
+    const fake = new FakeBd();
+    // 작업은 곧바로 준비됨 · 내려받으면 보낸 질문만 되돌아온다(지역값을 보내도 크롤러 오류가 아니다).
+    fake.onSubmit = (req) => fake.snapshot(req, "ready", [{ answer_text: req.prompt }]);
+
+    // 1) 제출 — 요청 번호를 받는다(유료 1회).
+    await engine.runDispatchPass(T0, deps(fake));
+    let [item] = await itemsOfWorkspace(ws.id);
+    expect(item.status).toBe("submitted");
+    expect(item.paidAttempts).toBe(1);
+
+    // 2) 거두기 — 내려받은 답이 질문 되돌림 → 재시도 예산(1건 → 1) 안에서 2분 뒤 다시 보낸다.
+    const firstFailAt = at(61);
+    await engine.runHarvestPass(firstFailAt, deps(fake));
+    [item] = await itemsOfWorkspace(ws.id);
+    expect(item.status).toBe("queued");
+    expect(item.lastErrorCode).toBe("EMPTY_ANSWER");
+    expect(item.paidRetries).toBe(1);
+    expect(item.countryFallbacks).toBe(0); // 지역값 없이 재시도(예산 밖)는 크롤러 오류에만 쓴다
+    expect(item.snapshotId).toBeNull();
+    expect(item.nextAttemptAt!.getTime()).toBe(firstFailAt.getTime() + 2 * 60_000);
+    expect(item.lastError ?? "").not.toContain(promptText);
+
+    // 3) 2분이 되기 전에는 보내지 않는다.
+    await engine.runDispatchPass(at(61 + 60), deps(fake));
+    expect(fake.submitCount()).toBe(1);
+
+    // 4) 2분 뒤 재제출(유료 2회째) → 거두기에서 또 질문 되돌림 → 재시도 1회를 이미 써서 failed.
+    await engine.runDispatchPass(at(61 + 120), deps(fake));
+    expect(fake.submitCount()).toBe(2);
+    [item] = await itemsOfWorkspace(ws.id);
+    expect(item.status).toBe("submitted");
+    expect(item.paidAttempts).toBe(2);
+    await engine.runHarvestPass(at(61 + 120 + 61), deps(fake));
+    [item] = await itemsOfWorkspace(ws.id);
+    expect(item.status).toBe("failed");
+    expect(item.lastErrorCode).toBe("EMPTY_ANSWER");
+    expect(item.paidAttempts).toBe(2);
+    expect(item.paidRetries).toBe(1);
+    expect(item.runId).toBeNull();
+
+    // 5) 회차 완료 — 요약·화면용 개요 모두 EMPTY_ANSWER 로 집계된다. 저장된 답은 없다.
+    await engine.runHarvestPass(at(61 + 120 + 62), deps(fake));
+    const [r] = await roundsOf(s.id);
+    expect(r.status).toBe("completed");
+    expect(r.summary?.failed).toBe(1);
+    expect(r.summary?.saved).toBe(0);
+    expect(r.summary?.paidAttempts).toBe(2);
+    expect(r.summary?.paidRetries).toBe(1);
+    expect(r.summary?.byProvider.perplexity.failedByCode).toEqual({ EMPTY_ANSWER: 1 });
+    const [overview] = await engine.getRoundsOverview(ws.id, { limit: 5, scheduleId: s.id });
+    expect(overview.topErrors).toEqual([{ provider: "perplexity", code: "EMPTY_ANSWER", count: 1 }]);
+    expect(await runsOf(ws.id)).toHaveLength(0);
+    expect(fake.submitCount()).toBe(2); // 끝난 뒤 추가 제출 없음
+  }, 60_000);
 });

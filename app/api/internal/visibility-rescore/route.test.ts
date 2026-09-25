@@ -2350,6 +2350,81 @@ describe("수집 시점 v17a 점수 = v17 재산출 잡 결과 (결함 D2 동치
     expect(row.citedOwnedVideoIds).toEqual(v17.citedOwnedVideoIds);
   });
 
+  /**
+   * Codex 1차 검수 C3 — 운영 창에는 결함 행(14)과 이미 재산출된 행(17)이 함께 있다. preflight 가
+   * 17 을 범위 밖으로 세면 정상 게이트가 복구를 막는다. preflight 를 포함한 정상 경로로
+   * v15 → v16 → v17 을 차례로 돌려 복구되고, 이미 17 인 행은 그대로인지 본다.
+   */
+  it("버전 14(결함)와 17(이미 재산출)이 섞인 창 — preflight 포함 정상 경로로 v15→v16→v17 복구 · 17 행 불변 (C3)", async () => {
+    const owned = new Set([OWNED_ID]);
+    seedOwnedVideo(WS_PROD, OWNED_ID);
+    const ctxOf = (sw: ScoringSetSwitchValue) =>
+      buildScoringContext(WS_PROD, { brandConfig: { ...BRAND, scoringSetSwitch: sw }, competitors: [] }, owned);
+    const target: AutoRunTarget = {
+      workspaceId: WS_PROD,
+      scheduleId: null,
+      promptText: GEN_PROMPT,
+      provider: "google_ai",
+      intervalSlot: "2026-09-24T12",
+      geolocation: null,
+    };
+    const result = {
+      answer: NO_MENTION,
+      sources: [],
+      citations: [{ url: `https://www.youtube.com/watch?v=${OWNED_ID}`, domain: "youtube.com", title: "영상", description: "" }],
+      cached: false,
+    };
+    const v14 = await buildAutoRunValues(ctxOf("v14a"), target, result, 0, { classifySentiment: async () => null });
+    const v17 = await buildAutoRunValues(ctxOf("v17a"), target, result, 0, { classifySentiment: async () => null });
+    expect(v14.visibilityScore).toBe(0); // 결함 증상 — 소유 유튜브 인용이 점수에 안 들어갔다
+    expect(v17.visibilityScore).toBe(45);
+
+    seedRun(1, {
+      version: 14,
+      score: v14.visibilityScore,
+      createdAt: eqAt(1),
+      sentiment: v14.sentiment,
+      answer: v14.answer ?? undefined,
+      citations: v14.citations as SeedOpts["citations"],
+    });
+    const already = seedRun(2, {
+      version: 17,
+      score: 45,
+      createdAt: eqAt(2),
+      sentiment: "not-mentioned",
+      answer: NO_MENTION,
+      citedPressDomains: ["press-wire.example"],
+    });
+
+    for (const job of ["v15", "v16", "v17"] as const) {
+      const pre = await (await POST(post({ job, preflight: true }))).json();
+      expect(pre.outOfScopeCount).toBe(0);
+      expect(pre.clean).toBe(true);
+      const b = await (await POST(post({ job, apply: true, batchSize: 200 }))).json();
+      expect(b.anomalies).toHaveLength(0);
+      expect(b.updated).toBe(1); // 결함 행 1건만 — 17 행은 소스 버전 밖이라 고르지 않는다
+    }
+    const recovered = H.store.runs.find((r) => r.id === id(1))!;
+    expect(recovered.scoreVersion).toBe(17);
+    expect(recovered.visibilityScore).toBe(v17.visibilityScore);
+    expect(recovered.citedOwnedVideoIds).toEqual([OWNED_ID]);
+    const untouched = H.store.runs.find((r) => r.id === already.id)!;
+    expect(untouched.scoreVersion).toBe(17);
+    expect(untouched.visibilityScore).toBe(45);
+  });
+
+  it("체인 밖 버전은 계속 차단한다 — v15 창의 미등록 버전 · v16 창에 남은 앞 단계 버전 14 (C3)", async () => {
+    seedRun(1, { version: 14, score: 0, createdAt: eqAt(1), answer: NO_MENTION });
+    seedRun(2, { version: 99, score: 0, createdAt: eqAt(2), answer: NO_MENTION });
+    const v15pre = await (await POST(post({ job: "v15", preflight: true }))).json();
+    expect(v15pre.outOfScopeCount).toBe(1); // 99
+    expect(v15pre.clean).toBe(false);
+    expect(v15pre.acceptedVersions).toEqual([14, 15, 16, 17]);
+    const v16pre = await (await POST(post({ job: "v16", preflight: true }))).json();
+    expect(v16pre.outOfScopeCount).toBe(2); // 14(v15 를 먼저 돌려야 함) · 99
+    expect(v16pre.clean).toBe(false);
+  });
+
   it("수집 시점에 17 로 저장된 행은 v15·v16·v17 어느 잡도 다시 건드리지 않는다", async () => {
     seedRun(1, { version: 17, score: 45, createdAt: eqAt(1), answer: NO_MENTION, citedPressDomains: ["press-wire.example"] });
     for (const job of ["v15", "v16", "v17"] as const) {

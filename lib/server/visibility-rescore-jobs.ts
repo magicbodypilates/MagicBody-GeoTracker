@@ -277,6 +277,37 @@ export function reproSetForVersion(version: number): ScoreSetId | null {
 }
 
 /**
+ * preflight 가 창 안에서 "정상 상태"로 인정하는 score_version 목록 (Codex 1차 검수 C3 반영).
+ *
+ *   = 잡의 소스 버전 + 목표 버전 + **목표 버전 뒤로 이어지는 잡 체인의 목표 버전들**
+ *
+ * 체인은 잡 정의에서 유도한다 — 같은 workspaceScope 의 잡 중 소스 버전에 지금 버전이 든 잡의
+ * 목표 버전을 따라간다(v15: 14·15 → v16 이 15 를 16 으로 → v17 이 16 을 17 로 ⇒ 14·15·16·17).
+ * 이미 뒤 잡으로 앞으로 간 행(v15 창의 16·17, v16 창의 17)은 이 잡의 대상도 아니고 이상도 아니다.
+ * 반대로 체인 밖 버전(미등록 버전 · 이 잡보다 **앞** 단계 버전)은 계속 범위 밖으로 세어 차단한다
+ * — 예: v16 창에 아직 14 가 남아 있으면 v15 를 먼저 돌려야 한다는 뜻이라 clean=false 가 맞다.
+ *
+ * ⚠️ 지문(jobHash)과 무관하다 — 잡 정의를 바꾸지 않고 preflight 판정에만 쓴다.
+ */
+export function preflightAcceptedVersions(jobId: RescoreJobId): number[] {
+  const job = RESCORE_JOBS[jobId];
+  const accepted = new Set<number>([...job.sourceVersions, job.targetVersion]);
+  const queue: number[] = [job.targetVersion];
+  while (queue.length > 0) {
+    const version = queue.shift() as number;
+    for (const id of RESCORE_JOB_IDS) {
+      const next = RESCORE_JOBS[id];
+      if (next.workspaceScope !== job.workspaceScope) continue;
+      if (!next.sourceVersions.includes(version)) continue;
+      if (accepted.has(next.targetVersion)) continue;
+      accepted.add(next.targetVersion);
+      queue.push(next.targetVersion);
+    }
+  }
+  return [...accepted].sort((a, b) => a - b);
+}
+
+/**
  * 잡 정의 + 목표 세트 상수 + **그 잡이 실제로 쓰는** 재현 매핑의 지문.
  *
  * audit manifest 에 박아 두고, rollback·reconcile 이 "이 파일이 이 잡에서 나온 것인지"를

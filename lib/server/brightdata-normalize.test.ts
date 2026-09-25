@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   ScrapeFailure,
+  answerJudgmentText,
   classifyCrawlerError,
   clearScrapeCache,
   detectNonAnswer,
@@ -19,6 +20,7 @@ import {
   normalizeScrapePayload,
   redactErrorText,
   runAiScraper,
+  selectAnswer,
 } from "./brightdata-scraper";
 
 const PROMPT = "테스트 질문 — 예시 교육기관을 추천해 주세요";
@@ -451,5 +453,115 @@ describe("runAiScraper — 내용 없는 답은 던지고 캐시에 남기지 �
     expect(r.answer).toBe(ANSWER);
     expect(r.cached).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Codex 1차 검수 C1 — 판정 전용 정리(태그·엔티티·URL·출처 꼬리표). 저장 본문은 바꾸지 않는다.
+ */
+describe("detectNonAnswer — 태그·엔티티·URL·출처 꼬리표는 의미 문자로 세지 않는다 (C1)", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+  const LONG =
+    "초보자라면 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. 첫 달은 주 2회로 시작해 몸이 적응하면 횟수를 늘리세요.";
+
+  it.each([
+    ["태그로 감싼 질문", `<p><strong>${Q}</strong></p>`, "prompt_echo"],
+    ["질문 + Sources URL", `${Q}\nSources: https://example.com/result`, "prompt_echo"],
+    ["Sources URL 만", "Sources: https://example.com/result", "too_few_chars"],
+    ["Access denied HTML", "<!DOCTYPE html><html><body>Access denied</body></html>", "too_few_chars"],
+    ["&nbsp; 사이에 낀 질문", Q.replace(/ /g, "&nbsp;"), "prompt_echo"],
+    ["숫자 엔티티로 쓴 질문", `${Q}&#46;&#x20;`, "prompt_echo"],
+    ["엔티티로 감싼 태그 + 질문", `&lt;p&gt;${Q}&lt;/p&gt;`, "prompt_echo"],
+    ["질문 + 마크다운 출처 목록", `${Q}\n\n**출처:**\n1. [예시 기사](https://news.example/a)\n[2]\n2. https://blog.example/b`, "prompt_echo"],
+    ["References 제목 + 목록만", "## References\n- https://news.example/a\n- www.blog.example/b", "too_few_chars"],
+    ["script·주석만 있는 페이지", "<html><head><script>var loadingState = 'waiting for content';</script></head><!-- placeholder --></html>", "too_few_chars"],
+  ])("%s → %s", (_name, answer, reason) => {
+    expect(detectNonAnswer(answer, Q)?.reason).toBe(reason);
+  });
+
+  it.each([
+    ["마크다운 링크가 섞인 긴 답", `[예시 학원](https://edu.example/a)은 ${LONG} 자세한 비교는 [안내 글](https://blog.example/b)을 보세요.`],
+    ["본문에 URL 을 인용한 답", `${LONG} 공식 안내는 https://edu.example/about 에서 확인할 수 있습니다.`],
+    ["HTML 문단으로 감싼 정상 답", `<p>${LONG}</p>`],
+    ["본문 뒤에 출처 목록이 붙은 답", `${LONG}\n\nSources:\n1. https://news.example/a\n2. https://blog.example/b`],
+    ["'참고:' 줄에 본문이 이어지는 답", `참고: ${LONG}`],
+    ["'참고로'로 시작하는 본문", `참고로 ${LONG}`],
+    ["출처 목록 뒤에 본문이 다시 이어지는 답", `Sources: https://news.example/a\n${LONG}`],
+    ["'Sources of' 로 시작하는 영문 본문", "Sources of beginner injuries are usually poor form and skipping warm-ups."],
+  ])("정상 답은 통과 — %s", (_name, answer) => {
+    expect(detectNonAnswer(answer, Q)).toBeNull();
+  });
+
+  it("판정용 정리는 저장 본문을 바꾸지 않는다", () => {
+    const html = `<p>${LONG}</p>\nSources: https://news.example/a`;
+    const r = normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [{ answer_text: html }] });
+    expect(r.answer).toBe(html);
+    expect(answerJudgmentText(html)).not.toContain("<p>");
+    expect(answerJudgmentText(html)).not.toContain("https://");
+  });
+});
+
+/**
+ * Codex 1차 검수 C2 — 후보 필드별 판정. 첫 정상 후보를 고르고, 모든 후보가 비응답일 때만 EMPTY_ANSWER.
+ */
+describe("selectAnswer · normalizeScrapePayload — 후보 필드별 판정 (C2)", () => {
+  const NORMAL =
+    "초보자에게 적합한 수업을 고르는 방법은 수업 인원, 강사의 설명 방식, 체험 수업 여부를 차례로 확인하는 것입니다.";
+
+  it("answer_text 가 별표뿐이어도 answer_text_markdown 의 정상 답을 고른다", () => {
+    const r = normalizeScrapePayload({
+      provider: "chatgpt",
+      prompt: PROMPT,
+      payload: [{ answer_text: "★ ★ ★ ★ ★", answer_text_markdown: NORMAL }],
+    });
+    expect(r.answer).toBe(NORMAL);
+  });
+
+  it("앞 후보가 질문 되돌림이면 뒤의 정상 후보(answer)를 고른다", () => {
+    expect(selectAnswer({ answer_text: PROMPT, answer: NORMAL }, PROMPT)).toEqual({ kind: "answer", answer: NORMAL });
+  });
+
+  it("앞 후보가 정상이면 그대로 쓴다(뒤 후보는 보지 않는다)", () => {
+    expect(selectAnswer({ answer_text: ANSWER, answer_text_markdown: NORMAL }, PROMPT)).toEqual({
+      kind: "answer",
+      answer: ANSWER,
+    });
+  });
+
+  it("모든 후보가 비응답이면 EMPTY_ANSWER — 사유·길이는 첫 후보 기준", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({
+        provider: "perplexity",
+        prompt: PROMPT,
+        payload: [{ answer_text: PROMPT, answer: "★ ★" }],
+      }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+    expect(f.message).toContain("질문 되돌림");
+    expect(f.message).toContain(`답 길이 ${PROMPT.length}자`);
+  });
+
+  it("1차 후보가 모두 비응답이면 깊은 추출로 넘어가지 않는다(부속 필드를 답으로 오인하지 않게)", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({
+        provider: "perplexity",
+        prompt: PROMPT,
+        payload: [{ answer_text: PROMPT, extra: { body: NORMAL } }],
+      }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+  });
+
+  it("1차 후보가 없으면 예전처럼 깊은 추출을 쓰고, 그 결과에도 같은 판정을 적용한다", () => {
+    const ok = normalizeScrapePayload({ provider: "gemini", prompt: PROMPT, payload: [{ extra: { body: NORMAL } }] });
+    expect(ok.answer).toBe(NORMAL);
+    const f = failureOf(() =>
+      normalizeScrapePayload({ provider: "gemini", prompt: PROMPT, payload: [{ extra: { summary: PROMPT } }] }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+  });
+
+  it("후보가 전혀 없으면 여전히 PARSE_FAILURE", () => {
+    expect(selectAnswer({ timestamp: "2026-09-25T00:00:00Z" }, PROMPT).kind).toBe("parse_failure");
   });
 });

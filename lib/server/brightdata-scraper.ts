@@ -533,19 +533,108 @@ export function meaningfulText(value: string): string {
     .replace(NON_MEANINGFUL_CHAR_RE, "");
 }
 
+/*
+ * ── 판정 전용 정리 (Codex 1차 검수 C1 반영) ──
+ * 태그 이름(`pstrong…`)·엔티티(`&nbsp;`)·URL 의 영문자·출처 꼬리표가 의미 문자로 세져 빈 답이
+ * 통과하던 것을 막는다. **판정에만 쓰고 저장되는 답 본문은 바꾸지 않는다.** stripAnswerHtml 은
+ * `answer_html` 키만 통째로 지우고 answer_text 안의 태그는 건드리지 않으므로 겹치지 않는다.
+ */
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const HTML_RAW_CONTENT_RE = /<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+const HTML_BLOCK_TAG_RE =
+  /<\/?(?:p|div|br|li|ul|ol|h[1-6]|tr|td|th|table|thead|tbody|section|article|blockquote|pre|hr|header|footer|nav|main|body|html|head|title)\b[^>]*>/gi;
+// 글자로 시작하는 태그·선언(<!DOCTYPE …>)만 태그로 본다 — "a < b"·"<3"·"<참고>" 는 건드리지 않는다.
+const HTML_TAG_RE = /<\/?[a-z][a-z0-9-]*\b[^>]*>|<![a-z][^>]*>/gi;
+const HTML_ENTITY_RE = /&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z][a-z0-9]{1,31});/gi;
+const NAMED_HTML_ENTITIES: Record<string, string> = {
+  nbsp: " ",
+  ensp: " ",
+  emsp: " ",
+  thinsp: " ",
+  zwnj: "",
+  zwj: "",
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+const URL_IN_TEXT_RE = /\b(?:https?:\/\/|www\.)[^\s<>"'()[\]{}]+/gi;
+const HAS_URL_RE = /\b(?:https?:\/\/|www\.)\S/i;
+// 출처 꼬리표 줄 — 줄 머리(글머리표·번호·마크다운 강조)를 지나 꼬리표 낱말이 오고, 바로 뒤가 콜론이거나
+// 줄 끝이어야 한다("참고로 …"·"Sources of stress …" 같은 본문 문장은 걸리지 않는다).
+const SOURCE_LABEL_LINE_RE =
+  /^[\s>#*_\-•·\d.()[\]]*(?:sources?|references?|citations?|출처|참고\s*(?:자료|문헌|링크)?|인용\s*(?:자료|출처)?)\s*[*_]*\s*(?::|：|$)/iu;
+// 출처 목록 안의 번호표만 있는 줄 — "[1]" · "1." · "(2)"
+const CITATION_MARKER_LINE_RE = /^[\s[(]*\d{1,3}[\])].?\s*$|^\s*\d{1,3}\.\s*$/;
+
+function decodeHtmlEntities(s: string): string {
+  return s.replace(HTML_ENTITY_RE, (_m, body: string) => {
+    if (body.startsWith("#")) {
+      const hex = body[1] === "x" || body[1] === "X";
+      const cp = hex ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : " ";
+    }
+    return NAMED_HTML_ENTITIES[body.toLowerCase()] ?? " ";
+  });
+}
+
+function stripHtmlTags(s: string): string {
+  return s
+    .replace(HTML_COMMENT_RE, " ")
+    .replace(HTML_RAW_CONTENT_RE, " ")
+    .replace(HTML_BLOCK_TAG_RE, "\n")
+    .replace(HTML_TAG_RE, " ");
+}
+
+/**
+ * 출처 꼬리표 줄과 그 뒤에 이어지는 출처 목록 줄을 뺀다.
+ *   - 꼬리표 줄에 URL 이 있으면 줄 전체를 빼고, 없으면 꼬리표 낱말만 뺀다("참고: 본문…"의 본문은 남긴다).
+ *   - 꼬리표 뒤로 URL 이 든 줄·빈 줄·번호표만 있는 줄이 이어지는 동안은 목록으로 보고 뺀다.
+ *     그 밖의 줄을 만나면 목록이 끝난 것으로 보고 그 줄부터 다시 센다.
+ */
+function dropSourceSections(s: string): string {
+  const kept: string[] = [];
+  let inSources = false;
+  for (const line of s.split(/\r?\n/)) {
+    const label = SOURCE_LABEL_LINE_RE.exec(line);
+    if (label) {
+      inSources = true;
+      if (!HAS_URL_RE.test(line)) kept.push(line.slice(label[0].length));
+      continue;
+    }
+    if (inSources) {
+      if (line.trim() === "" || HAS_URL_RE.test(line) || CITATION_MARKER_LINE_RE.test(line)) continue;
+      inSources = false;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+/**
+ * 판정용 문자열 — 태그 제거 → 엔티티 해제 → (엔티티로 감싼 태그) 다시 제거 → 출처 꼬리표 절 제외 →
+ * URL 제거. 결과는 의미 문자 세기·질문 되돌림 비교에만 쓴다.
+ */
+export function answerJudgmentText(value: string): string {
+  const noTags = stripHtmlTags(decodeHtmlEntities(stripHtmlTags(String(value ?? ""))));
+  return dropSourceSections(noTags).replace(URL_IN_TEXT_RE, " ");
+}
+
 /**
  * 추출한 답이 "실제 답이 아닌" 경우를 가린다. 아니면 null.
  *   (a) prompt_echo  — 의미 문자만 남긴 답이 보낸 질문과 같거나, 질문을 담고 있으면서 질문을 뺀
  *                      나머지 의미 문자가 PROMPT_ECHO_EXTRA_MAX_CHARS 이하.
  *   (b) too_few_chars — 답의 의미 문자가 MIN_MEANINGFUL_ANSWER_CHARS 미만.
+ * 답·질문 둘 다 answerJudgmentText 로 같은 정리를 거친 뒤 센다(태그·엔티티·URL·출처 꼬리표 제외).
  * 질문을 인용한 뒤 내용이 길게 이어지는 답, 짧아도 내용이 있는 한 문장 답은 통과한다.
  */
 export function detectNonAnswer(
   answer: string,
   prompt: string,
 ): { reason: NonAnswerReason; meaningfulChars: number } | null {
-  const a = meaningfulText(answer);
-  const p = meaningfulText(prompt);
+  const a = meaningfulText(answerJudgmentText(answer));
+  const p = meaningfulText(answerJudgmentText(prompt));
   if (p.length > 0 && a.includes(p)) {
     // 질문이 여러 번 되돌아와도(질문+질문) 나머지만 센다.
     const rest = a.split(p).join("");
@@ -616,6 +705,43 @@ export function normalizeAnswer(rawRecord: Record<string, unknown>) {
   // 파싱 실패는 정직하게 공백 메시지로 기록한다.
   const keyList = Object.keys(rawRecord).slice(0, 20).join(", ");
   return `${PARSE_FAILURE_MARKER} 확인 가능한 최상위 키: ${keyList}]`;
+}
+
+export type AnswerSelection =
+  | { kind: "answer"; answer: string }
+  | { kind: "non_answer"; answer: string; reason: NonAnswerReason; meaningfulChars: number }
+  | { kind: "parse_failure"; marker: string };
+
+/**
+ * 후보 필드별로 내용 없는 답 판정을 거쳐 답을 고른다 (Codex 1차 검수 C2 반영).
+ *
+ *   1. ANSWER_CANDIDATE_KEYS 순서대로 비어 있지 않은 문자열 후보마다 detectNonAnswer 를 적용해
+ *      **첫 정상 후보**를 고른다. `answer_text` 가 별표뿐이어도 `answer_text_markdown` 에 정상 답이
+ *      있으면 그것을 쓴다(예전엔 첫 후보만 보고 전체를 실패로 던졌다).
+ *   2. 1차 후보가 하나라도 있었는데 전부 내용 없는 답이면 non_answer. 이때 깊은 추출로 넘어가지
+ *      않는다 — 깊은 추출은 1차 후보가 **없을 때만** 쓰는 폴백이고(기존 의도), 인용 설명문 같은
+ *      부속 필드를 답으로 오인할 위험이 있다.
+ *   3. 1차 후보가 없으면 예전과 똑같이 normalizeAnswer(깊은 추출 → 파싱 실패 표식)로 가고, 깊은
+ *      추출로 얻은 답에도 같은 판정을 적용한다.
+ * 고른 답은 trim 한 원문 그대로다(판정용 정리는 저장값에 반영하지 않는다).
+ */
+export function selectAnswer(rawRecord: Record<string, unknown>, prompt: string): AnswerSelection {
+  let firstNonAnswer: Extract<AnswerSelection, { kind: "non_answer" }> | null = null;
+  for (const key of ANSWER_CANDIDATE_KEYS) {
+    const value = rawRecord[key];
+    if (typeof value !== "string" || !value.trim()) continue;
+    const text = value.trim();
+    const judged = detectNonAnswer(text, prompt);
+    if (!judged) return { kind: "answer", answer: text };
+    firstNonAnswer ??= { kind: "non_answer", answer: text, ...judged };
+  }
+  if (firstNonAnswer) return firstNonAnswer;
+
+  // 1차 후보 문자열이 없다 → normalizeAnswer 는 곧바로 깊은 추출·파싱 실패 표식으로 간다.
+  const fallback = normalizeAnswer(rawRecord);
+  if (fallback.startsWith(PARSE_FAILURE_MARKER)) return { kind: "parse_failure", marker: fallback };
+  const judged = detectNonAnswer(fallback, prompt);
+  return judged ? { kind: "non_answer", answer: fallback, ...judged } : { kind: "answer", answer: fallback };
 }
 
 /**
@@ -1260,12 +1386,14 @@ export function normalizeScrapePayload(args: {
     ? sanitizedPayload[0]
     : (sanitizedPayload as Record<string, unknown>);
   const record = (sanitizedFirst ?? {}) as Record<string, unknown>;
-  const answer = normalizeAnswer(record);
+  // 후보 필드별로 내용 없는 답 판정을 거쳐 첫 정상 후보를 고른다(selectAnswer — Codex 1차 C2).
+  const selection = selectAnswer(record, prompt);
 
   // 파싱 실패는 run 으로 저장하지 않는다 (2026-08-29).
   // 예전에는 실패 메시지를 answer 에 담아 그대로 저장했는데, 그러면 답변이 없는데도
   // 정상 run 으로 집계돼 가시성 0점이 평균을 끌어내린다.
-  if (answer.startsWith(PARSE_FAILURE_MARKER)) {
+  if (selection.kind === "parse_failure") {
+    const answer = selection.marker;
     const errorCount = progress?.errors ?? 0;
     if (progress?.records === 0 && errorCount > 0) {
       // M2 — 진행 확인이 "결과 0 · 오류 N" 이면 파싱 문제가 아니라 수집기가 오류로 끝낸 작업이다.
@@ -1281,15 +1409,16 @@ export function normalizeScrapePayload(args: {
   }
 
   // 내용 없는 답은 run 으로 저장하지 않는다 (2026-09-25 결함 D1 — 위 detectNonAnswer 주석).
+  // 모든 후보가 내용 없는 답일 때만 여기로 온다(selectAnswer). 문구의 길이·사유는 첫 후보 기준이다.
   // 오류 문구에는 길이·사유만 담는다. 답·질문 원문은 넣지 않는다(DB last_error·로그로 흘러간다).
-  const nonAnswer = detectNonAnswer(answer, prompt);
-  if (nonAnswer) {
+  if (selection.kind === "non_answer") {
     throw new ScrapeFailure(
       "EMPTY_ANSWER",
-      `[EMPTY_ANSWER] 실제 답이 아닌 응답 (provider=${parsed}) — ${NON_ANSWER_REASON_TEXT[nonAnswer.reason]} · ` +
-        `답 길이 ${answer.length}자 · 의미 문자 ${nonAnswer.meaningfulChars}자`,
+      `[EMPTY_ANSWER] 실제 답이 아닌 응답 (provider=${parsed}) — ${NON_ANSWER_REASON_TEXT[selection.reason]} · ` +
+        `답 길이 ${selection.answer.length}자 · 의미 문자 ${selection.meaningfulChars}자`,
     );
   }
+  const answer = selection.answer;
 
   // Extract sources from answer text
   const textSources = extractSourcesFromAnswer(answer);

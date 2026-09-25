@@ -5,6 +5,8 @@
  * 구간까지 값이 바뀐다. 그래서 경계는 마이크로초 단위로 고정한다.
  */
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   RESCORE_JOBS,
@@ -15,6 +17,7 @@ import {
   isRescoreJobId,
   jobHash,
   ownedVideoListFingerprint,
+  preflightAcceptedVersions,
   reproSetForVersion,
   type RescoreJobId,
 } from "./visibility-rescore-jobs";
@@ -649,5 +652,42 @@ describe("검증 창 — 잡 정의에서 파생", () => {
       expect(holdout?.fromUtc).toBe("2026-07-31T15:00:00.000Z");
       expect(holdout?.toUtc).toBe("2026-08-11T15:00:00.000Z");
     }
+  });
+});
+
+/* ============================================================
+ * Codex 1차 검수 C3·C4 (2026-09-25)
+ * ============================================================ */
+
+describe("preflightAcceptedVersions — 뒤 잡 체인으로 이미 앞으로 간 버전은 정상 (C3)", () => {
+  it("v15 는 14·15 에 더해 v16·v17 이 만든 16·17 을 인정한다", () => {
+    expect(preflightAcceptedVersions("v15")).toEqual([14, 15, 16, 17]);
+  });
+  it("v16 은 15·16 + 17, v17 은 16·17 — 앞 단계 버전(14)은 인정하지 않는다", () => {
+    expect(preflightAcceptedVersions("v16")).toEqual([15, 16, 17]);
+    expect(preflightAcceptedVersions("v17")).toEqual([16, 17]);
+  });
+  it("체인이 없는 잡은 예전과 같다(소스 + 목표)", () => {
+    expect(preflightAcceptedVersions("v11")).toEqual([8, 10, 11]);
+    expect(preflightAcceptedVersions("v13")).toEqual([8, 10, 13]);
+  });
+  it("다른 workspaceScope 의 잡은 체인으로 잇지 않는다(비운영 카나리 v12t)", () => {
+    expect(preflightAcceptedVersions("v12t")).toEqual([10, 12]);
+  });
+  it("모든 잡에서 소스·목표 버전을 포함한다", () => {
+    for (const id of RESCORE_JOB_IDS) {
+      const got = preflightAcceptedVersions(id);
+      for (const v of [...RESCORE_JOBS[id].sourceVersions, RESCORE_JOBS[id].targetVersion]) expect(got).toContain(v);
+    }
+  });
+});
+
+describe("재산출 스크립트 허용 잡 = 서버 잡 목록 (C4)", () => {
+  it("scripts/visibility-rescore.mjs 의 JOB_IDS 가 RESCORE_JOB_IDS 와 같다", () => {
+    const src = readFileSync(resolve(__dirname, "../../scripts/visibility-rescore.mjs"), "utf8");
+    const m = /const JOB_IDS = \[([^\]]*)\]/.exec(src);
+    expect(m).not.toBeNull();
+    const cli = [...(m?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    expect([...cli].sort()).toEqual([...RESCORE_JOB_IDS].sort());
   });
 });

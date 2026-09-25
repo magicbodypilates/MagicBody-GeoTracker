@@ -43,6 +43,7 @@ import {
   isRescoreJobId,
   jobHash,
   ownedVideoListFingerprint,
+  preflightAcceptedVersions,
   promptKey,
   reproSetForVersion,
   type RescoreJob,
@@ -827,7 +828,10 @@ export async function POST(req: NextRequest) {
       const windowTotal = windowRows.length;
       const manualCount = windowRows.filter((r) => r.isAuto !== true).length;
 
-      const knownVersions = new Set<number>([...job.sourceVersions, job.targetVersion]);
+      // 소스·목표 버전 + 뒤 잡 체인으로 이미 앞으로 간 버전은 정상으로 본다(Codex 1차 C3 —
+      // 예전엔 v15 창의 16·17 행이 범위 밖으로 세져 버전 14 행 복구가 게이트에서 막혔다).
+      const acceptedVersions = preflightAcceptedVersions(jobId);
+      const knownVersions = new Set<number>(acceptedVersions);
       const outOfScopeCount = windowRows.filter(
         (r) => r.isAuto === true && !knownVersions.has(r.scoreVersion),
       ).length;
@@ -871,6 +875,7 @@ export async function POST(req: NextRequest) {
         manualCount,
         manualRatio: windowTotal === 0 ? 0 : Number((manualCount / windowTotal).toFixed(4)),
         outOfScopeCount,
+        acceptedVersions,
         clean: outOfScopeCount === 0,
         sqlInformationalCount,
         jsInformationalCount,

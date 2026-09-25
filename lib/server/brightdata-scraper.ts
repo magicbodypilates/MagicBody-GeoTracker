@@ -564,13 +564,11 @@ const NAMED_HTML_ENTITIES: Record<string, string> = {
 const URL_IN_TEXT_RE = /\b(?:https?:\/\/|www\.)(?:[^\s<>"'()[\]{}]|\([^\s<>"'()[\]{}]*\))+/gi;
 // 마크다운 링크 목적지 `](…)` — 링크 텍스트 `[…]` 는 남기고 목적지(괄호 쌍 포함 URL·상대 경로·제목)만 뺀다.
 const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:[^\s()<>]|\([^\s()<>]*\))*(?:\s+"[^"]*")?\s*\)/g;
-const HAS_URL_RE = /\b(?:https?:\/\/|www\.)\S/i;
-// 출처 꼬리표 줄 — 줄 머리(글머리표·번호·마크다운 강조)를 지나 꼬리표 낱말이 오고, 바로 뒤가 콜론이거나
-// 줄 끝이어야 한다("참고로 …"·"Sources of stress …" 같은 본문 문장은 걸리지 않는다).
-const SOURCE_LABEL_LINE_RE =
-  /^[\s>#*_\-•·\d.()[\]]*(?:sources?|references?|citations?|출처|참고\s*(?:자료|문헌|링크)?|인용\s*(?:자료|출처)?)\s*[*_]*\s*(?::|：|$)/iu;
-// 출처 목록 안의 번호표만 있는 줄 — "[1]" · "1." · "(2)"
-const CITATION_MARKER_LINE_RE = /^[\s[(]*\d{1,3}[\])].?\s*$|^\s*\d{1,3}\.\s*$/;
+// 출처 이름표 — 줄 머리(글머리표·번호·마크다운 강조)를 지나 이름표 낱말이 오고, 바로 뒤가 콜론이거나
+// 줄 끝이어야 한다("참고로 …"·"Sources of stress …" 같은 본문 문장은 걸리지 않는다). 줄마다 이 머리
+// 부분(콜론까지)만 지우고 같은 줄의 나머지 글은 남긴다.
+const SOURCE_LABEL_HEAD_RE =
+  /^[ \t>#*_\-•·\d.()[\]]*(?:sources?|references?|citations?|출처|참고[ \t]*(?:자료|문헌|링크)?|인용[ \t]*(?:자료|출처)?)[ \t]*[*_]*[ \t]*(?::|：|$)[*_]*/gimu;
 
 function decodeHtmlEntities(s: string): string {
   return s.replace(HTML_ENTITY_RE, (_m, body: string) => {
@@ -591,31 +589,6 @@ function stripHtmlTags(s: string): string {
     .replace(HTML_TAG_RE, " ");
 }
 
-/**
- * 출처 꼬리표 줄과 그 뒤에 이어지는 출처 목록 줄을 뺀다.
- *   - 꼬리표 줄에 URL 이 있으면 줄 전체를 빼고, 없으면 꼬리표 낱말만 뺀다("참고: 본문…"의 본문은 남긴다).
- *   - 꼬리표 뒤로 URL 이 든 줄·빈 줄·번호표만 있는 줄이 이어지는 동안은 목록으로 보고 뺀다.
- *     그 밖의 줄을 만나면 목록이 끝난 것으로 보고 그 줄부터 다시 센다.
- */
-function dropSourceSections(s: string): string {
-  const kept: string[] = [];
-  let inSources = false;
-  for (const line of s.split(/\r?\n/)) {
-    const label = SOURCE_LABEL_LINE_RE.exec(line);
-    if (label) {
-      inSources = true;
-      if (!HAS_URL_RE.test(line)) kept.push(line.slice(label[0].length));
-      continue;
-    }
-    if (inSources) {
-      if (line.trim() === "" || HAS_URL_RE.test(line) || CITATION_MARKER_LINE_RE.test(line)) continue;
-      inSources = false;
-    }
-    kept.push(line);
-  }
-  return kept.join("\n");
-}
-
 function htmlToPlainText(value: string): string {
   return stripHtmlTags(decodeHtmlEntities(stripHtmlTags(String(value ?? ""))));
 }
@@ -625,21 +598,17 @@ function removeUrls(s: string): string {
 }
 
 /**
- * 되돌림 비교용 문자열 — 태그 제거 → 엔티티 해제 → (엔티티로 감싼 태그) 다시 제거 → **출처 꼬리표
- * 절 전체 제외** → URL·링크 목적지 제거. "질문 + Sources: URL" 처럼 질문 뒤에 출처만 붙은 답을
- * 되돌림으로 잡기 위해 출처 구간을 통째로 뺀다.
+ * 판정용 문자열(되돌림 비교·의미 문자 계산 공용) — 태그 제거 → 엔티티 해제 → (엔티티로 감싼 태그)
+ * 다시 제거 → 줄 머리의 출처 **이름표**(`Sources:`·`References:`·`출처:`·`참고:` 등, 콜론까지)만 제거 →
+ * URL·마크다운 링크 목적지 제거. 링크 텍스트·설명문·이름표 뒤 본문은 **남긴다**.
+ *
+ * 예전(2차)엔 되돌림 비교용은 출처 구간을 통째로 뺐는데, 그러면 "질문 + 출처: URL 에 따르면 긴 본문"
+ * 이 되돌림으로 잘못 거부됐다. 이름표만 지우면 "질문 + Sources: URL"·"질문 + References: 목록" 은
+ * 질문 뒤에 남는 의미 문자가 거의 없어 여전히 되돌림으로 잡히고, 이름표 뒤 본문이 긴 답은 통과한다.
+ * 두 판정이 같은 문자열을 쓰므로 규칙 차이가 없다.
  */
-export function answerEchoText(value: string): string {
-  return removeUrls(dropSourceSections(htmlToPlainText(value)));
-}
-
-/**
- * 의미 문자 계산용 문자열 — 태그 제거 · 엔티티 해제 · URL 과 마크다운 링크 목적지만 뺀다.
- * 링크 텍스트·설명문·꼬리표 뒤 본문은 **남긴다**(Codex 2차 N1 — 출처 줄을 통째로 지우면
- * "출처: URL 에 따르면 …"·설명 달린 참고 링크 목록 같은 정상 답이 의미 문자 0 으로 버려졌다).
- */
-export function answerContentText(value: string): string {
-  return removeUrls(htmlToPlainText(value));
+export function answerJudgmentText(value: string): string {
+  return removeUrls(htmlToPlainText(value).replace(SOURCE_LABEL_HEAD_RE, " "));
 }
 
 /**
@@ -647,28 +616,24 @@ export function answerContentText(value: string): string {
  *   (a) prompt_echo  — 의미 문자만 남긴 답이 보낸 질문과 같거나, 질문을 담고 있으면서 질문을 뺀
  *                      나머지 의미 문자가 PROMPT_ECHO_EXTRA_MAX_CHARS 이하.
  *   (b) too_few_chars — 답의 의미 문자가 MIN_MEANINGFUL_ANSWER_CHARS 미만.
- * 되돌림 비교는 answerEchoText(출처 구간까지 제외), 의미 문자 계산은 answerContentText(URL·링크
- * 목적지만 제외)로 한다 — 둘 다 태그·엔티티를 먼저 정리한다(Codex 2차 N1).
+ * 답·질문 모두 answerJudgmentText(태그·엔티티·출처 이름표·URL·링크 목적지 제거) 뒤에 센다.
  * 질문을 인용한 뒤 내용이 길게 이어지는 답, 짧아도 내용이 있는 한 문장 답은 통과한다.
  */
 export function detectNonAnswer(
   answer: string,
   prompt: string,
 ): { reason: NonAnswerReason; meaningfulChars: number } | null {
-  // (a) 되돌림 — 출처 구간까지 뺀 문자열끼리 비교한다(answerEchoText).
-  const echoA = meaningfulText(answerEchoText(answer));
-  const p = meaningfulText(answerEchoText(prompt));
-  if (p.length > 0 && echoA.includes(p)) {
+  const a = meaningfulText(answerJudgmentText(answer));
+  const p = meaningfulText(answerJudgmentText(prompt));
+  if (p.length > 0 && a.includes(p)) {
     // 질문이 여러 번 되돌아와도(질문+질문) 나머지만 센다.
-    const rest = echoA.split(p).join("");
+    const rest = a.split(p).join("");
     if (rest.length <= PROMPT_ECHO_EXTRA_MAX_CHARS) {
-      return { reason: "prompt_echo", meaningfulChars: echoA.length };
+      return { reason: "prompt_echo", meaningfulChars: a.length };
     }
   }
-  // (b) 의미 문자 부족 — URL·링크 목적지만 뺀 문자열로 센다(answerContentText · 설명문 보존).
-  const contentChars = meaningfulText(answerContentText(answer)).length;
-  if (contentChars < MIN_MEANINGFUL_ANSWER_CHARS) {
-    return { reason: "too_few_chars", meaningfulChars: contentChars };
+  if (a.length < MIN_MEANINGFUL_ANSWER_CHARS) {
+    return { reason: "too_few_chars", meaningfulChars: a.length };
   }
   return null;
 }

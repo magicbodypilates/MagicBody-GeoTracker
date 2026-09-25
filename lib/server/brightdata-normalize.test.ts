@@ -10,8 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   ScrapeFailure,
-  answerContentText,
-  answerEchoText,
+  answerJudgmentText,
   classifyCrawlerError,
   clearScrapeCache,
   detectNonAnswer,
@@ -497,10 +496,8 @@ describe("detectNonAnswer — 태그·엔티티·URL·출처 꼬리표는 의미
     const html = `<p>${LONG}</p>\nSources: https://news.example/a`;
     const r = normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [{ answer_text: html }] });
     expect(r.answer).toBe(html);
-    expect(answerEchoText(html)).not.toContain("<p>");
-    expect(answerEchoText(html)).not.toContain("https://");
-    expect(answerContentText(html)).not.toContain("<p>");
-    expect(answerContentText(html)).not.toContain("https://");
+    expect(answerJudgmentText(html)).not.toContain("<p>");
+    expect(answerJudgmentText(html)).not.toContain("https://");
   });
 });
 
@@ -594,13 +591,31 @@ describe("detectNonAnswer — 되돌림 비교용·의미 문자 계산용 분�
     expect(detectNonAnswer(answer, Q)?.reason).toBe(reason);
   });
 
-  it("의미 문자 계산용은 링크 텍스트·설명·꼬리표 뒤 본문을 남기고, 되돌림 비교용은 출처 구간을 뺀다", () => {
-    const text = "본문 한 줄\n출처: [예시 보고서](https://report.example/a) 설명 문장";
-    expect(answerContentText(text)).toContain("예시 보고서");
-    expect(answerContentText(text)).toContain("설명 문장");
-    expect(answerContentText(text)).not.toContain("https://");
-    expect(answerEchoText(text)).not.toContain("예시 보고서");
-    expect(answerEchoText(text)).toContain("본문 한 줄");
+  it("판정용 문자열은 출처 이름표(콜론까지)·URL 만 지우고 링크 텍스트·설명·이름표 뒤 본문은 남긴다", () => {
+    const text = "본문 한 줄\n출처: [예시 보고서](https://report.example/a) 설명 문장\n**References:** 참고 설명";
+    const judged = answerJudgmentText(text);
+    expect(judged).toContain("본문 한 줄");
+    expect(judged).toContain("예시 보고서");
+    expect(judged).toContain("설명 문장");
+    expect(judged).toContain("참고 설명");
+    expect(judged).not.toContain("출처");
+    expect(judged).not.toContain("References");
+    expect(judged).not.toContain("https://");
+  });
+
+  it("질문 + 다음 줄 '출처: URL 에 따르면 긴 본문' → 통과(이름표만 지우고 본문은 센다)", () => {
+    const answer = `${Q}\n출처: https://report.example/2026 에 따르면 초보자는 수업 인원이 적고 동작 설명이 자세한 곳에서 시작하는 것이 좋습니다.`;
+    expect(detectNonAnswer(answer, Q)).toBeNull();
+  });
+
+  it("질문 + 'References:' 아래 URL 목록만 → 되돌림으로 거부(유지)", () => {
+    const answer = `${Q}\nReferences:\n- https://news.example/a\n- https://blog.example/b`;
+    expect(detectNonAnswer(answer, Q)?.reason).toBe("prompt_echo");
+  });
+
+  it("질문을 인용한 뒤 '참고로 …' 본문이 이어지는 답 → 통과", () => {
+    const answer = `"${Q}"라는 질문에 답하면,\n참고로 처음 한 달은 주 2회 수업으로 시작하고, 체험 수업에서 강사의 설명 방식을 먼저 확인해 보세요.`;
+    expect(detectNonAnswer(answer, Q)).toBeNull();
   });
 });
 
@@ -617,7 +632,7 @@ describe("URL 제거 — 괄호가 든 URL (C1 잔여)", () => {
   it("괄호 든 URL 을 마크다운 링크로 인용한 정상 답 → 통과 · 링크 텍스트는 남고 URL 잔재는 없다", () => {
     const answer = `[집합 개념](https://wiki.example/wiki/Set_(mathematics))과 [함수 개념](https://wiki.example/wiki/Function_(mathematics))을 보면, ${LONG}`;
     expect(detectNonAnswer(answer, Q)).toBeNull();
-    const content = answerContentText(answer);
+    const content = answerJudgmentText(answer);
     expect(content).toContain("집합 개념");
     expect(content).not.toContain("mathematics");
     expect(content).not.toContain("wiki.example");

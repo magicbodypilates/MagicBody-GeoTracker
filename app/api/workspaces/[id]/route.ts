@@ -11,6 +11,7 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { eq } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess, requireAdmin } from "@/lib/server/auth-guard";
+import { SCORING_SET_SWITCH_VALUES } from "@/drizzle/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,10 @@ const BrandConfigSchema = z.object({
   // 필드라 기존 PATCH 호출부(모르는)는 그대로 동작한다. 2026-09-23 개정으로 언론(배포
   // 매체) 도메인 목록(pressDomains) 설정은 폐기했다 — 언론 판정은 이제 브랜드 언급 +
   // 소유 도메인 제외로만 계산해 워크스페이스 설정이 필요 없다(press-domain-match.ts).
-  scoringSetSwitch: z.enum(["v14a", "v15a"]).optional(),
+  // ⛔ 2026-09-25 결함 D2 — 예전엔 ["v14a","v15a"] 만 받아 운영 값 "v17a"(와 v16a)를 PATCH 로
+  // 저장하거나 되돌려 보내면 400 으로 튕겼다. 허용 값은 정본 목록 하나(SCORING_SET_SWITCH_VALUES)를 쓴다.
+  // (화면 설정 저장은 이 칸을 보내지 않으므로 아래 병합이 기존 값을 그대로 보존한다.)
+  scoringSetSwitch: z.enum(SCORING_SET_SWITCH_VALUES).optional(),
 });
 
 const UpdateSchema = z.object({

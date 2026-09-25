@@ -16,11 +16,12 @@
  * 순수 · DB 무의존.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Citation } from "@/components/dashboard/types";
 import {
   DEFAULT_SCORING_SWITCH,
   SCORING_PROFILES,
+  _resetScoringSwitchWarnings,
   buildAutoRunValues,
   buildScoringContext,
   computeDailyRollupWindow,
@@ -31,7 +32,7 @@ import {
   type CitationJudgmentInput,
 } from "./automation-runner";
 import { buildCollectionBrandTerms } from "./branded-query-filter";
-import type { BrandConfig, ScoringSnapshot } from "@/drizzle/schema";
+import { SCORING_SET_SWITCH_VALUES, type BrandConfig, type ScoringSnapshot } from "@/drizzle/schema";
 import type { LlmClassification } from "./llm-sentiment";
 
 describe("resolveScoringProfile — 계획 §4-5 (세트·버전) 쌍 선택자", () => {
@@ -49,24 +50,65 @@ describe("resolveScoringProfile — 계획 §4-5 (세트·버전) 쌍 선택자"
     expect(resolveScoringProfile("v14a")).toEqual(resolveScoringProfile(undefined));
   });
 
-  it("알 수 없는 값(오타·과거 값)은 항상 기본값(꺼짐)으로 떨어진다 — fail-safe", () => {
-    // BrandConfig 타입상 scoringSetSwitch 는 "v14a"|"v15a"|undefined 로 닫혀 있지만,
-    // 런타임에는 DB 에 저장된 임의 문자열이 들어올 수 있다(과거 값·수동 편집 등).
-    const unknown = "v16a" as unknown as ScoringSetSwitch;
-    expect(resolveScoringProfile(unknown)).toEqual(resolveScoringProfile(undefined));
+  it("\"v16a\"·\"v17a\" → 선언된 프로파일 그대로 (2026-09-25 결함 D2 — 예전엔 v14a 로 조용히 떨어졌다)", () => {
+    expect(resolveScoringProfile("v16a")).toEqual({ setId: "v16a", version: 16, applyOwnedCitationJudgment: true });
+    expect(resolveScoringProfile("v17a")).toEqual({ setId: "v17a", version: 17, applyOwnedCitationJudgment: true });
   });
 
-  it("세트 id 와 버전은 항상 쌍으로만 움직인다 — v14a/14, v15a/15 외 조합이 없다", () => {
+  it("허용 값 정본 목록(SCORING_SET_SWITCH_VALUES)의 모든 값이 자기 세트로 풀린다 — 누락·폴백 없음", () => {
+    expect(Object.keys(SCORING_PROFILES).sort()).toEqual([...SCORING_SET_SWITCH_VALUES].sort());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const v of SCORING_SET_SWITCH_VALUES) expect(resolveScoringProfile(v).setId).toBe(v);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  describe("모르는 값(오타·아직 없는 세대)은 기본값(v14a)으로 — 값마다 경고 1회", () => {
+    beforeEach(() => _resetScoringSwitchWarnings());
+    afterEach(() => vi.restoreAllMocks());
+
+    it("같은 값은 여러 번 불러도 경고 1회, 다른 값은 따로 1회", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const unknownA = "v99a" as unknown as ScoringSetSwitch;
+      const unknownB = "V17A" as unknown as ScoringSetSwitch; // 대소문자 오타도 모르는 값
+      expect(resolveScoringProfile(unknownA)).toEqual(SCORING_PROFILES.v14a);
+      expect(resolveScoringProfile(unknownA)).toEqual(SCORING_PROFILES.v14a);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain("v99a");
+      expect(resolveScoringProfile(unknownB)).toEqual(SCORING_PROFILES.v14a);
+      expect(warn).toHaveBeenCalledTimes(2);
+    });
+
+    it("미지정(undefined·null·빈 문자열)은 경고 없이 기본값", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(resolveScoringProfile(undefined)).toEqual(SCORING_PROFILES.v14a);
+      expect(resolveScoringProfile(null)).toEqual(SCORING_PROFILES.v14a);
+      expect(resolveScoringProfile("")).toEqual(SCORING_PROFILES.v14a);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("프로토타입 이름(toString·__proto__)은 선언된 키가 아니다 → 기본값 + 경고", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(resolveScoringProfile("toString")).toEqual(SCORING_PROFILES.v14a);
+      expect(resolveScoringProfile("__proto__")).toEqual(SCORING_PROFILES.v14a);
+      expect(warn).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("세트 id 와 버전은 항상 쌍으로만 움직인다 — v14a/14 · v15a/15 · v16a/16 · v17a/17", () => {
+    const expected: Record<string, number> = { v14a: 14, v15a: 15, v16a: 16, v17a: 17 };
     for (const key of Object.keys(SCORING_PROFILES) as ScoringSetSwitch[]) {
       const p = SCORING_PROFILES[key];
-      if (p.setId === "v14a") expect(p.version).toBe(14);
-      if (p.setId === "v15a") expect(p.version).toBe(15);
+      expect(p.setId).toBe(key);
+      expect(p.version).toBe(expected[key]);
     }
   });
 
   it("꺼짐 프로파일만 applyOwnedCitationJudgment=false — v14a 의 인용 배점이 0 이 아니므로", () => {
     expect(SCORING_PROFILES.v14a.applyOwnedCitationJudgment).toBe(false);
     expect(SCORING_PROFILES.v15a.applyOwnedCitationJudgment).toBe(true);
+    expect(SCORING_PROFILES.v16a.applyOwnedCitationJudgment).toBe(true);
+    expect(SCORING_PROFILES.v17a.applyOwnedCitationJudgment).toBe(true);
   });
 
   it("DEFAULT_SCORING_SWITCH 는 v14a — 기본이 항상 옛 동작", () => {

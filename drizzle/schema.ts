@@ -63,10 +63,21 @@ export type BrandConfig = {
    *   "v16a" — 세트 v16a·버전 16. v15a 와 판정은 같고 언론·블로그·소셜 배점만 켜진다
    *   (2026-09-23). **신규 수집** 경로에만 영향 — 이미 저장된 버전 15 행의 재계산은 재산출
    *   잡 v16 이 담당하며 이 스위치와 무관하다.
-   * 적용은 사장님 별도 승인(계획 §5 Step 9) — 이 필드는 구조만 만들고 값은 켜지 않는다.
+   *   "v17a" — 세트 v17a·버전 17. v16a 와 같고 언론 게재 배점만 45(2026-09-24). 운영 값.
+   *   이미 저장된 버전 16 행의 재계산은 재산출 잡 v17 이 담당한다.
+   * 허용 값 목록은 SCORING_SET_SWITCH_VALUES 하나가 정본이다(PATCH 검증·채점 선택자가 함께 쓴다).
    */
-  scoringSetSwitch?: "v14a" | "v15a" | "v16a";
+  scoringSetSwitch?: ScoringSetSwitchValue;
 };
+
+/**
+ * scoringSetSwitch 허용 값 — 정본 목록(2026-09-25 결함 D2). 워크스페이스 PATCH 검증(zod)과
+ * automation-runner 의 SCORING_PROFILES(키 전수 강제)가 이 목록 하나를 함께 쓴다. 예전엔
+ * 타입·검증·선택자가 각자 목록을 들고 있어 운영 값 "v17a" 가 선택자에서 조용히 v14a 로 떨어졌다.
+ * jsonb 안의 값이라 마이그레이션이 필요 없다.
+ */
+export const SCORING_SET_SWITCH_VALUES = ["v14a", "v15a", "v16a", "v17a"] as const;
+export type ScoringSetSwitchValue = (typeof SCORING_SET_SWITCH_VALUES)[number];
 
 /**
  * 회차 점수 기준 — 자동 수집 회차를 만들 때 워크스페이스 브랜드 설정·경쟁사를 복사해 둔 것

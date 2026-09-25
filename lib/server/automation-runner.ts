@@ -68,27 +68,63 @@ export type ScoringProfile = {
   applyOwnedCitationJudgment: boolean;
 };
 
+/**
+ * 키 목록은 drizzle/schema.ts 의 SCORING_SET_SWITCH_VALUES 가 정본이다 — Record 타입이 그 목록의
+ * 모든 값을 키로 갖도록 강제하므로, 허용 값을 늘리고 여기 프로파일을 빠뜨리면 컴파일이 깨진다.
+ */
 export const SCORING_PROFILES: Record<ScoringSetSwitch, ScoringProfile> = {
   v14a: { setId: "v14a", version: 14, applyOwnedCitationJudgment: false },
   v15a: { setId: "v15a", version: 15, applyOwnedCitationJudgment: true },
-  // v16a — 2026-09-23 언론·블로그·소셜 배점 확정. 구조만 갖춰 둔다(스위치를 실제로 v16a 로
-  // 올리는 것은 이번 작업 범위 밖 — 사장님 별도 승인). 켜지면 새 수집 응답이 scoreVersion
-  // 16 으로 직접 저장된다. 이미 버전 15 로 저장된 과거 행은 재산출 잡 v16 이 담당한다.
+  // v16a — 2026-09-23 언론·블로그·소셜 배점 확정. 켜지면 새 수집 응답이 scoreVersion 16 으로
+  // 직접 저장된다. 이미 버전 15 로 저장된 과거 행은 재산출 잡 v16 이 담당한다.
   v16a: { setId: "v16a", version: 16, applyOwnedCitationJudgment: true },
+  // v17a — 2026-09-24 언론 게재 배점 인상(35 → 45). 운영 워크스페이스의 현재 값이다.
+  // 새 수집 응답이 scoreVersion 17 로 직접 저장된다. 이미 버전 16 으로 저장된 행은 재산출
+  // 잡 v17 이 담당한다(v17 잡 결과 = 같은 답·인용을 이 프로파일로 수집 시점에 채점한 값).
+  v17a: { setId: "v17a", version: 17, applyOwnedCitationJudgment: true },
 };
 
 export const DEFAULT_SCORING_SWITCH: ScoringSetSwitch = "v14a";
 
+/** 모르는 스위치 값 경고를 값마다 한 번만 남기기 위한 기록(프로세스 수명). */
+const warnedUnknownScoringSwitches = new Set<string>();
+
+/** 테스트 전용 — 값별 1회 경고 기록을 비운다. */
+export function _resetScoringSwitchWarnings(): void {
+  warnedUnknownScoringSwitches.clear();
+}
+
 /**
- * brandConfig 의 원시 스위치 값 → 안전한 프로파일. 미지정·오타는 항상 기본값(꺼짐)으로
- * 떨어진다. export 하는 이유 — 순수 함수라 automation-runner.test.ts 가 DB 없이
- * 직접 단위 테스트한다(테스트 가능 구조).
+ * brandConfig 의 원시 스위치 값 → 프로파일. 선언된 키(SCORING_PROFILES)는 그대로 따르고,
+ * 미지정(undefined·null·빈 문자열)은 조용히 기본값(v14a)으로 간다.
+ *
+ * ⛔ 2026-09-25 결함 D2 — 예전엔 "v15a" 하나만 인식하고 나머지를 전부 조용히 v14a 로 떨어뜨려,
+ * 운영 값 "v17a" 인 워크스페이스의 새 응답이 버전 14·유튜브 판정 꺼짐으로 저장됐다. 이제 모르는
+ * 값(오타·아직 없는 세대)만 v14a 로 떨어뜨리고, 그때는 값마다 한 번 경고를 남긴다(조용한 폴백 금지).
+ *
+ * 원시 값은 DB jsonb 에서 오므로 타입상 union 이어도 런타임엔 임의 문자열일 수 있어 unknown 으로 받는다.
+ * 키 판정은 자기 속성으로만 한다 — `in` 은 "toString" 같은 프로토타입 이름까지 참으로 본다.
  */
-export function resolveScoringProfile(
-  scoringSetSwitch: ScoringSetSwitch | undefined,
-): ScoringProfile {
-  const key: ScoringSetSwitch = scoringSetSwitch === "v15a" ? "v15a" : DEFAULT_SCORING_SWITCH;
-  return SCORING_PROFILES[key];
+export function resolveScoringProfile(scoringSetSwitch: unknown): ScoringProfile {
+  if (scoringSetSwitch === undefined || scoringSetSwitch === null || scoringSetSwitch === "") {
+    return SCORING_PROFILES[DEFAULT_SCORING_SWITCH];
+  }
+  if (
+    typeof scoringSetSwitch === "string" &&
+    Object.prototype.hasOwnProperty.call(SCORING_PROFILES, scoringSetSwitch)
+  ) {
+    return SCORING_PROFILES[scoringSetSwitch as ScoringSetSwitch];
+  }
+  const shown = typeof scoringSetSwitch === "string" ? scoringSetSwitch.slice(0, 40) : typeof scoringSetSwitch;
+  if (!warnedUnknownScoringSwitches.has(shown)) {
+    warnedUnknownScoringSwitches.add(shown);
+    console.warn(
+      `[scoring] 알 수 없는 채점 스위치 값 ${JSON.stringify(shown)} — 기본값 ${DEFAULT_SCORING_SWITCH}` +
+        `(버전 ${SCORING_PROFILES[DEFAULT_SCORING_SWITCH].version})로 채점합니다. ` +
+        `허용 값: ${Object.keys(SCORING_PROFILES).join(", ")}`,
+    );
+  }
+  return SCORING_PROFILES[DEFAULT_SCORING_SWITCH];
 }
 
 /** 12시간 주기 cron 기본값 — KST 기준 00:00 / 12:00 */

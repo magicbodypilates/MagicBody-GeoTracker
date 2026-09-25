@@ -421,6 +421,10 @@ import { POST } from "./route";
 import { RESCORE_JOBS, jobHash, promptKey } from "@/lib/server/visibility-rescore-jobs";
 import { SCORE_SETS, calcVisibilityWithSet } from "@/lib/server/visibility-score-sets";
 import { _clearOwnedVideoCache } from "@/lib/server/brand-youtube-videos";
+// 결함 D2 동치 테스트(파일 끝) 전용 — 수집 경로 채점을 진짜 함수로 돌린다.
+import { buildAutoRunValues, buildScoringContext, type AutoRunTarget } from "@/lib/server/automation-runner";
+import type { BrandConfig, ScoringSetSwitchValue } from "@/drizzle/schema";
+import type { LlmClassification } from "@/lib/server/llm-sentiment";
 
 /* ============================================================
  * 픽스처
@@ -2171,5 +2175,188 @@ describe("v17 잡 — 소스 버전 16 하나 · v16a → v17a(reproFromStoredEv
     expect(b.anomalies).toHaveLength(0); // 재분류가 깨지면 no-candidate 가 나 여기서 실패한다.
     expect(b.changes[0].before).toBe(35);
     expect(b.changes[0].after).toBe(35); // v17a.genNoMentionSocial 도 35 — 소셜은 안 올랐다.
+  });
+});
+
+/* ============================================================
+ * 2026-09-25 결함 D2 — 수집 시점 v17a 채점 = v17 재산출 잡 결과
+ *
+ * 운영 스위치가 v17a 인데 수집 선택자가 v14a 로 떨어져 새 응답이 버전 14 로 저장됐다. 고친 뒤에는
+ * 수집 경로(buildAutoRunValues · v17a 프로파일)가 곧바로 17 을 저장한다. 그 값이 "같은 답·인용을
+ * v16a 로 수집해 두었다가 v17 잡(reproFromStoredEvidence)으로 올린 값"과 같아야 두 경로로 쌓인
+ * 행이 한 차트에서 섞여도 기준이 어긋나지 않는다. 수집은 진짜 buildAutoRunValues, 재산출은 진짜
+ * 라우트(dry-run)로 같은 입력을 흘려 비교한다 — 감성 분류(LLM)만 가짜다.
+ * ============================================================ */
+
+describe("수집 시점 v17a 점수 = v17 재산출 잡 결과 (결함 D2 동치)", () => {
+  const eqAt = (m: number) => new Date(new Date("2026-09-21T03:00:00.000Z").getTime() + m * 60_000);
+  const OWNED_ID = "dQw4w9WgXcQ";
+  const NO_MENTION = "초보자에게는 수업 인원이 적고 동작 설명이 자세한 곳이 좋습니다. 체험 수업을 먼저 들어 보세요.";
+  const PRESS = { url: "https://press-wire.example/news/1", domain: "press-wire.example", title: "요가원 소식", description: "" };
+  const BRAND: BrandConfig = { ...BRAND_CONFIG, industry: "", keywords: "", description: "" };
+
+  type Case = {
+    name: string;
+    promptText: string;
+    answer: string;
+    citations: { url: string; domain: string; title: string; description: string }[];
+    llm: LlmClassification | null;
+    ownedIds?: string[];
+    /** 사장님 배점 기준 기대값 — 두 경로가 우연히 같은 틀린 값으로 맞는 것을 막는다. */
+    expectV16: number;
+    expectV17: number;
+  };
+
+  const cases: Case[] = [
+    {
+      name: "브랜드 질의 · 브랜드 언급 + 언론 인용 → v16a 35 · v17a 45",
+      promptText: BRANDED_PROMPT,
+      answer: GEN_ANSWER,
+      citations: [PRESS],
+      llm: { sentiment: "neutral", isTopRanked: false, isStronglyRecommended: false },
+      expectV16: 35,
+      expectV17: 45,
+    },
+    {
+      name: "일반 질의 · 언급 없음 + 소유 유튜브 인용 → 45(인용됨 칸 합류)",
+      promptText: GEN_PROMPT,
+      answer: NO_MENTION,
+      citations: [{ url: `https://www.youtube.com/watch?v=${OWNED_ID}`, domain: "youtube.com", title: "영상", description: "" }],
+      llm: null,
+      ownedIds: [OWNED_ID],
+      expectV16: 45,
+      expectV17: 45,
+    },
+    {
+      name: "일반 질의 · 언급 없음 + 블로그·소셜 추천 → 35(소셜은 그대로)",
+      promptText: GEN_PROMPT,
+      answer: NO_MENTION,
+      citations: [{ url: "https://www.instagram.com/p/AbCdEfGhIjK/", domain: "instagram.com", title: "요가원 추천 게시물", description: "" }],
+      llm: null,
+      expectV16: 35,
+      expectV17: 35,
+    },
+    {
+      name: "일반 질의 · 언급 없음 + 언론 인용 → v16a 35 · v17a 45",
+      promptText: GEN_PROMPT,
+      answer: NO_MENTION,
+      citations: [PRESS],
+      llm: null,
+      expectV16: 35,
+      expectV17: 45,
+    },
+    {
+      name: "브랜드 분기 상한 — 긍정·적극추천·언론 → 117·127 모두 100",
+      promptText: BRANDED_PROMPT,
+      answer: GEN_ANSWER,
+      citations: [PRESS],
+      llm: { sentiment: "positive", isTopRanked: false, isStronglyRecommended: true },
+      expectV16: 100,
+      expectV17: 100,
+    },
+  ];
+
+  it.each(cases)("$name", async (c) => {
+    const owned = new Set(c.ownedIds ?? []);
+    const ctxOf = (sw: ScoringSetSwitchValue) =>
+      buildScoringContext(WS_PROD, { brandConfig: { ...BRAND, scoringSetSwitch: sw }, competitors: [] }, owned);
+    const target: AutoRunTarget = {
+      workspaceId: WS_PROD,
+      scheduleId: null,
+      promptText: c.promptText,
+      provider: "google_ai",
+      intervalSlot: "2026-09-21T12",
+      geolocation: null,
+    };
+    const result = { answer: c.answer, sources: [], citations: c.citations, cached: false };
+    const classify = async () => c.llm;
+
+    const v16 = await buildAutoRunValues(ctxOf("v16a"), target, result, 0, { classifySentiment: classify });
+    const v17 = await buildAutoRunValues(ctxOf("v17a"), target, result, 0, { classifySentiment: classify });
+    expect(v16.scoreVersion).toBe(16);
+    expect(v17.scoreVersion).toBe(17);
+    expect(v16.visibilityScore).toBe(c.expectV16);
+    expect(v17.visibilityScore).toBe(c.expectV17);
+    // 두 프로파일의 판정(증거)은 같고 배점만 다르다.
+    expect(v17.citedOwnedVideoIds).toEqual(v16.citedOwnedVideoIds);
+    expect(v17.citedPressDomains).toEqual(v16.citedPressDomains);
+    expect(v17.citedSocialDomains).toEqual(v16.citedSocialDomains);
+
+    // v16a 로 수집해 저장된 행 → v17 재산출
+    seedRun(1, {
+      version: 16,
+      score: v16.visibilityScore,
+      createdAt: eqAt(1),
+      promptText: c.promptText,
+      sentiment: v16.sentiment,
+      answer: v16.answer ?? undefined,
+      citations: v16.citations as SeedOpts["citations"],
+      citedOwnedVideoIds: v16.citedOwnedVideoIds ?? [],
+      citedPressDomains: v16.citedPressDomains ?? [],
+      citedSocialDomains: v16.citedSocialDomains ?? [],
+    });
+    const b = await (await POST(post({ job: "v17", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes).toHaveLength(1);
+    expect(b.changes[0].before).toBe(v16.visibilityScore);
+    expect(b.changes[0].after).toBe(v17.visibilityScore);
+  });
+
+  /**
+   * 결함 기간(9/24 저녁 이후)에 버전 14 로 잘못 저장된 행의 복구 경로 확인 — v15 → v16 → v17 을
+   * 차례로 적용하면 같은 답·인용을 수집 시점에 v17a 로 채점한 값과 같아야 한다(증거 컬럼은 v15 가
+   * 채운다). 소유 영상 목록은 수집 때와 재산출 때 같다고 둔다.
+   */
+  it.each(cases)("버전 14 로 잘못 저장된 행 → v15·v16·v17 순차 적용 = 수집 시점 v17a: $name", async (c) => {
+    const owned = new Set(c.ownedIds ?? []);
+    for (const vid of owned) seedOwnedVideo(WS_PROD, vid);
+    const ctxOf = (sw: ScoringSetSwitchValue) =>
+      buildScoringContext(WS_PROD, { brandConfig: { ...BRAND, scoringSetSwitch: sw }, competitors: [] }, owned);
+    const target: AutoRunTarget = {
+      workspaceId: WS_PROD,
+      scheduleId: null,
+      promptText: c.promptText,
+      provider: "google_ai",
+      intervalSlot: "2026-09-21T12",
+      geolocation: null,
+    };
+    const result = { answer: c.answer, sources: [], citations: c.citations, cached: false };
+    const classify = async () => c.llm;
+    const v14 = await buildAutoRunValues(ctxOf("v14a"), target, result, 0, { classifySentiment: classify });
+    const v17 = await buildAutoRunValues(ctxOf("v17a"), target, result, 0, { classifySentiment: classify });
+    expect(v14.scoreVersion).toBe(14);
+    expect(v14.citedOwnedVideoIds).toEqual([]); // 결함 증상 — v14a 는 소유 유튜브 판정을 하지 않는다
+
+    seedRun(1, {
+      version: 14,
+      score: v14.visibilityScore,
+      createdAt: eqAt(1),
+      promptText: c.promptText,
+      sentiment: v14.sentiment,
+      answer: v14.answer ?? undefined,
+      citations: v14.citations as SeedOpts["citations"],
+      citedOwnedVideoIds: v14.citedOwnedVideoIds ?? [],
+      citedPressDomains: v14.citedPressDomains ?? [],
+      citedSocialDomains: v14.citedSocialDomains ?? [],
+    });
+    for (const job of ["v15", "v16", "v17"] as const) {
+      const b = await (await POST(post({ job, apply: true, batchSize: 200 }))).json();
+      expect(b.anomalies).toHaveLength(0);
+      expect(b.updated).toBe(1);
+    }
+    const row = H.store.runs[0];
+    expect(row.scoreVersion).toBe(17);
+    expect(row.visibilityScore).toBe(v17.visibilityScore);
+    expect(row.citedOwnedVideoIds).toEqual(v17.citedOwnedVideoIds);
+  });
+
+  it("수집 시점에 17 로 저장된 행은 v15·v16·v17 어느 잡도 다시 건드리지 않는다", async () => {
+    seedRun(1, { version: 17, score: 45, createdAt: eqAt(1), answer: NO_MENTION, citedPressDomains: ["press-wire.example"] });
+    for (const job of ["v15", "v16", "v17"] as const) {
+      const b = await (await POST(post({ job, dryRun: true, batchSize: 200 }))).json();
+      expect(b.processed).toBe(0);
+    }
+    const v17Preflight = await (await POST(post({ job: "v17", preflight: true }))).json();
+    expect(v17Preflight.clean).toBe(true); // 목표 버전(17)이라 v17 기준으론 범위 밖 행이 아니다
   });
 });

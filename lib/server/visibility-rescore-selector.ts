@@ -218,6 +218,20 @@ export function matchesJob(
   job: RescoreJob,
   workspaces: readonly ScopedWorkspace[],
 ): boolean {
+  if (!job.sourceVersions.includes(row.scoreVersion)) return false;
+  return matchesJobSelection(row, job, workspaces);
+}
+
+/**
+ * matchesJob 에서 **소스 버전 조건만 뺀** 선택 조건 — 워크스페이스 범위 · 날짜 창 · 공급자 · 자동
+ * 여부 · 일반 검색 여부. preflight 가 "이 행이 뒤 잡의 선택 대상이었을 수 있는가"를 볼 때 쓴다
+ * (Codex 2차 N2 — 뒤 버전을 가진 행은 그 버전에 이르는 잡들의 선택 조건을 모두 만족할 때만 정상).
+ */
+export function matchesJobSelection(
+  row: Omit<SelectorRow, "scoreVersion">,
+  job: RescoreJob,
+  workspaces: readonly ScopedWorkspace[],
+): boolean {
   const ws = workspaces.find((w) => w.id === row.workspaceId);
   if (!ws) return false;
 
@@ -225,7 +239,6 @@ export function matchesJob(
   if (createdMs < new Date(job.fromUtc).getTime()) return false;
   if (job.toUtc !== null && createdMs >= new Date(job.toUtc).getTime()) return false;
   if (job.providers !== null && !job.providers.includes(row.provider)) return false;
-  if (!job.sourceVersions.includes(row.scoreVersion)) return false;
   if (row.isAuto !== job.autoOnly) return false;
   if (job.informationalOnly && !isInformationalPrompt(row.promptText, ws.brandTerms)) return false;
 

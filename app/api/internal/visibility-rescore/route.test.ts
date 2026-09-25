@@ -2425,6 +2425,30 @@ describe("수집 시점 v17a 점수 = v17 재산출 잡 결과 (결함 D2 동치
     expect(v16pre.clean).toBe(false);
   });
 
+  /**
+   * Codex 2차 N2 — 뒤 버전은 그 행이 그 버전에 이르는 잡들의 선택 조건(날짜 창 등)을 만족할 때만
+   * 정상이다. v12 창(KST 8/12～)의 8월 15일 행에 14·17 이 있으면 실제 잡 경로로는 만들 수 없는 값이라
+   * 범위 밖이다(v14 는 8/24～, v15～v17 은 9/21～). 같은 v12 창이라도 9월 22일 행의 17 은 정상이다.
+   */
+  it("v12 창 — 8월 15일 행의 14·17 은 범위 밖, 9월 22일 행의 17 은 정상, 99 는 차단 (N2)", async () => {
+    const aug15 = (m: number) => new Date(new Date("2026-08-15T03:00:00.000Z").getTime() + m * 60_000);
+    seedRun(1, { version: 10, createdAt: aug15(1) }); // 소스 버전 — 정상
+    seedRun(2, { version: 14, score: 0, createdAt: aug15(2), answer: NO_MENTION });
+    seedRun(3, { version: 17, score: 0, createdAt: aug15(3), answer: NO_MENTION });
+    seedRun(4, { version: 17, score: 0, createdAt: eqAt(4), answer: NO_MENTION }); // 9/21 12:04 KST
+    seedRun(5, { version: 99, score: 0, createdAt: eqAt(5), answer: NO_MENTION });
+    const b = await (await POST(post({ job: "v12", preflight: true }))).json();
+    expect(b.outOfScopeCount).toBe(3); // 8/15 의 14 · 8/15 의 17 · 99
+    expect(b.clean).toBe(false);
+    expect(b.acceptedVersions).toEqual([10, 12, 14, 15, 16, 17]); // 표시용 목록 — 행별 판정은 따로
+
+    // 문제 행을 빼면 9월 22일의 17 은 정상으로 남아 clean=true 가 된다.
+    H.store.runs = H.store.runs.filter((r) => ![id(2), id(3), id(5)].includes(r.id as string));
+    const b2 = await (await POST(post({ job: "v12", preflight: true }))).json();
+    expect(b2.outOfScopeCount).toBe(0);
+    expect(b2.clean).toBe(true);
+  });
+
   it("수집 시점에 17 로 저장된 행은 v15·v16·v17 어느 잡도 다시 건드리지 않는다", async () => {
     seedRun(1, { version: 17, score: 45, createdAt: eqAt(1), answer: NO_MENTION, citedPressDomains: ["press-wire.example"] });
     for (const job of ["v15", "v16", "v17"] as const) {

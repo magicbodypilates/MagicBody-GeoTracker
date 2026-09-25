@@ -559,7 +559,11 @@ const NAMED_HTML_ENTITIES: Record<string, string> = {
   quot: '"',
   apos: "'",
 };
-const URL_IN_TEXT_RE = /\b(?:https?:\/\/|www\.)[^\s<>"'()[\]{}]+/gi;
+// URL 안의 괄호 한 쌍(`…/wiki/Set_(mathematics)`)은 URL 로 본다 — 마크다운 링크의 닫는 괄호와는
+// 짝이 없어서 구분된다(Codex 2차 C1 잔여).
+const URL_IN_TEXT_RE = /\b(?:https?:\/\/|www\.)(?:[^\s<>"'()[\]{}]|\([^\s<>"'()[\]{}]*\))+/gi;
+// 마크다운 링크 목적지 `](…)` — 링크 텍스트 `[…]` 는 남기고 목적지(괄호 쌍 포함 URL·상대 경로·제목)만 뺀다.
+const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:[^\s()<>]|\([^\s()<>]*\))*(?:\s+"[^"]*")?\s*\)/g;
 const HAS_URL_RE = /\b(?:https?:\/\/|www\.)\S/i;
 // 출처 꼬리표 줄 — 줄 머리(글머리표·번호·마크다운 강조)를 지나 꼬리표 낱말이 오고, 바로 뒤가 콜론이거나
 // 줄 끝이어야 한다("참고로 …"·"Sources of stress …" 같은 본문 문장은 걸리지 않는다).
@@ -612,13 +616,30 @@ function dropSourceSections(s: string): string {
   return kept.join("\n");
 }
 
+function htmlToPlainText(value: string): string {
+  return stripHtmlTags(decodeHtmlEntities(stripHtmlTags(String(value ?? ""))));
+}
+
+function removeUrls(s: string): string {
+  return s.replace(MARKDOWN_LINK_DEST_RE, "] ").replace(URL_IN_TEXT_RE, " ");
+}
+
 /**
- * 판정용 문자열 — 태그 제거 → 엔티티 해제 → (엔티티로 감싼 태그) 다시 제거 → 출처 꼬리표 절 제외 →
- * URL 제거. 결과는 의미 문자 세기·질문 되돌림 비교에만 쓴다.
+ * 되돌림 비교용 문자열 — 태그 제거 → 엔티티 해제 → (엔티티로 감싼 태그) 다시 제거 → **출처 꼬리표
+ * 절 전체 제외** → URL·링크 목적지 제거. "질문 + Sources: URL" 처럼 질문 뒤에 출처만 붙은 답을
+ * 되돌림으로 잡기 위해 출처 구간을 통째로 뺀다.
  */
-export function answerJudgmentText(value: string): string {
-  const noTags = stripHtmlTags(decodeHtmlEntities(stripHtmlTags(String(value ?? ""))));
-  return dropSourceSections(noTags).replace(URL_IN_TEXT_RE, " ");
+export function answerEchoText(value: string): string {
+  return removeUrls(dropSourceSections(htmlToPlainText(value)));
+}
+
+/**
+ * 의미 문자 계산용 문자열 — 태그 제거 · 엔티티 해제 · URL 과 마크다운 링크 목적지만 뺀다.
+ * 링크 텍스트·설명문·꼬리표 뒤 본문은 **남긴다**(Codex 2차 N1 — 출처 줄을 통째로 지우면
+ * "출처: URL 에 따르면 …"·설명 달린 참고 링크 목록 같은 정상 답이 의미 문자 0 으로 버려졌다).
+ */
+export function answerContentText(value: string): string {
+  return removeUrls(htmlToPlainText(value));
 }
 
 /**
@@ -626,24 +647,28 @@ export function answerJudgmentText(value: string): string {
  *   (a) prompt_echo  — 의미 문자만 남긴 답이 보낸 질문과 같거나, 질문을 담고 있으면서 질문을 뺀
  *                      나머지 의미 문자가 PROMPT_ECHO_EXTRA_MAX_CHARS 이하.
  *   (b) too_few_chars — 답의 의미 문자가 MIN_MEANINGFUL_ANSWER_CHARS 미만.
- * 답·질문 둘 다 answerJudgmentText 로 같은 정리를 거친 뒤 센다(태그·엔티티·URL·출처 꼬리표 제외).
+ * 되돌림 비교는 answerEchoText(출처 구간까지 제외), 의미 문자 계산은 answerContentText(URL·링크
+ * 목적지만 제외)로 한다 — 둘 다 태그·엔티티를 먼저 정리한다(Codex 2차 N1).
  * 질문을 인용한 뒤 내용이 길게 이어지는 답, 짧아도 내용이 있는 한 문장 답은 통과한다.
  */
 export function detectNonAnswer(
   answer: string,
   prompt: string,
 ): { reason: NonAnswerReason; meaningfulChars: number } | null {
-  const a = meaningfulText(answerJudgmentText(answer));
-  const p = meaningfulText(answerJudgmentText(prompt));
-  if (p.length > 0 && a.includes(p)) {
+  // (a) 되돌림 — 출처 구간까지 뺀 문자열끼리 비교한다(answerEchoText).
+  const echoA = meaningfulText(answerEchoText(answer));
+  const p = meaningfulText(answerEchoText(prompt));
+  if (p.length > 0 && echoA.includes(p)) {
     // 질문이 여러 번 되돌아와도(질문+질문) 나머지만 센다.
-    const rest = a.split(p).join("");
+    const rest = echoA.split(p).join("");
     if (rest.length <= PROMPT_ECHO_EXTRA_MAX_CHARS) {
-      return { reason: "prompt_echo", meaningfulChars: a.length };
+      return { reason: "prompt_echo", meaningfulChars: echoA.length };
     }
   }
-  if (a.length < MIN_MEANINGFUL_ANSWER_CHARS) {
-    return { reason: "too_few_chars", meaningfulChars: a.length };
+  // (b) 의미 문자 부족 — URL·링크 목적지만 뺀 문자열로 센다(answerContentText · 설명문 보존).
+  const contentChars = meaningfulText(answerContentText(answer)).length;
+  if (contentChars < MIN_MEANINGFUL_ANSWER_CHARS) {
+    return { reason: "too_few_chars", meaningfulChars: contentChars };
   }
   return null;
 }
@@ -652,6 +677,57 @@ const NON_ANSWER_REASON_TEXT: Record<NonAnswerReason, string> = {
   prompt_echo: "질문 되돌림",
   too_few_chars: "의미 문자 부족",
 };
+
+// 중첩 객체 안에서 답을 먼저 찾아볼 필드 — 깊은 추출(extractDeepText)과 후보 값 안 추출이 같이 쓴다.
+const DEEP_TEXT_KEYS = [
+  "answer_text",
+  "answer_text_markdown",
+  "answer",
+  "response_raw",
+  "response",
+  "output",
+  "result",
+  "text",
+  "content",
+  "body",
+  "summary",
+  "description",
+] as const;
+const MAX_CANDIDATE_TEXTS = 50;
+
+/**
+ * 후보 키 하나의 값 **안에서만** 판정할 문자열을 문서 순서대로 모은다 (Codex 2차 C2 잔여).
+ *   - 값 자체가 문자열이면 비어 있지 않은 한 그대로 후보다(예전 1차 후보와 같은 기준).
+ *   - 배열·객체 안의 문자열은 isAnswerLikeString(20자 초과 · 시각/URL/식별자 단독 아님)을 통과한
+ *     것만 후보로 친다 — id·type 같은 짧은 부속 값 때문에 "후보가 있었다"로 잘못 세면 전역 깊은
+ *     추출을 막아 버리기 때문이다(깊은 추출과 같은 기준).
+ *   - 객체에서는 DEEP_TEXT_KEYS 를 먼저 보고, 나머지 키는 메타 키(DEEP_EXTRACT_EXCLUDED_KEYS)를 빼고 본다.
+ */
+function collectCandidateTexts(value: unknown, depth: number, out: string[]): void {
+  if (out.length >= MAX_CANDIDATE_TEXTS || depth > 3) return;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text && (depth === 0 || isAnswerLikeString(text))) out.push(text);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectCandidateTexts(entry, depth + 1, out);
+    return;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const visited = new Set<string>();
+    for (const key of DEEP_TEXT_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      visited.add(key);
+      collectCandidateTexts(record[key], depth + 1, out);
+    }
+    for (const [key, entry] of Object.entries(record)) {
+      if (visited.has(key) || DEEP_EXTRACT_EXCLUDED_KEYS.has(key.toLowerCase())) continue;
+      collectCandidateTexts(entry, depth + 1, out);
+    }
+  }
+}
 
 export function normalizeAnswer(rawRecord: Record<string, unknown>) {
   const answerCandidates = ANSWER_CANDIDATE_KEYS.map((key) => rawRecord[key]);
@@ -680,7 +756,7 @@ export function normalizeAnswer(rawRecord: Record<string, unknown>) {
       // `message` 는 Bright Data not-ready 상태 안내가 담기는 필드라 답변 후보에서 제외.
       // body/summary/description 은 정상 답변 deep fallback 가능성이 있어 유지 —
       // 주 방어선은 isNotReadyPayload detector 다(plan-v2 결정 3, 회귀 위험 최소화).
-      for (const key of ["answer_text", "answer_text_markdown", "answer", "response_raw", "response", "output", "result", "text", "content", "body", "summary", "description"]) {
+      for (const key of DEEP_TEXT_KEYS) {
         if (typeof record[key] === "string" && isAnswerLikeString(record[key] as string)) {
           return (record[key] as string).trim();
         }
@@ -715,8 +791,9 @@ export type AnswerSelection =
 /**
  * 후보 필드별로 내용 없는 답 판정을 거쳐 답을 고른다 (Codex 1차 검수 C2 반영).
  *
- *   1. ANSWER_CANDIDATE_KEYS 순서대로 비어 있지 않은 문자열 후보마다 detectNonAnswer 를 적용해
- *      **첫 정상 후보**를 고른다. `answer_text` 가 별표뿐이어도 `answer_text_markdown` 에 정상 답이
+ *   1. ANSWER_CANDIDATE_KEYS 순서대로, 각 후보 키의 값 안에서 모은 문자열(collectCandidateTexts —
+ *      문자열 값 · 배열/객체 안의 답 같은 문자열)마다 detectNonAnswer 를 적용해 **첫 정상 후보**를
+ *      고른다(Codex 2차 C2 잔여 — 예전엔 문자열 값만 봐서 `content: [{text}]` 의 정상 답을 놓쳤다). `answer_text` 가 별표뿐이어도 `answer_text_markdown` 에 정상 답이
  *      있으면 그것을 쓴다(예전엔 첫 후보만 보고 전체를 실패로 던졌다).
  *   2. 1차 후보가 하나라도 있었는데 전부 내용 없는 답이면 non_answer. 이때 깊은 추출로 넘어가지
  *      않는다 — 깊은 추출은 1차 후보가 **없을 때만** 쓰는 폴백이고(기존 의도), 인용 설명문 같은
@@ -728,16 +805,17 @@ export type AnswerSelection =
 export function selectAnswer(rawRecord: Record<string, unknown>, prompt: string): AnswerSelection {
   let firstNonAnswer: Extract<AnswerSelection, { kind: "non_answer" }> | null = null;
   for (const key of ANSWER_CANDIDATE_KEYS) {
-    const value = rawRecord[key];
-    if (typeof value !== "string" || !value.trim()) continue;
-    const text = value.trim();
-    const judged = detectNonAnswer(text, prompt);
-    if (!judged) return { kind: "answer", answer: text };
-    firstNonAnswer ??= { kind: "non_answer", answer: text, ...judged };
+    const texts: string[] = [];
+    collectCandidateTexts(rawRecord[key], 0, texts);
+    for (const text of texts) {
+      const judged = detectNonAnswer(text, prompt);
+      if (!judged) return { kind: "answer", answer: text };
+      firstNonAnswer ??= { kind: "non_answer", answer: text, ...judged };
+    }
   }
   if (firstNonAnswer) return firstNonAnswer;
 
-  // 1차 후보 문자열이 없다 → normalizeAnswer 는 곧바로 깊은 추출·파싱 실패 표식으로 간다.
+  // 후보 키 안에서 판정할 문자열을 하나도 못 찾았다 → 예전과 같은 전역 깊은 추출·파싱 실패 표식.
   const fallback = normalizeAnswer(rawRecord);
   if (fallback.startsWith(PARSE_FAILURE_MARKER)) return { kind: "parse_failure", marker: fallback };
   const judged = detectNonAnswer(fallback, prompt);

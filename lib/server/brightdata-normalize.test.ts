@@ -10,7 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   ScrapeFailure,
-  answerJudgmentText,
+  answerContentText,
+  answerEchoText,
   classifyCrawlerError,
   clearScrapeCache,
   detectNonAnswer,
@@ -496,8 +497,10 @@ describe("detectNonAnswer — 태그·엔티티·URL·출처 꼬리표는 의미
     const html = `<p>${LONG}</p>\nSources: https://news.example/a`;
     const r = normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [{ answer_text: html }] });
     expect(r.answer).toBe(html);
-    expect(answerJudgmentText(html)).not.toContain("<p>");
-    expect(answerJudgmentText(html)).not.toContain("https://");
+    expect(answerEchoText(html)).not.toContain("<p>");
+    expect(answerEchoText(html)).not.toContain("https://");
+    expect(answerContentText(html)).not.toContain("<p>");
+    expect(answerContentText(html)).not.toContain("https://");
   });
 });
 
@@ -563,5 +566,103 @@ describe("selectAnswer · normalizeScrapePayload — 후보 필드별 판정 (C2
 
   it("후보가 전혀 없으면 여전히 PARSE_FAILURE", () => {
     expect(selectAnswer({ timestamp: "2026-09-25T00:00:00Z" }, PROMPT).kind).toBe("parse_failure");
+  });
+});
+
+/**
+ * Codex 2차 — N1(출처 줄 통째 삭제로 인한 오탈락) · C1 잔여(괄호 든 URL) · C2 잔여(후보 값 안 배열·객체).
+ */
+describe("detectNonAnswer — 되돌림 비교용·의미 문자 계산용 분리 (N1)", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+
+  it.each([
+    ["출처: URL 에 따르면 …", "출처: https://report.example/2026 에 따르면 초보자는 소규모 수업에서 자세한 설명을 받는 것이 좋습니다."],
+    [
+      "'참고:' 아래 설명 달린 마크다운 링크 두 개",
+      "참고:\n- [초보자 준비물과 첫 수업 안내](https://guide.example/a) — 운동복과 수건, 물을 챙기면 됩니다\n- [강사 설명 방식과 인원 비교](https://guide.example/b) — 한 반 인원이 적을수록 자세를 자주 봐 줍니다",
+    ],
+    ["영문 Sources: URL According to …", "Sources: https://report.example/a According to this report, beginners progress faster in small classes with hands-on cues."],
+  ])("정상 답은 통과 — %s", (_name, answer) => {
+    expect(detectNonAnswer(answer, Q)).toBeNull();
+  });
+
+  it.each([
+    ["질문 + Sources URL", `${Q}\nSources: https://example.com/result`, "prompt_echo"],
+    ["Sources URL 만", "Sources: https://example.com/result", "too_few_chars"],
+    ["태그로 감싼 질문", `<p><strong>${Q}</strong></p>`, "prompt_echo"],
+  ])("기존 거부 사례는 계속 거부 — %s", (_name, answer, reason) => {
+    expect(detectNonAnswer(answer, Q)?.reason).toBe(reason);
+  });
+
+  it("의미 문자 계산용은 링크 텍스트·설명·꼬리표 뒤 본문을 남기고, 되돌림 비교용은 출처 구간을 뺀다", () => {
+    const text = "본문 한 줄\n출처: [예시 보고서](https://report.example/a) 설명 문장";
+    expect(answerContentText(text)).toContain("예시 보고서");
+    expect(answerContentText(text)).toContain("설명 문장");
+    expect(answerContentText(text)).not.toContain("https://");
+    expect(answerEchoText(text)).not.toContain("예시 보고서");
+    expect(answerEchoText(text)).toContain("본문 한 줄");
+  });
+});
+
+describe("URL 제거 — 괄호가 든 URL (C1 잔여)", () => {
+  const Q = "집합과 함수의 차이를 알려 주세요";
+  const LONG =
+    "집합은 원소들의 모임이고 함수는 한 집합의 각 원소를 다른 집합의 원소 하나에 대응시키는 규칙입니다. 그래서 함수는 특별한 성질을 가진 관계로 볼 수 있습니다.";
+
+  it("괄호 든 URL 두 개만 있는 답 → EMPTY 대상(의미 문자 부족)", () => {
+    const answer = "https://wiki.example/wiki/Set_(mathematics) https://wiki.example/wiki/Function_(mathematics)";
+    expect(detectNonAnswer(answer, Q)).toEqual({ reason: "too_few_chars", meaningfulChars: 0 });
+  });
+
+  it("괄호 든 URL 을 마크다운 링크로 인용한 정상 답 → 통과 · 링크 텍스트는 남고 URL 잔재는 없다", () => {
+    const answer = `[집합 개념](https://wiki.example/wiki/Set_(mathematics))과 [함수 개념](https://wiki.example/wiki/Function_(mathematics))을 보면, ${LONG}`;
+    expect(detectNonAnswer(answer, Q)).toBeNull();
+    const content = answerContentText(answer);
+    expect(content).toContain("집합 개념");
+    expect(content).not.toContain("mathematics");
+    expect(content).not.toContain("wiki.example");
+  });
+});
+
+describe("selectAnswer — 후보 키 값 안의 배열·객체 (C2 잔여)", () => {
+  const NORMAL =
+    "초보자에게 적합한 수업을 고르는 방법은 수업 인원, 강사의 설명 방식, 체험 수업 여부를 차례로 확인하는 것입니다.";
+
+  it("{answer_text: 질문, content: [{text: 정상 답}]} → 정상 답", () => {
+    expect(selectAnswer({ answer_text: PROMPT, content: [{ type: "text", text: NORMAL }] }, PROMPT)).toEqual({
+      kind: "answer",
+      answer: NORMAL,
+    });
+    const r = normalizeScrapePayload({
+      provider: "perplexity",
+      prompt: PROMPT,
+      payload: [{ answer_text: PROMPT, content: [{ type: "text", text: NORMAL }] }],
+    });
+    expect(r.answer).toBe(NORMAL);
+  });
+
+  it("모든 후보(문자열·배열 안 문자열)가 비응답 → EMPTY_ANSWER", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({
+        provider: "perplexity",
+        prompt: PROMPT,
+        payload: [{ answer_text: PROMPT, content: [{ text: `"${PROMPT}"?` }] }],
+      }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+  });
+
+  it("후보 키 값 안에 짧은 부속 값(id·type)만 있으면 후보가 없는 것으로 보고 전역 깊은 추출을 쓴다", () => {
+    const r = normalizeScrapePayload({
+      provider: "gemini",
+      prompt: PROMPT,
+      payload: [{ content: { id: "c_0001", type: "text" }, extra: { body: NORMAL } }],
+    });
+    expect(r.answer).toBe(NORMAL);
+  });
+
+  it("후보가 없고 부속 필드에만 답 → 기존 깊은 추출 동작 유지", () => {
+    const r = normalizeScrapePayload({ provider: "gemini", prompt: PROMPT, payload: [{ extra: { body: NORMAL } }] });
+    expect(r.answer).toBe(NORMAL);
   });
 });

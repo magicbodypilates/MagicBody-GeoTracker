@@ -277,33 +277,51 @@ export function reproSetForVersion(version: number): ScoreSetId | null {
 }
 
 /**
- * preflight 가 창 안에서 "정상 상태"로 인정하는 score_version 목록 (Codex 1차 검수 C3 반영).
- *
- *   = 잡의 소스 버전 + 목표 버전 + **목표 버전 뒤로 이어지는 잡 체인의 목표 버전들**
+ * 이 잡 **뒤로** 이어지는 잡 체인 — "뒤 버전 → 그 버전에 이르는 잡 경로들" (Codex 1차 C3 · 2차 N2).
  *
  * 체인은 잡 정의에서 유도한다 — 같은 workspaceScope 의 잡 중 소스 버전에 지금 버전이 든 잡의
- * 목표 버전을 따라간다(v15: 14·15 → v16 이 15 를 16 으로 → v17 이 16 을 17 로 ⇒ 14·15·16·17).
- * 이미 뒤 잡으로 앞으로 간 행(v15 창의 16·17, v16 창의 17)은 이 잡의 대상도 아니고 이상도 아니다.
- * 반대로 체인 밖 버전(미등록 버전 · 이 잡보다 **앞** 단계 버전)은 계속 범위 밖으로 세어 차단한다
- * — 예: v16 창에 아직 14 가 남아 있으면 v15 를 먼저 돌려야 한다는 뜻이라 clean=false 가 맞다.
+ * 목표 버전을 따라간다. 예: v15(14→15) 뒤 경로는 16 ← [v16], 17 ← [v16, v17].
+ * v12(10→12) 뒤 경로는 14 ← [v14], 15 ← [v14, v15], 16 ← [v14, v15, v16], 17 ← [v14, v15, v16, v17].
  *
+ * preflight 는 창 안의 행이 뒤 버전 v 를 가졌을 때, 그 행이 **v 에 이르는 경로의 모든 잡의 선택
+ * 조건**(날짜 창 · 공급자 · 자동 여부 · 일반 검색 여부)을 만족해야만 "이미 앞으로 간 정상 행"으로
+ * 인정한다(visibility-rescore-selector.ts matchesJobSelection). 버전만 보면 v12 창의 8월 15일 행에
+ * 14～17 이 있어도(실제 잡 경로로는 만들 수 없는 값) 통과해 버린다(2차 N2).
  * ⚠️ 지문(jobHash)과 무관하다 — 잡 정의를 바꾸지 않고 preflight 판정에만 쓴다.
+ */
+export function downstreamJobPaths(jobId: RescoreJobId): Map<number, RescoreJobId[][]> {
+  const job = RESCORE_JOBS[jobId];
+  const paths = new Map<number, RescoreJobId[][]>();
+  const walk = (version: number, path: RescoreJobId[]) => {
+    for (const id of RESCORE_JOB_IDS) {
+      const next = RESCORE_JOBS[id];
+      if (id === jobId || path.includes(id)) continue; // 자기 자신·순환 방지
+      if (next.workspaceScope !== job.workspaceScope) continue;
+      if (!next.sourceVersions.includes(version)) continue;
+      const nextPath = [...path, id];
+      const list = paths.get(next.targetVersion) ?? [];
+      list.push(nextPath);
+      paths.set(next.targetVersion, list);
+      walk(next.targetVersion, nextPath);
+    }
+  };
+  walk(job.targetVersion, []);
+  return paths;
+}
+
+/**
+ * preflight 가 창 안에서 볼 수 있는 score_version 전체 — 소스 + 목표 + 뒤 체인 버전(표시용).
+ * 뒤 체인 버전은 이 목록에 있다고 곧바로 인정되지 않는다 — 행마다 downstreamJobPaths 의 경로
+ * 조건을 만족해야 한다(route.ts preflight). 목록 밖(미등록·앞 단계) 버전은 늘 범위 밖이다
+ * — 예: v16 창에 아직 14 가 남아 있으면 v15 를 먼저 돌려야 한다는 뜻이라 clean=false 가 맞다.
  */
 export function preflightAcceptedVersions(jobId: RescoreJobId): number[] {
   const job = RESCORE_JOBS[jobId];
-  const accepted = new Set<number>([...job.sourceVersions, job.targetVersion]);
-  const queue: number[] = [job.targetVersion];
-  while (queue.length > 0) {
-    const version = queue.shift() as number;
-    for (const id of RESCORE_JOB_IDS) {
-      const next = RESCORE_JOBS[id];
-      if (next.workspaceScope !== job.workspaceScope) continue;
-      if (!next.sourceVersions.includes(version)) continue;
-      if (accepted.has(next.targetVersion)) continue;
-      accepted.add(next.targetVersion);
-      queue.push(next.targetVersion);
-    }
-  }
+  const accepted = new Set<number>([
+    ...job.sourceVersions,
+    job.targetVersion,
+    ...downstreamJobPaths(jobId).keys(),
+  ]);
   return [...accepted].sort((a, b) => a - b);
 }
 

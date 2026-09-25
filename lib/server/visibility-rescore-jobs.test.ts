@@ -17,6 +17,7 @@ import {
   isRescoreJobId,
   jobHash,
   ownedVideoListFingerprint,
+  downstreamJobPaths,
   preflightAcceptedVersions,
   reproSetForVersion,
   type RescoreJobId,
@@ -689,5 +690,20 @@ describe("재산출 스크립트 허용 잡 = 서버 잡 목록 (C4)", () => {
     expect(m).not.toBeNull();
     const cli = [...(m?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     expect([...cli].sort()).toEqual([...RESCORE_JOB_IDS].sort());
+  });
+});
+
+describe("downstreamJobPaths — 뒤 버전에 이르는 잡 경로 (N2)", () => {
+  it("v15 → 16 ← [v16] · 17 ← [v16, v17]", () => {
+    expect(Object.fromEntries(downstreamJobPaths("v15"))).toEqual({ 16: [["v16"]], 17: [["v16", "v17"]] });
+  });
+  it("v12 → 14 ← [v14] … 17 ← [v14, v15, v16, v17] (행별로 각 잡의 창을 따로 본다)", () => {
+    const m = downstreamJobPaths("v12");
+    expect(m.get(14)).toEqual([["v14"]]);
+    expect(m.get(17)).toEqual([["v14", "v15", "v16", "v17"]]);
+  });
+  it("뒤 잡이 없으면 빈 지도", () => {
+    expect(downstreamJobPaths("v17").size).toBe(0);
+    expect(downstreamJobPaths("v12t").size).toBe(0); // 다른 workspaceScope 는 잇지 않는다
   });
 });

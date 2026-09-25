@@ -42,6 +42,7 @@ import {
   configFingerprint,
   isRescoreJobId,
   jobHash,
+  downstreamJobPaths,
   ownedVideoListFingerprint,
   preflightAcceptedVersions,
   promptKey,
@@ -58,6 +59,7 @@ import {
   buildWindowConditions,
   isInformationalPrompt,
   matchesJob,
+  matchesJobSelection,
   type ScopedWorkspace,
 } from "@/lib/server/visibility-rescore-selector";
 import {
@@ -803,6 +805,7 @@ export async function POST(req: NextRequest) {
         .select({
           workspaceId: schema.runs.workspaceId,
           promptText: schema.runs.promptText,
+          provider: schema.runs.provider,
           scoreVersion: schema.runs.scoreVersion,
           isAuto: schema.runs.isAuto,
           createdAt: schema.runs.createdAt,
@@ -828,13 +831,19 @@ export async function POST(req: NextRequest) {
       const windowTotal = windowRows.length;
       const manualCount = windowRows.filter((r) => r.isAuto !== true).length;
 
-      // 소스·목표 버전 + 뒤 잡 체인으로 이미 앞으로 간 버전은 정상으로 본다(Codex 1차 C3 —
-      // 예전엔 v15 창의 16·17 행이 범위 밖으로 세져 버전 14 행 복구가 게이트에서 막혔다).
+      // 소스·목표 버전은 그대로 정상이다. 뒤 잡 체인으로 이미 앞으로 간 버전(v15 창의 16·17 등)은
+      // 그 행이 그 버전에 이르는 잡 경로의 **선택 조건을 모두 만족할 때만** 정상으로 본다
+      // (Codex 1차 C3 · 2차 N2 — 버전만 보면 v12 창의 8월 행에 14～17 이 있어도 통과했다).
       const acceptedVersions = preflightAcceptedVersions(jobId);
-      const knownVersions = new Set<number>(acceptedVersions);
-      const outOfScopeCount = windowRows.filter(
-        (r) => r.isAuto === true && !knownVersions.has(r.scoreVersion),
-      ).length;
+      const ownVersions = new Set<number>([...job.sourceVersions, job.targetVersion]);
+      const chainPaths = downstreamJobPaths(jobId);
+      const isAcceptedRow = (r: (typeof windowRows)[number]): boolean => {
+        if (ownVersions.has(r.scoreVersion)) return true;
+        const paths = chainPaths.get(r.scoreVersion);
+        if (!paths) return false;
+        return paths.some((path) => path.every((id) => matchesJobSelection(r, RESCORE_JOBS[id], workspaces)));
+      };
+      const outOfScopeCount = windowRows.filter((r) => r.isAuto === true && !isAcceptedRow(r)).length;
 
       const [targetCountRow] = await db
         .select({ count: sql<number>`count(*)::int` })

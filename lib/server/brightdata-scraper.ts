@@ -539,12 +539,15 @@ export function meaningfulText(value: string): string {
  * 통과하던 것을 막는다. **판정에만 쓰고 저장되는 답 본문은 바꾸지 않는다.** stripAnswerHtml 은
  * `answer_html` 키만 통째로 지우고 answer_text 안의 태그는 건드리지 않으므로 겹치지 않는다.
  */
-const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
-const HTML_RAW_CONTENT_RE = /<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+// 주석·script 류 블록은 정규식 대신 stripHtmlBlocks(한 번 훑기)로 지운다 — `<!--`·`<script>` 가 닫힘 없이
+// 반복되는 입력에서 게으른 정규식이 매번 끝까지 훑어 제곱으로 느려지던 것을 막는다(3회차 R3-4).
+const RAW_CONTENT_TAGS = ["script", "style", "noscript", "template"] as const;
+const TAG_NAME_CHAR_RE = /[a-z0-9-]/;
+// 태그 속성 부분은 `[^<>]*` — 닫는 `>` 가 없는 긴 입력에서도 다음 `<` 에서 멈춰 입력 길이에 비례한다(R3-4).
 const HTML_BLOCK_TAG_RE =
-  /<\/?(?:p|div|br|li|ul|ol|h[1-6]|tr|td|th|table|thead|tbody|section|article|blockquote|pre|hr|header|footer|nav|main|body|html|head|title)\b[^>]*>/gi;
+  /<\/?(?:p|div|br|li|ul|ol|h[1-6]|tr|td|th|table|thead|tbody|section|article|blockquote|pre|hr|header|footer|nav|main|body|html|head|title)\b[^<>]*>/gi;
 // 글자로 시작하는 태그·선언(<!DOCTYPE …>)만 태그로 본다 — "a < b"·"<3"·"<참고>" 는 건드리지 않는다.
-const HTML_TAG_RE = /<\/?[a-z][a-z0-9-]*\b[^>]*>|<![a-z][^>]*>/gi;
+const HTML_TAG_RE = /<\/?[a-z][a-z0-9-]*\b[^<>]*>|<![a-z][^<>]*>/gi;
 const HTML_ENTITY_RE = /&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z][a-z0-9]{1,31});/gi;
 const NAMED_HTML_ENTITIES: Record<string, string> = {
   nbsp: " ",
@@ -563,12 +566,22 @@ const NAMED_HTML_ENTITIES: Record<string, string> = {
 // 짝이 없어서 구분된다(Codex 2차 C1 잔여).
 const URL_IN_TEXT_RE = /\b(?:https?:\/\/|www\.)(?:[^\s<>"'()[\]{}]|\([^\s<>"'()[\]{}]*\))+/gi;
 // 마크다운 링크 목적지 `](…)` — 링크 텍스트 `[…]` 는 남기고 목적지(괄호 쌍 포함 URL·상대 경로·제목)만 뺀다.
-const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:[^\s()<>]|\([^\s()<>]*\))*(?:\s+"[^"]*")?\s*\)/g;
-// 출처 이름표 — 줄 머리(글머리표·번호·마크다운 강조)를 지나 이름표 낱말이 오고, 바로 뒤가 콜론이거나
-// 줄 끝이어야 한다("참고로 …"·"Sources of stress …" 같은 본문 문장은 걸리지 않는다). 줄마다 이 머리
-// 부분(콜론까지)만 지우고 같은 줄의 나머지 글은 남긴다.
+const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:[^\s()<>]|\([^\s()<>]*\))*(?:\s+"[^"\n]{0,200}")?\s*\)/g;
+// 마크다운 링크 전체 `[텍스트](목적지)` — 텍스트가 도메인·URL 모양이면(`[news.example.com](…)`) 텍스트까지
+// URL 처럼 지우고, 사람이 읽는 제목이면 남긴다(3회차 R3-2).
+const MARKDOWN_LINK_RE =
+  /\[([^[\]\n]{0,300})\]\(\s*(?:[^\s()<>]|\([^\s()<>]*\))*(?:\s+"[^"\n]{0,200}")?\s*\)/g;
+const DOMAIN_LIKE_TEXT_RE = /^(?:https?:\/\/)?(?:www\.)?[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:[/?#]\S*)?$/i;
+// 인용 번호표 `[1]` — 의미 문자로 세지 않는다(3회차 R3-1).
+const CITATION_MARKER_RE = /\[\d{1,3}\]/g;
+// URL 을 뺀 뒤 번호·글머리 기호·문장부호만 남은 줄 — 통째로 지운다(3회차 R3-1).
+const NUMBERING_ONLY_LINE_RE = /^[\s\d.,:;)(\-*•·#>[\]]*$/;
+// 출처 이름표 — 줄 머리(글머리표·번호·마크다운 강조)를 지나 이름표 낱말이 오고, 번호(`Source 1`)가 붙을 수
+// 있으며, 바로 뒤가 콜론이거나 줄 끝이어야 한다("참고로 …"·"Sources of stress …" 같은 본문 문장은 걸리지
+// 않는다). 줄마다 이 머리 부분(콜론까지)만 지우고 같은 줄의 나머지 글은 남긴다.
+// 공백 묶음은 서로 겹치지 않게 쓴다 — 겹치면 이름표 뒤 긴 공백에서 되추적이 제곱으로 늘어난다(3회차 R3-4).
 const SOURCE_LABEL_HEAD_RE =
-  /^[ \t>#*_\-•·\d.()[\]]*(?:sources?|references?|citations?|출처|참고[ \t]*(?:자료|문헌|링크)?|인용[ \t]*(?:자료|출처)?)[ \t]*[*_]*[ \t]*(?::|：|$)[*_]*/gimu;
+  /^[ \t>#*_\-•·\d.()[\]]*(?:sources?|references?|citations?|출처|참고(?:[ \t]*(?:자료|문헌|링크))?|인용(?:[ \t]*(?:자료|출처))?)[ \t]*(?:\d{1,3}[ \t]*)?(?:[*_]+[ \t]*)?(?::|：|$)[*_]*/gimu;
 
 function decodeHtmlEntities(s: string): string {
   return s.replace(HTML_ENTITY_RE, (_m, body: string) => {
@@ -581,12 +594,57 @@ function decodeHtmlEntities(s: string): string {
   });
 }
 
+/**
+ * 주석(`<!-- … -->`)과 script·style·noscript·template 블록을 지운다. 한 번 훑고, "이 위치 뒤로는 닫힘이
+ * 없다"를 기억해 같은 검색을 되풀이하지 않으므로 입력 길이에 비례한다(3회차 R3-4). 닫힘이 없는 여는
+ * 표시는 그 표시만 지우고 뒤 글은 남긴다(예전 정규식과 같은 결과 — 뒤 글을 통째로 버리지 않는다).
+ */
+function stripHtmlBlocks(s: string): string {
+  if (!s.includes("<")) return s;
+  const lower = s.replace(/[A-Z]/g, (c) => c.toLowerCase()); // ASCII 만 — 길이를 바꾸지 않는다
+  const noCloseFrom = new Map<string, number>();
+  const findClose = (needle: string, from: number): number => {
+    const known = noCloseFrom.get(needle);
+    if (known !== undefined && from >= known) return -1;
+    const at = lower.indexOf(needle, from);
+    if (at < 0) noCloseFrom.set(needle, from);
+    return at;
+  };
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const lt = s.indexOf("<", i);
+    if (lt < 0) {
+      out += s.slice(i);
+      break;
+    }
+    out += s.slice(i, lt);
+    if (lower.startsWith("<!--", lt)) {
+      const end = findClose("-->", lt + 4);
+      out += " ";
+      i = end < 0 ? lt + 4 : end + 3;
+      continue;
+    }
+    const tag = RAW_CONTENT_TAGS.find(
+      (t) => lower.startsWith(t, lt + 1) && !TAG_NAME_CHAR_RE.test(lower.charAt(lt + 1 + t.length)),
+    );
+    if (tag) {
+      const close = findClose(`</${tag}`, lt + 1 + tag.length);
+      if (close >= 0) {
+        const gt = lower.indexOf(">", close);
+        out += " ";
+        i = gt < 0 ? s.length : gt + 1;
+        continue;
+      }
+    }
+    out += "<";
+    i = lt + 1;
+  }
+  return out;
+}
+
 function stripHtmlTags(s: string): string {
-  return s
-    .replace(HTML_COMMENT_RE, " ")
-    .replace(HTML_RAW_CONTENT_RE, " ")
-    .replace(HTML_BLOCK_TAG_RE, "\n")
-    .replace(HTML_TAG_RE, " ");
+  return stripHtmlBlocks(s).replace(HTML_BLOCK_TAG_RE, "\n").replace(HTML_TAG_RE, " ");
 }
 
 function htmlToPlainText(value: string): string {
@@ -594,13 +652,28 @@ function htmlToPlainText(value: string): string {
 }
 
 function removeUrls(s: string): string {
-  return s.replace(MARKDOWN_LINK_DEST_RE, "] ").replace(URL_IN_TEXT_RE, " ");
+  return s
+    .replace(MARKDOWN_LINK_RE, (_m, linkText: string) =>
+      DOMAIN_LIKE_TEXT_RE.test(linkText.trim()) ? " " : ` ${linkText} `,
+    )
+    .replace(MARKDOWN_LINK_DEST_RE, "] ")
+    .replace(URL_IN_TEXT_RE, " ");
+}
+
+/** URL 을 뺀 뒤 번호·글머리 기호·문장부호만 남은 줄(출처 목록의 `1.`·`- [1]` 줄)을 지운다(R3-1). */
+function dropNumberingOnlyLines(s: string): string {
+  return s
+    .split("\n")
+    .filter((line) => !NUMBERING_ONLY_LINE_RE.test(line))
+    .join("\n");
 }
 
 /**
  * 판정용 문자열(되돌림 비교·의미 문자 계산 공용) — 태그 제거 → 엔티티 해제 → (엔티티로 감싼 태그)
- * 다시 제거 → 줄 머리의 출처 **이름표**(`Sources:`·`References:`·`출처:`·`참고:` 등, 콜론까지)만 제거 →
- * URL·마크다운 링크 목적지 제거. 링크 텍스트·설명문·이름표 뒤 본문은 **남긴다**.
+ * 다시 제거 → 줄 머리의 출처 **이름표**(`Sources:`·`Source 1:`·`References:`·`출처:`·`참고:` 등, 콜론까지)만
+ * 제거 → URL·마크다운 링크 목적지 제거(링크 텍스트가 도메인 모양이면 텍스트도 제거) → 인용 번호표(`[1]`)
+ * 제거 → 번호·글머리 기호만 남은 줄 제거. 사람이 읽는 링크 제목·설명문·이름표 뒤 본문은 **남긴다**.
+ * 사례별 기대 결과의 정본은 brightdata-normalize.test.ts 의 "판정 기준표"다.
  *
  * 예전(2차)엔 되돌림 비교용은 출처 구간을 통째로 뺐는데, 그러면 "질문 + 출처: URL 에 따르면 긴 본문"
  * 이 되돌림으로 잘못 거부됐다. 이름표만 지우면 "질문 + Sources: URL"·"질문 + References: 목록" 은
@@ -608,7 +681,8 @@ function removeUrls(s: string): string {
  * 두 판정이 같은 문자열을 쓰므로 규칙 차이가 없다.
  */
 export function answerJudgmentText(value: string): string {
-  return removeUrls(htmlToPlainText(value).replace(SOURCE_LABEL_HEAD_RE, " "));
+  const unlabeled = htmlToPlainText(value).replace(SOURCE_LABEL_HEAD_RE, " ");
+  return dropNumberingOnlyLines(removeUrls(unlabeled).replace(CITATION_MARKER_RE, " "));
 }
 
 /**
@@ -666,7 +740,9 @@ const MAX_CANDIDATE_TEXTS = 50;
  *   - 배열·객체 안의 문자열은 isAnswerLikeString(20자 초과 · 시각/URL/식별자 단독 아님)을 통과한
  *     것만 후보로 친다 — id·type 같은 짧은 부속 값 때문에 "후보가 있었다"로 잘못 세면 전역 깊은
  *     추출을 막아 버리기 때문이다(깊은 추출과 같은 기준).
- *   - 객체에서는 DEEP_TEXT_KEYS 를 먼저 보고, 나머지 키는 메타 키(DEEP_EXTRACT_EXCLUDED_KEYS)를 빼고 본다.
+ *   - 객체에서는 **본문용 키(DEEP_TEXT_KEYS)만** 따라간다. title·name·model·snippet·url 같은 그 밖의 키는
+ *     따라가지 않는다 — 앞 후보가 비응답일 때 제목·메타 문자열이 답으로 뽑히던 것을 막는다(3회차 R3-3).
+ *     그런 키는 후보 문자열이 하나도 없을 때의 전역 깊은 추출(normalizeAnswer)에만 맡긴다.
  */
 function collectCandidateTexts(value: unknown, depth: number, out: string[]): void {
   if (out.length >= MAX_CANDIDATE_TEXTS || depth > 3) return;
@@ -681,15 +757,9 @@ function collectCandidateTexts(value: unknown, depth: number, out: string[]): vo
   }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    const visited = new Set<string>();
     for (const key of DEEP_TEXT_KEYS) {
       if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
-      visited.add(key);
       collectCandidateTexts(record[key], depth + 1, out);
-    }
-    for (const [key, entry] of Object.entries(record)) {
-      if (visited.has(key) || DEEP_EXTRACT_EXCLUDED_KEYS.has(key.toLowerCase())) continue;
-      collectCandidateTexts(entry, depth + 1, out);
     }
   }
 }

@@ -569,7 +569,7 @@ describe("selectAnswer · normalizeScrapePayload — 후보 필드별 판정 (C2
 /**
  * Codex 2차 — N1(출처 줄 통째 삭제로 인한 오탈락) · C1 잔여(괄호 든 URL) · C2 잔여(후보 값 안 배열·객체).
  */
-describe("detectNonAnswer — 되돌림 비교용·의미 문자 계산용 분리 (N1)", () => {
+describe("detectNonAnswer — 판정 문자열 하나로 되돌림·의미 문자를 함께 판정 (N1)", () => {
   const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
 
   it.each([
@@ -679,5 +679,194 @@ describe("selectAnswer — 후보 키 값 안의 배열·객체 (C2 잔여)", ()
   it("후보가 없고 부속 필드에만 답 → 기존 깊은 추출 동작 유지", () => {
     const r = normalizeScrapePayload({ provider: "gemini", prompt: PROMPT, payload: [{ extra: { body: NORMAL } }] });
     expect(r.answer).toBe(NORMAL);
+  });
+});
+
+/* ============================================================
+ * 판정 기준표 (정본) — 2026-09-25 3회차
+ *
+ * 판정 함수 주변 지적이 회차마다 이어져(N1 → N1 잔여 → R3-1) 지금까지 나온 모든 사례를 이 표 하나로
+ * 고정한다. **어떤 수정이든 이 표 전체를 깨지 않아야 한다.** 새 사례는 여기에 한 줄로 더한다.
+ *   X = 거부(EMPTY_ANSWER · 저장 안 함) · O = 저장(원문 그대로) · T = 수용한 트레이드오프(저장)
+ * 질문·답·도메인은 전부 지어낸 값이다(PUBLIC 저장소).
+ * ============================================================ */
+describe("판정 기준표 — 거부 X1～X16 · 저장 O1～O16 · 트레이드오프 T1～T2", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+  const LONG_KO =
+    "초보자라면 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. 첫 달은 주 2회로 시작해 몸이 적응하면 횟수를 늘리세요.";
+  const NORMAL =
+    "초보자에게 적합한 수업을 고르는 방법은 수업 인원, 강사의 설명 방식, 체험 수업 여부를 차례로 확인하는 것입니다.";
+  const O1 =
+    "처음 운동을 시작한다면 한 반 인원이 여섯 명 이하인 소규모 수업을 고르고, 체험 수업에서 강사가 자세를 얼마나 자주 잡아 주는지 직접 확인해 보는 것이 가장 확실한 방법입니다.";
+  const O2 =
+    "나이 제한은 거의 없습니다. 다만 관절이나 허리에 불편함이 있다면 첫 수업 전에 강사에게 미리 알려 주세요. 강도를 낮춘 동작으로 바꿔 주기 때문에 누구나 무리 없이 따라갈 수 있고, 몸이 익숙해지면 조금씩 강도를 올리면 됩니다.";
+  const O3 =
+    "Most studios welcome complete beginners. Look for small classes, clear verbal cues, and a trial session so you can judge the teaching style before you commit.";
+  const urls = (n: number, prefix: (i: number) => string) =>
+    Array.from({ length: n }, (_, i) => `${prefix(i + 1)}https://ref.example/item-${i + 1}`).join("\n");
+  const LONG_MD = (() => {
+    const rows = Array.from(
+      { length: 60 },
+      (_, i) => `| ${i + 1}주차 | **기초 동작 ${i + 1}** | 호흡과 코어 안정화를 먼저 익히고 동작 범위를 조금씩 넓힙니다 |`,
+    ).join("\n");
+    const items = Array.from(
+      { length: 60 },
+      (_, i) => `- **단계 ${i + 1}**: 몸통을 곧게 세운 상태에서 천천히 움직이며 통증이 없는 범위까지만 진행합니다.`,
+    ).join("\n");
+    return `## 초보자 12주 계획\n\n${LONG_KO}\n\n| 주차 | 주제 | 설명 |\n|---|---|---|\n${rows}\n\n${items}\n\n${LONG_KO}`;
+  })();
+
+  type Row = { id: string; record: Record<string, unknown>; save: boolean; answer?: string };
+  const text = (id: string, answerText: string, save: boolean): Row => ({
+    id,
+    record: { answer_text: answerText },
+    save,
+    answer: answerText.trim(),
+  });
+
+  const rows: Row[] = [
+    // ── 거부 ──
+    text("X1 질문 그대로", Q, false),
+    text("X2 질문 앞뒤 공백·따옴표·물음표 변형", `  "${Q}?"  `, false),
+    text("X3 별표만", "★ ★ ★ ★ ★", false),
+    text("X4 태그로 감싼 질문", `<p><strong>${Q}</strong></p>`, false),
+    text("X5 단어 사이 &nbsp;", Q.replace(/ /g, "&nbsp;"), false),
+    text("X6 질문 + Sources URL", `${Q}\nSources: https://example.com/a`, false),
+    text("X7 Sources URL 단독", "Sources: https://example.com/a", false),
+    text("X8 질문 + References URL 목록", `${Q}\nReferences:\n- https://a.example/x\n- https://b.example/y`, false),
+    text(
+      "X9 괄호 든 URL 두 개만",
+      "https://en.wikipedia.org/wiki/Set_(mathematics) https://en.wikipedia.org/wiki/Group_(mathematics)",
+      false,
+    ),
+    text("X10 질문 + References 번호 목록 10줄 (R3-1)", `${Q}\nReferences:\n${urls(10, (i) => `${i}. `)}`, false),
+    text("X11 질문 + Sources 번호·인용 번호표 6줄 (R3-1)", `${Q}\nSources:\n${urls(6, (i) => `${i}. [${i}] `)}`, false),
+    text(
+      "X12 질문 + 링크 텍스트가 도메인인 출처 목록 (R3-2)",
+      `${Q}\nSources:\n- [news.example.com](https://news.example.com/a)\n- [blog.example.org](https://blog.example.org/b)`,
+      false,
+    ),
+    text("X13 질문 + 번호 붙은 이름표", `${Q}\nSource 1: https://a.example/1\nSource 2: https://a.example/2`, false),
+    {
+      id: "X14 후보 값 안 제목은 답이 아니다 (R3-3)",
+      record: {
+        answer_text: Q,
+        content: [{ title: "지어낸 스튜디오 추천 순위 제목 모음 2026년판", url: "https://rank.example/a" }],
+      },
+      save: false,
+    },
+    {
+      id: "X15 후보 값 안 메타 문자열은 답이 아니다 (R3-3)",
+      record: { answer_text: Q, response_raw: { model: "some-model latest release build 20xx" } },
+      save: false,
+    },
+    text("X16 짧은 오류 페이지", "<!DOCTYPE html><html><body>Access denied</body></html>", false),
+    // ── 저장 ──
+    text("O1 100자 안팎 한국어 한 문장", O1, true),
+    text("O2 114자 안팎 '나이 제한은 거의 없습니다. …'", O2, true),
+    text("O3 영문 정상 답", O3, true),
+    text("O4 질문 인용 뒤 긴 본문", `"${Q}"라는 질문에 답하면, ${LONG_KO}`, true),
+    text(
+      "O5 질문 + 출처: URL 에 따르면 긴 본문",
+      `${Q}\n출처: https://x.example/r 에 따르면 초보자는 수업 인원이 적고 동작 설명이 자세한 곳에서 시작하는 것이 좋습니다.`,
+      true,
+    ),
+    text(
+      "O6 출처: URL 에 따르면 … 단독",
+      "출처: https://x.example/r 에 따르면 초보자는 소규모 수업에서 자세한 설명을 받는 것이 좋습니다.",
+      true,
+    ),
+    text(
+      "O7 참고: 아래 설명 달린 마크다운 링크 두 개",
+      "참고:\n- [초보자 준비물과 첫 수업 안내](https://guide.example/a) — 운동복과 수건, 물을 챙기면 됩니다\n- [강사 설명 방식과 인원 비교](https://guide.example/b) — 한 반 인원이 적을수록 자세를 자주 봐 줍니다",
+      true,
+    ),
+    text(
+      "O8 Sources: URL According to …",
+      "Sources: https://x.example/r According to this report, beginners should start with small classes and clear cues.",
+      true,
+    ),
+    text(
+      "O9 질문 인용 후 참고로 본문",
+      `"${Q}"라는 질문에 답하면,\n참고로 처음 한 달은 주 2회 수업으로 시작하고, 체험 수업에서 강사의 설명 방식을 먼저 확인해 보세요.`,
+      true,
+    ),
+    text(
+      "O10 괄호 든 URL 을 마크다운 링크로 인용",
+      `[집합 개념](https://en.wikipedia.org/wiki/Set_(mathematics))을 먼저 보면 이해가 쉽습니다. ${LONG_KO}`,
+      true,
+    ),
+    {
+      id: "O11 content 배열 안 text 의 정상 답",
+      record: { answer_text: Q, content: [{ type: "text", text: NORMAL }] },
+      save: true,
+      answer: NORMAL,
+    },
+    { id: "O12 content 문자열의 정상 답", record: { answer_text: Q, content: NORMAL }, save: true, answer: NORMAL },
+    text(
+      "O13 추천 기관을 설명 있는 링크 목록으로 답함",
+      "- [지어낸 아카데미 이름](https://a.example/1) — 해부학 기반 12주 과정으로 초보자 반을 따로 운영합니다.\n- [지어낸 스튜디오 이름](https://b.example/2) — 한 반 여섯 명 이하 소규모 수업과 체험 수업을 제공합니다.",
+      true,
+    ),
+    text("O14 다른 문자(일본어)로 쓴 정상 답", "初心者でも安心して通えるスタジオを選ぶのがおすすめです。少人数クラスが理想的です。", true),
+    text("O15 마크다운 표·목록·굵은 글씨가 섞인 5,000자 이상 답", LONG_MD, true),
+    { id: "O16 후보 없음 · 부속 필드에만 답(깊은 추출)", record: { extra: { body: NORMAL } }, save: true, answer: NORMAL },
+    // ── 수용한 트레이드오프(저장됨으로 의도 고정) ──
+    text(
+      "T1 질문 + 제목이 긴 출처 링크 목록(설명 없음)",
+      `${Q}\nSources:\n- [초보자를 위한 운동 학원 고르는 법 총정리](https://a.example/x)\n- [처음 운동을 시작할 때 알아야 할 열 가지](https://b.example/y)`,
+      true,
+    ),
+    text("T2 태그 없는 영문 오류 문구", "Access denied. You do not have permission to access this resource.", true),
+  ];
+
+  it("O15 는 5,000자 이상이다(표 전제)", () => {
+    expect(LONG_MD.length).toBeGreaterThanOrEqual(5000);
+  });
+
+  it.each(rows)("$id", ({ record, save, answer }) => {
+    if (save) {
+      const r = normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [record] });
+      expect(r.answer).toBe(answer);
+    } else {
+      const f = failureOf(() => normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [record] }));
+      expect(f.code).toBe("EMPTY_ANSWER");
+    }
+  });
+});
+
+/**
+ * 판정 성능 — 적대 입력에서도 입력 길이에 비례해야 한다(3회차 R3-4). 느린 시험 환경을 감안해
+ * 한 번 데운 뒤 세 번 중 가장 빠른 값을 본다.
+ */
+describe("판정 성능 (R3-4)", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+  const best = (fn: () => void) => {
+    fn();
+    let min = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      fn();
+      min = Math.min(min, performance.now() - t);
+    }
+    return min;
+  };
+
+  it.each([
+    ["Sources + 공백 30,000 + x", `Sources${" ".repeat(30_000)}x`],
+    ["'<a ' 5,000번 반복(닫는 > 없음)", "<a ".repeat(5_000)],
+    ["'<!a' 5,000번 반복", "<!a".repeat(5_000)],
+    ["'<!--' 5,000번 반복(닫힘 없음)", "<!--".repeat(5_000)],
+    ["'<script>' 3,000번 반복(닫힘 없음)", "<script>".repeat(3_000)],
+    ["'[a](x \"' 3,000번 반복", '[a](x "'.repeat(3_000)],
+  ])("적대 입력 — %s → 50ms 미만", (_name, input) => {
+    expect(best(() => detectNonAnswer(input, Q))).toBeLessThan(50);
+  });
+
+  it("50,000자 정상 답 → 10ms 미만", () => {
+    const para =
+      "초보자라면 [안내 글](https://guide.example/a) 을 참고해 수업 인원이 적은 곳을 고르세요. 자세한 비교는 https://compare.example/b 에 있습니다.\n";
+    const input = para.repeat(Math.ceil(50_000 / para.length)).slice(0, 50_000);
+    expect(best(() => detectNonAnswer(input, Q))).toBeLessThan(10);
   });
 });

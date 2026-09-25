@@ -14,6 +14,7 @@ import {
   classifyCrawlerError,
   clearScrapeCache,
   detectNonAnswer,
+  detectRawPayload,
   isCrawlerCode,
   isKnownProvider,
   meaningfulText,
@@ -243,11 +244,12 @@ describe("redactErrorText", () => {
 
 /**
  * runAiScraper 동작 불변 — 판정 블록을 normalizeScrapePayload 로 옮긴 뒤에도 수동 수집 경로의
- * 결과·오류 문구·perplexity 지역값 재시도·캐시가 옮기기 전과 같아야 한다(Hard Gate).
+ * 결과·오류 문구·캐시가 옮기기 전과 같아야 한다(Hard Gate).
+ * 2026-09-25: perplexity 지역값 재시도(§ PERPLEXITY_COUNTRY_FALLBACK)는 폐지 — Perplexity 는 처음부터
+ * 국가 없이 보내고, 실패하면 다시 보내지 않고 그대로 던진다.
  */
 describe("runAiScraper — 동작 불변", () => {
   const fetchMock = vi.fn();
-  const globalForFallback = globalThis as unknown as { __perplexityCountryFailedAt?: number };
 
   function respond(status: number, body: unknown): Response {
     return new Response(JSON.stringify(body), { status });
@@ -258,7 +260,6 @@ describe("runAiScraper — 동작 불변", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubEnv("BRIGHT_DATA_KEY", "fake-test-key-for-runaiscraper");
     clearScrapeCache();
-    delete globalForFallback.__perplexityCountryFailedAt;
   });
 
   afterEach(() => {
@@ -266,7 +267,6 @@ describe("runAiScraper — 동작 불변", () => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     clearScrapeCache();
-    delete globalForFallback.__perplexityCountryFailedAt;
   });
 
   it("200 → 정규화 결과, 같은 요청 두 번째는 캐시(cached=true·요청 없음)", async () => {
@@ -289,33 +289,45 @@ describe("runAiScraper — 동작 불변", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("perplexity + 지역값 + 크롤러 오류(가입 화면 차단) → 지역값 없이 1회 재시도, 이후 6시간 지역값 생략", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    fetchMock
-      .mockResolvedValueOnce(respond(200, [{ error: "Auth wall: sign-up prompt detected" }]))
-      .mockResolvedValueOnce(respond(200, [{ answer_text: ANSWER }]))
-      .mockResolvedValueOnce(respond(200, [{ answer_text: ANSWER }]));
+  const bodyOf = (i: number) => JSON.parse(String((fetchMock.mock.calls[i] as [string, RequestInit])[1].body));
+
+  it("perplexity 는 국가 KR 을 넘겨도 요청에 국가가 없다 (§ PERPLEXITY_NO_COUNTRY)", async () => {
+    fetchMock.mockResolvedValue(respond(200, [{ answer_text: ANSWER }]));
     const r = await runAiScraper({ provider: "perplexity", prompt: PROMPT, country: "KR" });
     expect(r.answer).toBe(ANSWER);
-    const first = JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body));
-    const second = JSON.parse(String((fetchMock.mock.calls[1] as [string, RequestInit])[1].body));
-    expect(first.input[0].country).toBe("KR");
-    expect(second.input[0].country).toBeUndefined();
-    expect(warn.mock.calls.some((c) => String(c[0]).startsWith("[PERPLEXITY_COUNTRY_FALLBACK]"))).toBe(true);
-
-    // 억제 기간 — 다른 질문도 처음부터 지역값 없이 보낸다.
-    await runAiScraper({ provider: "perplexity", prompt: `${PROMPT} 2`, country: "KR" });
-    const third = JSON.parse(String((fetchMock.mock.calls[2] as [string, RequestInit])[1].body));
-    expect(third.input[0].country).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect("country" in bodyOf(0).input[0]).toBe(false);
   });
 
-  it("억제 중 크롤러 오류는 재귀하지 않고 [CRAWLER_ERROR] 로 던진다", async () => {
-    globalForFallback.__perplexityCountryFailedAt = Date.now();
-    fetchMock.mockResolvedValue(respond(200, [{ error: "Auth wall: sign-up prompt detected" }]));
+  it("perplexity 크롤러 오류(가입 화면 차단·No Peer Found) → 다시 보내지 않고 [CRAWLER_ERROR] 로 던진다(요청 1회씩)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(respond(200, [{ error: "Auth wall: sign-up prompt detected" }]));
     await expect(runAiScraper({ provider: "perplexity", prompt: PROMPT, country: "KR" })).rejects.toThrow(
       "[CRAWLER_ERROR] Bright Data 수집 실패 (provider=perplexity): Auth wall: sign-up prompt detected",
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockResolvedValueOnce(respond(200, [{ error: "No Peer Found", error_code: "no_peers" }]));
+    await expect(runAiScraper({ provider: "perplexity", prompt: `${PROMPT} 2`, country: "KR" })).rejects.toThrow(
+      "[CRAWLER_ERROR] Bright Data 수집 실패 (provider=perplexity): No Peer Found",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect("country" in bodyOf(1).input[0]).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("perplexity 는 국가 유무만 다른 두 요청이 같은 요청이다 — 두 번째는 캐시", async () => {
+    fetchMock.mockResolvedValue(respond(200, [{ answer_text: ANSWER }]));
+    await runAiScraper({ provider: "perplexity", prompt: PROMPT, country: "KR" });
+    const b = await runAiScraper({ provider: "perplexity", prompt: PROMPT });
+    expect(b.cached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("Google AI 는 국가 KR 을 그대로 보낸다", async () => {
+    fetchMock.mockResolvedValue(respond(200, [{ answer_text: ANSWER }]));
+    await runAiScraper({ provider: "google_ai", prompt: PROMPT, country: "KR" });
+    expect(bodyOf(0).input[0].country).toBe("KR");
   });
 
   it("perplexity 가 아니면 크롤러 오류를 그대로 던진다(문구 불변)", async () => {
@@ -518,11 +530,11 @@ describe("selectAnswer · normalizeScrapePayload — 후보 필드별 판정 (C2
   });
 
   it("앞 후보가 질문 되돌림이면 뒤의 정상 후보(answer)를 고른다", () => {
-    expect(selectAnswer({ answer_text: PROMPT, answer: NORMAL }, PROMPT)).toEqual({ kind: "answer", answer: NORMAL });
+    expect(selectAnswer({ answer_text: PROMPT, answer: NORMAL }, PROMPT, "perplexity")).toEqual({ kind: "answer", answer: NORMAL });
   });
 
   it("앞 후보가 정상이면 그대로 쓴다(뒤 후보는 보지 않는다)", () => {
-    expect(selectAnswer({ answer_text: ANSWER, answer_text_markdown: NORMAL }, PROMPT)).toEqual({
+    expect(selectAnswer({ answer_text: ANSWER, answer_text_markdown: NORMAL }, PROMPT, "perplexity")).toEqual({
       kind: "answer",
       answer: ANSWER,
     });
@@ -562,7 +574,7 @@ describe("selectAnswer · normalizeScrapePayload — 후보 필드별 판정 (C2
   });
 
   it("후보가 전혀 없으면 여전히 PARSE_FAILURE", () => {
-    expect(selectAnswer({ timestamp: "2026-09-25T00:00:00Z" }, PROMPT).kind).toBe("parse_failure");
+    expect(selectAnswer({ timestamp: "2026-09-25T00:00:00Z" }, PROMPT, "perplexity").kind).toBe("parse_failure");
   });
 });
 
@@ -644,7 +656,7 @@ describe("selectAnswer — 후보 키 값 안의 배열·객체 (C2 잔여)", ()
     "초보자에게 적합한 수업을 고르는 방법은 수업 인원, 강사의 설명 방식, 체험 수업 여부를 차례로 확인하는 것입니다.";
 
   it("{answer_text: 질문, content: [{text: 정상 답}]} → 정상 답", () => {
-    expect(selectAnswer({ answer_text: PROMPT, content: [{ type: "text", text: NORMAL }] }, PROMPT)).toEqual({
+    expect(selectAnswer({ answer_text: PROMPT, content: [{ type: "text", text: NORMAL }] }, PROMPT, "perplexity")).toEqual({
       kind: "answer",
       answer: NORMAL,
     });
@@ -687,10 +699,12 @@ describe("selectAnswer — 후보 키 값 안의 배열·객체 (C2 잔여)", ()
  *
  * 판정 함수 주변 지적이 회차마다 이어져(N1 → N1 잔여 → R3-1) 지금까지 나온 모든 사례를 이 표 하나로
  * 고정한다. **어떤 수정이든 이 표 전체를 깨지 않아야 한다.** 새 사례는 여기에 한 줄로 더한다.
- *   X = 거부(EMPTY_ANSWER · 저장 안 함) · O = 저장(원문 그대로) · T = 수용한 트레이드오프(저장)
+ *   X = 거부(저장 안 함 · 코드는 EMPTY_ANSWER, 따로 적은 줄만 그 코드) · O = 저장(원문 그대로)
+ *   T = 수용한 트레이드오프(저장)
+ * 2026-09-25 운영 실측으로 X17(원시 통신 기록)·X18(화면 메뉴 글자)과 그 반대편 O17·O18 을 더했다.
  * 질문·답·도메인은 전부 지어낸 값이다(PUBLIC 저장소).
  * ============================================================ */
-describe("판정 기준표 — 거부 X1～X16 · 저장 O1～O16 · 트레이드오프 T1～T2", () => {
+describe("판정 기준표 — 거부 X1～X18 · 저장 O1～O18 · 트레이드오프 T1～T2", () => {
   const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
   const LONG_KO =
     "초보자라면 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. 첫 달은 주 2회로 시작해 몸이 적응하면 횟수를 늘리세요.";
@@ -716,7 +730,23 @@ describe("판정 기준표 — 거부 X1～X16 · 저장 O1～O16 · 트레이�
     return `## 초보자 12주 계획\n\n${LONG_KO}\n\n| 주차 | 주제 | 설명 |\n|---|---|---|\n${rows}\n\n${items}\n\n${LONG_KO}`;
   })();
 
-  type Row = { id: string; record: Record<string, unknown>; save: boolean; answer?: string };
+  // X17 — 운영에서 답으로 저장됐던 원시 통신 기록과 같은 모양(값은 지어낸 것). answer_text 는 비어 있다.
+  const SSE_RAW = [
+    'event: message',
+    'data: {"backend_uuid": "00000000-0000-4000-8000-000000000001", "context_uuid": "00000000-0000-4000-8000-000000000002", "status": "PENDING", "text": "지어낸 답 조각"}',
+    "",
+    'event: message',
+    'data: {"backend_uuid": "00000000-0000-4000-8000-000000000001", "status": "COMPLETED", "final": true}',
+    "",
+    "event: end_of_stream",
+    "data: {}",
+  ].join("\n");
+  // X18 — 로그인 안 된 Perplexity 화면의 사이드바 글자(서비스 화면 문구 — 고객 정보 아님). ⌃ = U+2303
+  const UI_SIDEBAR =
+    "Perplexity New ⌃I Computer Artifacts Customize Projects No projects Sessions No recent sessions Sign In " +
+    "Computer Search Discover Spaces Finance Travel Academic Library Account Settings Upgrade Install ".repeat(6);
+
+  type Row = { id: string; record: Record<string, unknown>; save: boolean; answer?: string; code?: string };
   const text = (id: string, answerText: string, save: boolean): Row => ({
     id,
     record: { answer_text: answerText },
@@ -761,6 +791,13 @@ describe("판정 기준표 — 거부 X1～X16 · 저장 O1～O16 · 트레이�
       save: false,
     },
     text("X16 짧은 오류 페이지", "<!DOCTYPE html><html><body>Access denied</body></html>", false),
+    {
+      id: "X17 답 필드는 비고 response_raw 에 원시 통신 기록(SSE)만 — 답 필드 없음(PARSE_FAILURE)",
+      record: { answer_text: null, response_raw: SSE_RAW, timestamp: "2031-01-01T00:00:00.000Z" },
+      save: false,
+      code: "PARSE_FAILURE",
+    },
+    { id: "X18 Perplexity 화면 메뉴 글자(사이드바)", record: { answer_text_markdown: UI_SIDEBAR }, save: false },
     // ── 저장 ──
     text("O1 100자 안팎 한국어 한 문장", O1, true),
     text("O2 114자 안팎 '나이 제한은 거의 없습니다. …'", O2, true),
@@ -811,6 +848,16 @@ describe("판정 기준표 — 거부 X1～X16 · 저장 O1～O16 · 트레이�
     text("O14 다른 문자(일본어)로 쓴 정상 답", "初心者でも安心して通えるスタジオを選ぶのがおすすめです。少人数クラスが理想的です。", true),
     text("O15 마크다운 표·목록·굵은 글씨가 섞인 5,000자 이상 답", LONG_MD, true),
     { id: "O16 후보 없음 · 부속 필드에만 답(깊은 추출)", record: { extra: { body: NORMAL } }, save: true, answer: NORMAL },
+    text(
+      "O17 본문에 'Sign In' 이 한 번 나오는 정상 답",
+      "처음 등록할 때는 홈페이지 오른쪽 위의 Sign In 버튼으로 로그인한 뒤 체험 수업을 신청하면 됩니다. 체험 수업에서 강사의 설명 방식과 한 반 인원을 먼저 확인해 보세요.",
+      true,
+    ),
+    text(
+      "O18 코드 블록 안에 JSON 이 든 정상 답",
+      '수업 일정을 정리하면 아래와 같습니다.\n\n```json\n{"요일": "화·목", "시간": "19:00", "정원": 6}\n```\n\n처음에는 주 2회로 시작하고, 몸이 적응하면 횟수를 늘리세요.',
+      true,
+    ),
     // ── 수용한 트레이드오프(저장됨으로 의도 고정) ──
     text(
       "T1 질문 + 제목이 긴 출처 링크 목록(설명 없음)",
@@ -824,14 +871,116 @@ describe("판정 기준표 — 거부 X1～X16 · 저장 O1～O16 · 트레이�
     expect(LONG_MD.length).toBeGreaterThanOrEqual(5000);
   });
 
-  it.each(rows)("$id", ({ record, save, answer }) => {
+  it("표 전제 — 38칸(X18 · O18 · T2)", () => {
+    expect(rows).toHaveLength(38);
+  });
+
+  it.each(rows)("$id", ({ record, save, answer, code }) => {
     if (save) {
       const r = normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [record] });
       expect(r.answer).toBe(answer);
     } else {
       const f = failureOf(() => normalizeScrapePayload({ provider: "perplexity", prompt: Q, payload: [record] }));
-      expect(f.code).toBe("EMPTY_ANSWER");
+      expect(f.code).toBe(code ?? "EMPTY_ANSWER");
     }
+  });
+});
+
+/**
+ * 원시 통신 기록·화면 메뉴 글자 — 2026-09-25 운영 실측(Perplexity "성공" 3건 중 2건이 쓰레기 답).
+ *   - response_raw 는 Grok 에서만 답 후보다(§ RESPONSE_RAW_GROK_ONLY).
+ *   - 모든 AI 공통: 답이 SSE 스트림·JSON 덩어리면 PARSE_FAILURE(형식 이상), 화면 메뉴 글자면 EMPTY_ANSWER.
+ * 값은 전부 지어낸 것이다(PUBLIC 저장소).
+ */
+describe("원시 통신 기록·화면 메뉴 글자 — 답이 아닌 것 (2026-09-25)", () => {
+  const SSE = 'event: message\ndata: {"backend_uuid": "00000000-0000-4000-8000-00000000000a", "text": "지어낸 조각"}\n\n';
+  const JSON_BLOB = JSON.stringify({ backend_uuid: "00000000-0000-4000-8000-00000000000b", blocks: [{ text: "지어낸 조각" }] });
+  const MENU =
+    "Perplexity New ⌃I Computer Artifacts Customize Projects No projects Sessions No recent sessions Sign In Computer Search Discover";
+
+  it("detectRawPayload — SSE·JSON 덩어리만 잡는다", () => {
+    expect(detectRawPayload(SSE)).toBe("sse");
+    expect(detectRawPayload("event: message data: {\"a\": 1}")).toBe("sse"); // 줄바꿈이 공백으로 바뀐 형태
+    expect(detectRawPayload('data: {"a": 1}\n\ndata: {"b": 2}')).toBe("sse");
+    expect(detectRawPayload(`  ${JSON_BLOB}  `)).toBe("json");
+    expect(detectRawPayload('[{"a": 1}, {"b": 2}]')).toBe("json");
+    // 답일 수 있는 것은 그대로 둔다
+    expect(detectRawPayload("Event: 다음 주 체험 수업 안내입니다. 초보자도 참여할 수 있습니다.")).toBeNull();
+    expect(detectRawPayload('설정 예시는 data: {"a": 1} 처럼 적습니다. 초보자도 따라 할 수 있습니다.')).toBeNull();
+    expect(detectRawPayload('```json\n{"a": 1}\n```')).toBeNull();
+    expect(detectRawPayload('{"a": 1, "b": 잘린 값')).toBeNull(); // 해석되지 않는 JSON — 오탈락 방지 우선
+    expect(detectRawPayload("{필라테스} 수업은 초보자에게도 적합한 운동입니다.")).toBeNull();
+  });
+
+  it("Grok 은 response_raw 의 정상 답을 그대로 저장한다", () => {
+    const r = normalizeScrapePayload({ provider: "grok", prompt: PROMPT, payload: [{ response_raw: ANSWER }] });
+    expect(r.answer).toBe(ANSWER);
+  });
+
+  it("Grok 이라도 response_raw 가 SSE 면 PARSE_FAILURE — 오류 문구에 내용을 넣지 않는다", () => {
+    const f = failureOf(() => normalizeScrapePayload({ provider: "grok", prompt: PROMPT, payload: [{ response_raw: SSE }] }));
+    expect(f.code).toBe("PARSE_FAILURE");
+    expect(f.message).toContain("원시 통신 기록(SSE)");
+    expect(f.message).toContain(`길이 ${SSE.trim().length}자`);
+    expect(f.message).not.toContain("backend_uuid");
+    expect(f.message).not.toContain("지어낸 조각");
+  });
+
+  it("모든 AI 공통 — answer_text 가 SSE·JSON 덩어리면 PARSE_FAILURE", () => {
+    for (const provider of ["chatgpt", "perplexity", "gemini", "google_ai", "copilot", "grok"] as const) {
+      for (const bad of [SSE, JSON_BLOB]) {
+        const f = failureOf(() => normalizeScrapePayload({ provider, prompt: PROMPT, payload: [{ answer_text: bad }] }));
+        expect(f.code).toBe("PARSE_FAILURE");
+      }
+    }
+  });
+
+  it("앞 후보가 SSE 여도 뒤 후보에 정상 답이 있으면 그것을 쓴다", () => {
+    const r = normalizeScrapePayload({
+      provider: "perplexity",
+      prompt: PROMPT,
+      payload: [{ answer_text: SSE, answer_text_markdown: ANSWER }],
+    });
+    expect(r.answer).toBe(ANSWER);
+    expect(selectAnswer({ answer_text: SSE }, PROMPT, "perplexity")).toMatchObject({
+      kind: "parse_failure",
+      rawPayload: { kind: "sse" },
+    });
+  });
+
+  it("Perplexity 오류 레코드에 response_raw 만 있으면 크롤러 오류다(답 필드로 세지 않는다)", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({
+        provider: "perplexity",
+        prompt: PROMPT,
+        payload: [{ error: "No Peer Found", error_code: "no_peers", response_raw: SSE }],
+      }),
+    );
+    expect(f.code).toBe("CRAWLER_ERROR");
+  });
+
+  it("화면 메뉴 글자 → EMPTY_ANSWER(화면 메뉴 글자) — HTML 로 와도 같다", () => {
+    expect(detectNonAnswer(MENU, PROMPT)?.reason).toBe("ui_chrome");
+    const html = `<nav><a>Perplexity</a><a>New</a><kbd>⌃I</kbd><a>Artifacts</a><a>Customize</a><p>No projects</p><p>No recent sessions</p><button>Sign In</button></nav> Computer Search Discover Spaces Finance Travel Academic`;
+    expect(detectNonAnswer(html, PROMPT)?.reason).toBe("ui_chrome");
+    const f = failureOf(() =>
+      normalizeScrapePayload({ provider: "perplexity", prompt: PROMPT, payload: [{ answer_text_markdown: MENU }] }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+    expect(f.message).toContain("화면 메뉴 글자");
+  });
+
+  it("화면 메뉴 판정 문턱 — 평범한 낱말 셋만·문구 둘만·앞 300자 밖이면 답으로 둔다", () => {
+    // 평범한 영어 낱말 3개(빈 목록 안내·단축키 기호 없음)
+    const weakOnly =
+      "To customize Artifacts in the editor, click Sign In first, then open Customize and choose which Artifacts to keep in your workspace.";
+    expect(detectNonAnswer(weakOnly, PROMPT)).toBeNull();
+    // 강한 문구 1 + 평범한 낱말 1 = 2개
+    const two = "No projects yet? Sign In to start a new one. Beginners usually begin with a short trial class and a simple plan.";
+    expect(detectNonAnswer(two, PROMPT)).toBeNull();
+    // 메뉴 글자가 앞 300자 밖(본문 뒤 꼬리)에 있으면 답으로 둔다
+    const tail = `${"초보자는 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. ".repeat(8)}${MENU}`;
+    expect(detectNonAnswer(tail, PROMPT)).toBeNull();
   });
 });
 

@@ -48,11 +48,19 @@ describe("submitScrape — 지금 쓰는 동기 요청(/scrape)과 같은 호출
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toMatch(/^https:\/\/api\.brightdata\.com\/datasets\/v3\/scrape\?dataset_id=[^&]+&notify=false&include_errors=true&format=json$/);
     expect(init.method).toBe("POST");
+    // Perplexity 는 국가를 넘겨받아도 싣지 않는다(2026-09-25 § PERPLEXITY_NO_COUNTRY — 안전망).
     expect(JSON.parse(String(init.body))).toEqual({
-      input: [{ url: "https://www.perplexity.ai", prompt: PROMPT, index: 1, country: "KR" }],
+      input: [{ url: "https://www.perplexity.ai", prompt: PROMPT, index: 1 }],
     });
     expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(BRIGHTDATA_TIMEOUTS_MS.submit).toBe(90_000);
+  });
+
+  it("Google AI 는 국가 KR 을 그대로 싣는다(Perplexity 변경과 무관)", async () => {
+    fetchMock.mockResolvedValue(respond(200, [{ answer_text: "충분히 긴 테스트 답변 문장입니다. 예시 기관 소개." }]));
+    await submitScrape({ provider: "google_ai", prompt: PROMPT, country: "KR" });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body)).input[0].country).toBe("KR");
   });
 
   it("200 → 결과 본문(payload) — 요청 번호 없음", async () => {

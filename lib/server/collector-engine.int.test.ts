@@ -339,7 +339,12 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     const its = await itemsOfRound(r.id);
     expect(its).toHaveLength(6);
     expect(new Set(its.map((i) => i.seq))).toEqual(new Set([0, 1, 2, 3, 4, 5]));
-    expect(its.every((i) => i.countryRequested === "KR" && i.intervalSlot === r.intervalSlot)).toBe(true);
+    expect(its.every((i) => i.intervalSlot === r.intervalSlot)).toBe(true);
+    // 2026-09-25 § PERPLEXITY_NO_COUNTRY — Perplexity 항목은 국가를 요청하지 않는다(NULL), 다른 AI 는 KR.
+    expect(its.filter((i) => i.provider === "chatgpt").every((i) => i.countryRequested === "KR")).toBe(true);
+    expect(its.filter((i) => i.provider === "perplexity").every((i) => i.countryRequested === null)).toBe(true);
+    expect(fake.submits.filter((x) => x.provider === "perplexity").every((x) => x.country === undefined)).toBe(true);
+    expect(fake.submits.filter((x) => x.provider === "chatgpt").every((x) => x.country === "KR")).toBe(true);
     expect(its.filter((i) => i.status === "submitted")).toHaveLength(6); // 상한 4 안쪽이라 전부 제출
 
     const after = await scheduleRow(s.id);
@@ -601,45 +606,105 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(fake.submits.slice(4).map((s) => s.prompt)).toEqual([ps[3].text]); // 재시도(3번째)보다 첫 시도(4번째) 먼저
   }, 60_000);
 
-  it("j · perplexity 지역값 — 지역값 실패 → 지역값 없이 재시도(예산 밖) → 다시 실패 → 일반 재시도(10분 뒤) → failed", async () => {
+  it("j · perplexity 는 국가 없이 보낸다 — 크롤러 실패(가입 화면 차단 → No Peer Found)에도 국가 대체 재시도 없이 일반 재시도(10분 뒤) → failed", async () => {
     const ws = await makeWorkspace("j");
     await makePrompts(ws.id, promptTexts("j", 1));
     const s = await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60) });
     const fake = new FakeBd();
-    fake.onSubmit = (req) => fake.inline(req, [{ error: "Auth wall: sign-up prompt detected", error_code: "crawl_failed" }]);
+    let n = 0;
+    fake.onSubmit = (req) =>
+      fake.inline(
+        req,
+        ++n === 1
+          ? [{ error: "Auth wall: sign-up prompt detected", error_code: "crawl_failed" }]
+          : [{ error: "No Peer Found", error_code: "no_peers" }],
+      );
 
     await engine.runDispatchPass(T0, deps(fake));
     let [item] = await itemsOfWorkspace(ws.id);
+    expect(item.countryRequested).toBeNull();
     expect(item.status).toBe("queued");
-    expect(item.countryFallbacks).toBe(1);
-    expect(item.dropCountry).toBe(true);
-    expect(item.paidRetries).toBe(0);
-    expect((await stateRow("perplexity_country_failed_at"))?.value).toEqual({ at: T0.toISOString() });
+    expect(item.lastErrorCode).toBe("CRAWLER_AUTH_WALL");
+    expect(item.paidRetries).toBe(1); // 일반 재시도(예산 안) — 곧바로가 아니라 10분 뒤
+    expect(item.countryFallbacks).toBe(0);
+    expect(item.dropCountry).toBe(false);
+    expect(item.nextAttemptAt!.getTime()).toBe(T0.getTime() + 10 * 60_000);
+    expect(item.attempts.map((x) => x.country)).toEqual([null]);
+    expect(await stateRow("perplexity_country_failed_at")).toBeNull();
 
-    await engine.runDispatchPass(at(1), deps(fake));
-    [item] = await itemsOfWorkspace(ws.id);
-    expect(item.status).toBe("queued");
-    expect(item.paidRetries).toBe(1);
-    expect(item.nextAttemptAt!.getTime()).toBe(at(1).getTime() + 10 * 60_000);
+    await engine.runDispatchPass(at(1), deps(fake)); // 곧바로 다시 보내지 않는다(예전 국가 대체 재시도 자리)
+    await engine.runDispatchPass(at(5 * 60), deps(fake));
+    expect(fake.submitCount()).toBe(1);
 
-    await engine.runDispatchPass(at(5 * 60), deps(fake)); // 아직 10분 전 — 보내지 않는다
-    expect(fake.submitCount()).toBe(2);
-
-    await engine.runDispatchPass(at(1 + 10 * 60), deps(fake));
+    await engine.runDispatchPass(at(10 * 60), deps(fake));
     [item] = await itemsOfWorkspace(ws.id);
     expect(item.status).toBe("failed");
-    expect(item.lastErrorCode).toBe("CRAWLER_AUTH_WALL");
-    expect(item.paidAttempts).toBe(3);
-    expect(fake.submits.map((x) => x.country)).toEqual(["KR", undefined, undefined]);
+    expect(item.lastErrorCode).toBe("CRAWLER_ERROR");
+    expect(item.paidAttempts).toBe(2);
+    expect(item.countryFallbacks).toBe(0);
+    expect(fake.submits.map((x) => x.country)).toEqual([undefined, undefined]);
+    expect(item.attempts.map((x) => x.country)).toEqual([null, null]);
 
-    await engine.runHarvestPass(at(2 + 10 * 60), deps(fake));
+    await engine.runHarvestPass(at(1 + 10 * 60), deps(fake));
     const [r] = await roundsOf(s.id);
     expect(r.status).toBe("completed");
     expect(r.summary?.failed).toBe(1);
-    expect(r.summary?.countryFallbacks).toBe(1);
+    expect(r.summary?.countryFallbacks).toBe(0);
     expect(r.summary?.paidRetries).toBe(1);
-    expect(r.summary?.paidAttempts).toBe(3);
-    expect(r.summary?.byProvider.perplexity.failedByCode).toEqual({ CRAWLER_AUTH_WALL: 1 });
+    expect(r.summary?.paidAttempts).toBe(2);
+    expect(r.summary?.byProvider.perplexity.failedByCode).toEqual({ CRAWLER_ERROR: 1 });
+  }, 60_000);
+
+  it("j2 · 변경 전에 만든 perplexity 항목(국가 KR 이 적힘)·옛 억제 기록이 있어도 국가 없이 보내고, 요청 번호 경로 크롤러 실패에도 국가 대체 재시도가 없다 · Google AI 는 KR", async () => {
+    const ws = await makeWorkspace("j2");
+    const [p1] = await makePrompts(ws.id, promptTexts("j2", 1));
+    const s = await makeSchedule(ws.id, { providers: ["perplexity", "google_ai"], nextRunAt: FAR_FUTURE });
+    const created = await engine.createRoundForSchedule(
+      s,
+      { trigger: "cron", scheduledFor: T0, priority: 0, onRunning: "skip" },
+      T0,
+    );
+    if (created.status !== "created") throw new Error("회차가 만들어져야 한다");
+    const { db, schema } = dbm;
+    // 배포 전에 만들어져 대기 중이던 항목을 흉내 낸다 — 국가 KR 이 적혀 있다.
+    await db
+      .update(schema.collectionItems)
+      .set({ countryRequested: "KR" })
+      .where(and(eq(schema.collectionItems.roundId, created.round.id), eq(schema.collectionItems.provider, "perplexity")));
+    // 옛 엔진이 남긴 억제 기록 — 이제 읽지도 쓰지도 않는다.
+    await db.insert(schema.collectorState).values({
+      key: "perplexity_country_failed_at",
+      value: { at: at(-3600).toISOString() },
+      updatedAt: at(-3600),
+    });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) =>
+      req.provider === "perplexity"
+        ? fake.snapshot(req, "ready", [{ error: "No Peer Found", error_code: "no_peers" }])
+        : fake.snapshot(req, "running");
+
+    await engine.runDispatchPass(T0, deps(fake));
+    expect(fake.submits).toHaveLength(2); // 두 AI 는 동시에 보내므로 순서는 보지 않는다
+    expect(fake.submits.every((x) => x.prompt === p1.text)).toBe(true);
+    expect(fake.submits.find((x) => x.provider === "perplexity")?.country).toBeUndefined();
+    expect(fake.submits.find((x) => x.provider === "google_ai")?.country).toBe("KR");
+
+    // 거두기 — 요청 번호로 받은 결과가 크롤러 오류 → 일반 재시도(10분 뒤), 국가 대체 재시도 아님
+    await engine.runHarvestPass(at(61), deps(fake));
+    const its = await itemsOfRound(created.round.id);
+    const px = its.find((i) => i.provider === "perplexity")!;
+    expect(px.status).toBe("queued");
+    expect(px.lastErrorCode).toBe("CRAWLER_ERROR");
+    expect(px.paidRetries).toBe(1);
+    expect(px.countryFallbacks).toBe(0);
+    expect(px.dropCountry).toBe(false);
+    expect(px.nextAttemptAt!.getTime()).toBe(at(61).getTime() + 10 * 60_000);
+    expect(px.attempts.map((x) => x.country)).toEqual([null]);
+    const gx = its.find((i) => i.provider === "google_ai")!;
+    expect(gx.countryRequested).toBe("KR");
+    expect(gx.attempts.map((x) => x.country)).toEqual(["KR"]);
+    // 옛 억제 기록은 건드리지 않는다(새로 쓰지 않는다)
+    expect((await stateRow("perplexity_country_failed_at"))?.value).toEqual({ at: at(-3600).toISOString() });
   }, 60_000);
 
   it("k · 재시도 예산 경쟁 — 보내기(200 경로)와 거두기가 동시에 실패를 처리해도 paid_retries 합 ≤ 예산", async () => {
@@ -1139,7 +1204,7 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
       expect(f.reason.startsWith("[EMPTY_ANSWER]")).toBe(true);
       expect(f.reason).not.toContain(f.prompt); // 오류 문구에 질문 원문이 없다
     }
-    expect(scrapeCalls).toBe(4); // perplexity 지역값 재시도 대상이 아니다(크롤러 오류가 아님)
+    expect(scrapeCalls).toBe(4); // 실패해도 다시 보내지 않는다(예전 경로엔 재시도가 없다)
     expect(await runsOf(wsLegacy.id)).toHaveLength(0);
     await dbm.db.update(dbm.schema.schedules).set({ active: false }).where(eq(dbm.schema.schedules.id, sLegacy.id));
     fetchHandler = unexpectedFetch;
@@ -1190,7 +1255,7 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(item.status).toBe("queued");
     expect(item.lastErrorCode).toBe("EMPTY_ANSWER");
     expect(item.paidRetries).toBe(1);
-    expect(item.countryFallbacks).toBe(0); // 지역값 없이 재시도(예산 밖)는 크롤러 오류에만 쓴다
+    expect(item.countryFallbacks).toBe(0); // 국가 대체 재시도는 폐지(2026-09-25) — 늘 0
     expect(item.snapshotId).toBeNull();
     expect(item.nextAttemptAt!.getTime()).toBe(firstFailAt.getTime() + 2 * 60_000);
     expect(item.lastError ?? "").not.toContain(promptText);

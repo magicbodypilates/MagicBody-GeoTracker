@@ -11,7 +11,6 @@ import {
   limitReached,
   nextPollDelayMs,
   retryBudget,
-  shouldSkipPerplexityCountry,
   type CollectorErrorCode,
 } from "./collector-policy";
 import {
@@ -24,8 +23,6 @@ import {
 
 const base = {
   provider: "chatgpt",
-  countrySent: false,
-  countryFallbacks: 0,
   paidRetries: 0,
   usedRetries: 0,
   budget: 5,
@@ -87,55 +84,41 @@ describe("decideAfterFailure", () => {
     expect(decideAfterFailure({ ...base, code: "TIMEOUT" })).toEqual({ action: "fail" });
   });
 
-  it("perplexity · 크롤러 · 지역값 보냄 · 지역값 재시도 전 → 지역값 없이 바로 재시도 (예산이 0 이어도)", () => {
-    expect(
-      decideAfterFailure({
-        ...base,
-        provider: "perplexity",
-        code: "CRAWLER_AUTH_WALL",
-        countrySent: true,
-        budget: 0,
-        usedRetries: 0,
-      }),
-    ).toEqual({ action: "retry", kind: "country_fallback", delayMs: 0 });
+  // 2026-09-25 — perplexity 지역값 없이 재시도(예산 밖 · 곧바로)는 폐지했다. Perplexity 는 처음부터 국가 없이
+  // 보내므로 크롤러 오류("No Peer Found" 류 포함)도 다른 AI 와 똑같이 일반 재시도 규칙만 받는다.
+  it("perplexity 크롤러 계열 실패 4종 → 일반 재시도(10분 뒤) — 지역값 재시도는 없다", () => {
+    for (const code of [
+      "CRAWLER_AUTH_WALL",
+      "CRAWLER_BROWSER_DISCONNECTED",
+      "CRAWLER_SELECTOR_TIMEOUT",
+      "CRAWLER_ERROR",
+    ] as CollectorErrorCode[]) {
+      expect(decideAfterFailure({ ...base, provider: "perplexity", code })).toEqual({
+        action: "retry",
+        kind: "paid_retry",
+        delayMs: 10 * 60_000,
+      });
+    }
   });
 
-  it("지역값 재시도는 1회 — 그 뒤에도 일반 재시도 1회는 더 받을 수 있다", () => {
-    // 지역값 재시도를 이미 했고(countryFallbacks 1) 일반 재시도는 아직(paidRetries 0), 예산 남음
+  it("perplexity 도 예산이 0 이면 곧바로 실패 — 예산 밖 재시도가 없다", () => {
     expect(
-      decideAfterFailure({
-        ...base,
-        provider: "perplexity",
-        code: "CRAWLER_AUTH_WALL",
-        countrySent: false,
-        countryFallbacks: 1,
-        paidRetries: 0,
-        usedRetries: 2,
-        budget: 5,
-      }),
-    ).toEqual({ action: "retry", kind: "paid_retry", delayMs: 10 * 60_000 });
-    // 일반 재시도까지 했으면 실패
-    expect(
-      decideAfterFailure({
-        ...base,
-        provider: "perplexity",
-        code: "CRAWLER_AUTH_WALL",
-        countryFallbacks: 1,
-        paidRetries: 1,
-      }),
+      decideAfterFailure({ ...base, provider: "perplexity", code: "CRAWLER_AUTH_WALL", budget: 0, usedRetries: 0 }),
     ).toEqual({ action: "fail" });
   });
 
-  it("지역값을 안 보냈으면(억제 중·지역값 없는 항목) 지역값 재시도 없이 일반 재시도 규칙", () => {
+  it("perplexity 도 항목당 일반 재시도 1회 — 이미 1회면 실패", () => {
     expect(
-      decideAfterFailure({ ...base, provider: "perplexity", code: "CRAWLER_ERROR", countrySent: false }),
-    ).toEqual({ action: "retry", kind: "paid_retry", delayMs: 10 * 60_000 });
+      decideAfterFailure({ ...base, provider: "perplexity", code: "CRAWLER_ERROR", paidRetries: 1 }),
+    ).toEqual({ action: "fail" });
   });
 
-  it("perplexity 가 아니면 지역값 재시도는 없다", () => {
-    expect(
-      decideAfterFailure({ ...base, provider: "google_ai", code: "CRAWLER_BROWSER_DISCONNECTED", countrySent: true }),
-    ).toEqual({ action: "retry", kind: "paid_retry", delayMs: 10 * 60_000 });
+  it("perplexity 가 아니어도 같은 규칙", () => {
+    expect(decideAfterFailure({ ...base, provider: "google_ai", code: "CRAWLER_BROWSER_DISCONNECTED" })).toEqual({
+      action: "retry",
+      kind: "paid_retry",
+      delayMs: 10 * 60_000,
+    });
   });
 
   it("항목당 일반 재시도 1회 — 이미 1회면 실패", () => {
@@ -151,13 +134,12 @@ describe("decideAfterFailure", () => {
     });
   });
 
-  it("회차 만료면 무엇이든 실패(지역값 재시도 포함)", () => {
+  it("회차 만료면 무엇이든 실패", () => {
     expect(
       decideAfterFailure({
         ...base,
         provider: "perplexity",
         code: "CRAWLER_AUTH_WALL",
-        countrySent: true,
         roundExpired: true,
       }),
     ).toEqual({ action: "fail" });
@@ -206,14 +188,4 @@ describe("한도 경계 — 카운터를 올린 뒤 값이 한도 이상이면 �
     expect(limitReached(max - 1, max)).toBe(false);
     expect(limitReached(max, max)).toBe(true);
   });
-});
-
-describe("shouldSkipPerplexityCountry — 6시간 억제", () => {
-  const now = new Date("2030-01-01T12:00:00Z");
-  it("기록 없음 → false", () => expect(shouldSkipPerplexityCountry(null, now)).toBe(false));
-  it("5시간 59분 전 → true · 6시간 전 → false", () => {
-    expect(shouldSkipPerplexityCountry(new Date(now.getTime() - (6 * 3600_000 - 60_000)), now)).toBe(true);
-    expect(shouldSkipPerplexityCountry(new Date(now.getTime() - 6 * 3600_000), now)).toBe(false);
-  });
-  it("잘못된 날짜 → false", () => expect(shouldSkipPerplexityCountry(new Date("x"), now)).toBe(false));
 });

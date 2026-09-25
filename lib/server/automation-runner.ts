@@ -770,6 +770,7 @@ async function runOneProviderForPrompt(args: {
     const result = await runAiScraper({
       provider: provider as "chatgpt" | "perplexity" | "copilot" | "gemini" | "google_ai" | "grok",
       prompt: prompt.text,
+      // Perplexity 는 runAiScraper 가 국가를 뺀다(§ PERPLEXITY_NO_COUNTRY) — 여기 KR 은 다른 AI 용이다.
       country: sched.geolocation ?? "KR",
     });
 

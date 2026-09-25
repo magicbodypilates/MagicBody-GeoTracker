@@ -5,13 +5,16 @@
  * 과금 원칙(계획 v2 §1-4): 결과를 빠뜨리지 않는다(적어도 한 번 수집). 대신 돈이 드는 재시도는
  *   - 항목당 일반 재시도 1회
  *   - AI별로 그 회차 항목의 20%(비율 환경값)까지
- *   - perplexity 지역값 없이 재시도는 별도 칸·예산 밖 1회(지금 동작 유지)
  * 로 묶는다. 20% 예산이 곧 비용 상한이다 — 예전 설계의 실패율 차단기는 두지 않는다(M1: perplexity
  * 평소 실패율 71% 라 차단기가 늘 열려 재시도를 막는다).
+ *
+ * 예전에 있던 "perplexity 지역값 없이 재시도(예산 밖 1회)"와 6시간 지역값 생략은 2026-09-25 폐지했다 —
+ * Perplexity 는 처음부터 국가 없이 보내므로(brightdata-scraper § PERPLEXITY_NO_COUNTRY) 국가를 빼고 다시
+ * 보낼 일이 없다. Perplexity 실패도 다른 AI 와 같은 일반 재시도 규칙만 받는다.
  */
 
 import { isCrawlerCode, type ScrapeErrorCode } from "@/lib/server/brightdata-scraper";
-import { PERPLEXITY_COUNTRY_SUPPRESS_MS, RETRY_DELAY_MS } from "@/lib/server/collector-config";
+import { RETRY_DELAY_MS } from "@/lib/server/collector-config";
 
 export type CollectorErrorCode =
   | ScrapeErrorCode
@@ -41,32 +44,25 @@ export function isPaidRetryable(code: CollectorErrorCode): boolean {
 }
 
 export type FailureDecision =
-  | { action: "retry"; kind: "country_fallback"; delayMs: 0 }
   | { action: "retry"; kind: "paid_retry"; delayMs: number }
   | { action: "fail" };
 
 /**
- * 실패 1건을 어떻게 처리할지. 순서대로:
+ * 실패 1건을 어떻게 처리할지. 순서대로 — AI 와 무관하게 같은 규칙이다:
  *  1) 회차가 만료됐으면 fail
- *  2) perplexity · 크롤러 계열 · 지역값을 보냈고 · 지역값 재시도 전 → 지역값 없이 곧바로 재시도(예산 무관 — 지금 동작)
- *  3) 재시도할 원인 · 일반 재시도 0회 · 이 회차 이 AI 예산이 남음 → 재시도 (크롤러 10분 뒤, 그 밖 2분 뒤)
- *  4) fail
- * 지역값 재시도를 한 항목도 paidRetries 는 0 이라 일반 재시도 1회를 더 받을 수 있다.
+ *  2) 재시도할 원인 · 일반 재시도 0회 · 이 회차 이 AI 예산이 남음 → 재시도 (크롤러 10분 뒤, 그 밖 2분 뒤)
+ *  3) fail
+ * provider 는 기록·확장용으로 받는다(2026-09-25 perplexity 지역값 재시도 폐지 뒤 판정에 쓰지 않는다).
  */
 export function decideAfterFailure(i: {
   code: CollectorErrorCode;
   provider: string;
-  countrySent: boolean;
-  countryFallbacks: number;
   paidRetries: number;
   usedRetries: number;
   budget: number;
   roundExpired: boolean;
 }): FailureDecision {
   if (i.roundExpired) return { action: "fail" };
-  if (i.provider === "perplexity" && isCrawlerCode(i.code) && i.countrySent && i.countryFallbacks === 0) {
-    return { action: "retry", kind: "country_fallback", delayMs: 0 };
-  }
   if (isPaidRetryable(i.code) && i.paidRetries === 0 && i.usedRetries < i.budget) {
     return {
       action: "retry",
@@ -101,10 +97,4 @@ export function nextPollDelayMs(provider: string, elapsedMs: number): number {
 export function freeRequeueDelayMs(count: number): number {
   const n = Math.max(1, Math.floor(count));
   return Math.min(60_000 * 2 ** (n - 1), 15 * 60_000);
-}
-
-/** 최근 6시간 안에 perplexity 가 지역값으로 실패했으면 true — 그동안은 처음부터 지역값 없이 보낸다. */
-export function shouldSkipPerplexityCountry(lastFailedAt: Date | null, now: Date): boolean {
-  if (!lastFailedAt || Number.isNaN(lastFailedAt.getTime())) return false;
-  return now.getTime() - lastFailedAt.getTime() < PERPLEXITY_COUNTRY_SUPPRESS_MS;
 }

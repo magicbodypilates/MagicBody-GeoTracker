@@ -70,6 +70,24 @@ const providerBaseUrl: Record<Provider, string> = {
   grok: "https://grok.com/",
 };
 
+/**
+ * § PERPLEXITY_NO_COUNTRY (2026-09-25) — 이 AI 요청에 실제로 실을 국가 값.
+ *
+ * Perplexity 는 국가를 보내지 않는다. Bright Data Perplexity 수집기는 국가(KR)를 붙이면 늘 실패했고
+ * (2026-08-29부터 선택자 시간 초과, 이후 "No Peer Found"), 성공한 Perplexity 요청은 전부 국가 없이 보낸
+ * 것이었다. 예전에는 KR 로 먼저 보냈다가 실패하면 국가 없이 한 번 더 보냈는데(§ PERPLEXITY_COUNTRY_FALLBACK,
+ * 폐지), 그 헛시도가 항목 1건을 수십 분씩 붙잡아 회차를 오래 열어 두었다. 국가 없이도 한국어 질문이면
+ * 한국 사이트 출처가 나오는 것을 실측으로 확인했다.
+ *
+ * 수집 경로 셋(자동 수집 엔진·예전 runTick·수동 수집 runAiScraper)이 모두 이 함수를 거친다 — 엔진은 항목에
+ * 기록하는 요청 국가·시도 기록의 국가도 이 값으로 남겨, "국가를 보냈다가 실패" 로 오인한 재시도가 붙지 않게 한다.
+ * 다른 AI 는 받은 값 그대로다(Google AI 는 KR 을 계속 보낸다. ChatGPT·Gemini 는 buildInputRecord 가 원래 뺀다).
+ */
+export function requestCountryFor(provider: string, country: string | null | undefined): string | undefined {
+  if (provider === "perplexity") return undefined;
+  return country ?? undefined;
+}
+
 export function buildInputRecord(
   provider: Provider,
   prompt: string,
@@ -80,20 +98,14 @@ export function buildInputRecord(
 
   // ChatGPT 데이터셋은 country 파라미터를 지원하지 않음 — 비어 있지 않은 값을 보내면
   // Bright Data 가 "country is not available for this scraper" 로 400 거부.
-  // Perplexity / Google AI / Copilot 는 ISO 3166-1 alpha-2 대문자만 허용 (KR ✓, kr ✗).
+  // Google AI / Copilot 는 ISO 3166-1 alpha-2 대문자만 허용 (KR ✓, kr ✗).
   switch (provider) {
     case "chatgpt":
       return { url, prompt, web_search: false, additional_prompt: "" };
-    case "perplexity": {
-      // country 는 그대로 보낸다 — 한국 로케일 결과 확보가 우선이다(2026-05-07 c2a4e6a 결정).
-      // 다만 2026-08-29 현재 Bright Data Perplexity 스크래퍼가 country 지정 시
-      // `Crawler error: waiting for selector ... timeout 30000ms exceeded` 로 실패한다.
-      // 그래서 실패했을 때만 runAiScraper 가 country 없이 1회 재시도한다(§ PERPLEXITY_COUNTRY_FALLBACK).
-      // 스크래퍼가 복구되면 재시도 없이 한국 결과를 그대로 받게 된다.
-      const rec: Record<string, unknown> = { url, prompt, index: 1 };
-      if (countryValue) rec.country = countryValue;
-      return rec;
-    }
+    case "perplexity":
+      // 국가는 넘겨받아도 싣지 않는다(§ PERPLEXITY_NO_COUNTRY — requestCountryFor). 호출부가 이미 빼지만,
+      // 새 호출부가 빠뜨려도 국가가 실리지 않게 하는 안전망이다.
+      return { url, prompt, index: 1 };
     case "gemini":
       return { url, prompt, index: 1 };
     case "google_ai": {
@@ -450,43 +462,39 @@ const DEEP_EXTRACT_EXCLUDED_KEYS = new Set([
 // 답변으로 볼 수 없는 형태의 문자열(타임스탬프·URL 단독·숫자/식별자 단독)을 거부한다.
 export const PARSE_FAILURE_MARKER = "[응답 파싱 실패 —";
 
-/**
- * § PERPLEXITY_COUNTRY_FALLBACK 상태 (2026-08-29)
- *
- * 한국 로케일 결과 확보가 우선이라 Perplexity 에도 country 를 계속 보낸다.
- * 다만 Bright Data 스크래퍼가 country 지정 시 선택자 타임아웃으로 실패하는 기간에는
- * 매 요청마다 "실패(≈5분) → 재시도(≈5분)" 를 반복하면 tick 총시간이 2배가 된다
- * (22 프롬프트 × 최대 900s 로 이미 빠듯하다).
- *
- * 그래서 첫 실패를 확인하면 그 시각을 기록해 두고, 이후 요청은 country 를 생략해 바로 보낸다.
- * SUPPRESS_MS 가 지나면 다시 country 로 시도해 스크래퍼 복구를 자동으로 감지한다.
- * 프로세스 재시작(배포) 시에도 초기화되므로 배포 직후엔 항상 country 를 먼저 시도한다.
- */
-const COUNTRY_FALLBACK_SUPPRESS_MS = 6 * 60 * 60 * 1000; // 6시간 = 자동 조사 1주기
-const globalForFallback = globalThis as unknown as {
-  __perplexityCountryFailedAt?: number;
-};
-function shouldSkipPerplexityCountry(): boolean {
-  const at = globalForFallback.__perplexityCountryFailedAt;
-  return typeof at === "number" && Date.now() - at < COUNTRY_FALLBACK_SUPPRESS_MS;
-}
-function markPerplexityCountryFailed(): void {
-  globalForFallback.__perplexityCountryFailedAt = Date.now();
-}
-
-// 답변이 담길 수 있는 필드 — normalizeAnswer 추출과 크롤러 오류 가드가 **같은 목록**을 쓴다.
-// 두 곳이 벌어지면(가드 3개 vs 추출 9개) 가드가 진짜 답변을 못 보고 정상 run 을 버린다(검수 지적 반영).
+// 답변이 담길 수 있는 필드 — normalizeAnswer 추출·selectAnswer·크롤러 오류 가드가 **같은 목록**을 쓴다
+// (answerCandidateKeys). 두 곳이 벌어지면(가드 3개 vs 추출 9개) 가드가 진짜 답변을 못 보고 정상 run 을
+// 버린다(검수 지적 반영).
 const ANSWER_CANDIDATE_KEYS = [
   "answer_text",           // Bright Data primary field
   "answer_text_markdown",  // Markdown variant (Perplexity, Grok, Copilot)
   "answer",                // Legacy / fallback
-  "response_raw",          // Grok raw response
+  "response_raw",          // Grok raw response — Grok 에서만 답 후보다(answerCandidateKeys)
   "response",
   "output",
   "result",
   "text",
   "content",
 ] as const;
+
+/**
+ * § RESPONSE_RAW_GROK_ONLY (2026-09-25 운영 실측)
+ *
+ * `response_raw` 는 Grok 의 답 필드다. 다른 AI 의 레코드에도 같은 이름의 필드가 오는데, 내용은 답이 아니라
+ * 수집기가 가로챈 원시 통신 기록(`event: message\ndata: {"backend_uuid": …` 형태의 SSE 스트림, 약 8～9천 자)
+ * 이다. Perplexity 레코드의 answer_text·answer_text_markdown 이 비자 이 필드가 답으로 뽑혀 8,885자짜리 통신
+ * 기록이 정상 답으로 저장됐다. 그래서 Grok 이 아니면 답 후보(1차 후보·깊은 추출·크롤러 오류 가드)에서 뺀다.
+ * 모든 AI 공통 안전망은 detectRawPayload(원시 통신 기록·JSON 덩어리는 답이 아니다)다.
+ */
+const GROK_ONLY_ANSWER_KEYS: ReadonlySet<string> = new Set(["response_raw"]);
+
+type AnswerKey = (typeof ANSWER_CANDIDATE_KEYS)[number];
+
+/** 이 AI 의 답 후보 필드 — Grok 이 아니면 response_raw 를 뺀다(§ RESPONSE_RAW_GROK_ONLY). */
+function answerCandidateKeys(provider: Provider): readonly AnswerKey[] {
+  if (provider === "grok") return ANSWER_CANDIDATE_KEYS;
+  return ANSWER_CANDIDATE_KEYS.filter((key) => !GROK_ONLY_ANSWER_KEYS.has(key));
+}
 
 // 문자열 "전체"가 타임스탬프일 때만 거부한다. 끝 앵커가 없으면
 // "2026-08-29T09:00 현재 …" 처럼 시각으로 시작하는 정상 답변까지 오탈락한다(검수 지적 반영).
@@ -523,7 +531,67 @@ export const MIN_MEANINGFUL_ANSWER_CHARS = 20;
 /** 질문을 되돌린 답에 덧붙어도 되는 의미 문자 수 상한("질문:" 같은 머리말·끝 기호 흡수). */
 export const PROMPT_ECHO_EXTRA_MAX_CHARS = 10;
 
-export type NonAnswerReason = "prompt_echo" | "too_few_chars";
+/*
+ * § 화면 메뉴 글자 판정 (2026-09-25 운영 실측)
+ *
+ * Perplexity 수집기가 로그인 안 된 화면의 사이드바 글자(`Perplexity New ⌃I Computer Artifacts Customize
+ * Projects No projects Sessions No recent sessions Sign In …`, 795자)를 answer_text_markdown 에 담아 돌려줬고,
+ * 의미 문자가 충분해 정상 답으로 저장됐다. 답 앞부분(판정 문자열의 공백을 한 칸으로 줄인 앞 300자)에 아래
+ * 화면 문구가 **서로 다른 것으로 3개 이상** 몰려 있고, 그중 **1개 이상이 본문 문장에 나올 일이 없는 문구**
+ * (빈 목록 안내·단축키 기호)이면 답이 아니다.
+ *   - 문턱이 보수적인 이유: "Sign In"·"Customize"·"Artifacts" 는 평범한 영어 낱말이라 소프트웨어를 설명하는
+ *     영문 답에 함께 나올 수 있다. 셋만으로는 거부하지 않고, 빈 목록 안내("No recent sessions"·"No projects")나
+ *     단축키 기호("⌃I")가 섞여 있을 때만 거부한다. 대소문자를 구분해 문장 속 소문자 낱말은 세지 않는다.
+ *   - 실측 사례는 6개 문구가 전부 앞 120자 안에 있다. 정상 답에 "Sign In" 이 한 번 나오는 것은 1개라 통과한다.
+ */
+const UI_CHROME_WINDOW_CHARS = 300;
+const UI_CHROME_MIN_MARKERS = 3;
+const UI_CHROME_STRONG_MARKERS = ["No recent sessions", "No projects", "⌃I"] as const;
+const UI_CHROME_WEAK_MARKERS = ["Sign In", "Customize", "Artifacts"] as const;
+
+/** 답 앞부분이 AI 서비스 화면의 메뉴 글자인지(§ 화면 메뉴 글자 판정). 입력은 판정 문자열이다. */
+function looksLikeUiChrome(judgmentText: string): boolean {
+  const head = judgmentText.replace(/\s+/g, " ").trim().slice(0, UI_CHROME_WINDOW_CHARS);
+  const strong = UI_CHROME_STRONG_MARKERS.filter((m) => head.includes(m)).length;
+  if (strong === 0) return false;
+  const weak = UI_CHROME_WEAK_MARKERS.filter((m) => head.includes(m)).length;
+  return strong + weak >= UI_CHROME_MIN_MARKERS;
+}
+
+/*
+ * § 원시 통신 기록·데이터 덩어리 판정 (2026-09-25 — 모든 AI 공통 안전망)
+ *
+ * 답 자리에 사람이 읽는 답 대신 기계가 주고받은 데이터가 온 경우다. 답 필드를 제대로 못 읽은 **형식 이상**
+ * 이라 PARSE_FAILURE 로 처리한다(내용이 빈 답 EMPTY_ANSWER 와 구분 — 통신 기록 안에는 실제 답 조각이 들어
+ * 있을 수 있어 "답이 없었다"가 아니라 "답을 꺼내지 못했다"가 맞다). 재시도 규칙은 두 코드가 같다.
+ *   - sse  : 앞머리가 `event: <이름>` 다음 `data:` 이거나, `data:` 바로 뒤가 `{`·`[` (서버 전송 이벤트 스트림)
+ *   - json : 앞머리가 `{"` 또는 `[{"` 이고 문자열 전체가 JSON 으로 해석되는 것(객체·배열)
+ * 정상 답이 JSON 을 보여 줄 때는 설명 문장·코드 블록(```) 안에 넣으므로 전체가 JSON 으로 해석되지 않는다.
+ * 잘려서 해석되지 않는 JSON 은 걸리지 않는다(오탈락 방지 우선 — 보고서 트레이드오프).
+ */
+export type RawPayloadKind = "sse" | "json";
+const SSE_HEAD_RE = /^(?:event:[ \t]*[\w.-]*\s+data:|data:[ \t]*[{[])/;
+
+export function detectRawPayload(value: string): RawPayloadKind | null {
+  const s = String(value ?? "").trim();
+  if (SSE_HEAD_RE.test(s)) return "sse";
+  if (s.startsWith('{"') || s.startsWith('[{"')) {
+    try {
+      const parsed: unknown = JSON.parse(s);
+      if (parsed !== null && typeof parsed === "object") return "json";
+    } catch {
+      // 해석되지 않으면 답일 수 있다 — 그대로 둔다.
+    }
+  }
+  return null;
+}
+
+const RAW_PAYLOAD_TEXT: Record<RawPayloadKind, string> = {
+  sse: "원시 통신 기록(SSE)",
+  json: "JSON 데이터 덩어리",
+};
+
+export type NonAnswerReason = "prompt_echo" | "too_few_chars" | "ui_chrome";
 
 /** 대소문자·전각 차이를 맞추고 의미 문자만 남긴다. */
 export function meaningfulText(value: string): string {
@@ -690,6 +758,7 @@ export function answerJudgmentText(value: string): string {
  *   (a) prompt_echo  — 의미 문자만 남긴 답이 보낸 질문과 같거나, 질문을 담고 있으면서 질문을 뺀
  *                      나머지 의미 문자가 PROMPT_ECHO_EXTRA_MAX_CHARS 이하.
  *   (b) too_few_chars — 답의 의미 문자가 MIN_MEANINGFUL_ANSWER_CHARS 미만.
+ *   (c) ui_chrome     — 답 앞부분이 AI 서비스 화면의 메뉴 글자(§ 화면 메뉴 글자 판정, 2026-09-25).
  * 답·질문 모두 answerJudgmentText(태그·엔티티·출처 이름표·URL·링크 목적지 제거) 뒤에 센다.
  * 질문을 인용한 뒤 내용이 길게 이어지는 답, 짧아도 내용이 있는 한 문장 답은 통과한다.
  */
@@ -697,7 +766,8 @@ export function detectNonAnswer(
   answer: string,
   prompt: string,
 ): { reason: NonAnswerReason; meaningfulChars: number } | null {
-  const a = meaningfulText(answerJudgmentText(answer));
+  const judged = answerJudgmentText(answer);
+  const a = meaningfulText(judged);
   const p = meaningfulText(answerJudgmentText(prompt));
   if (p.length > 0 && a.includes(p)) {
     // 질문이 여러 번 되돌아와도(질문+질문) 나머지만 센다.
@@ -709,10 +779,14 @@ export function detectNonAnswer(
   if (a.length < MIN_MEANINGFUL_ANSWER_CHARS) {
     return { reason: "too_few_chars", meaningfulChars: a.length };
   }
+  if (looksLikeUiChrome(judged)) {
+    return { reason: "ui_chrome", meaningfulChars: a.length };
+  }
   return null;
 }
 
 const NON_ANSWER_REASON_TEXT: Record<NonAnswerReason, string> = {
+  ui_chrome: "화면 메뉴 글자",
   prompt_echo: "질문 되돌림",
   too_few_chars: "의미 문자 부족",
 };
@@ -734,6 +808,18 @@ const DEEP_TEXT_KEYS = [
 ] as const;
 const MAX_CANDIDATE_TEXTS = 50;
 
+/** 이 AI 의 깊은 추출 본문 키 — Grok 이 아니면 response_raw 를 뺀다(§ RESPONSE_RAW_GROK_ONLY). */
+function deepTextKeys(provider: Provider): readonly string[] {
+  if (provider === "grok") return DEEP_TEXT_KEYS;
+  return DEEP_TEXT_KEYS.filter((key) => !GROK_ONLY_ANSWER_KEYS.has(key));
+}
+
+/** 이 AI 에서 깊은 추출이 건너뛸 키인지 — 메타 필드 + (Grok 이 아니면) response_raw. */
+function isDeepExcludedKey(key: string, provider: Provider): boolean {
+  const k = key.toLowerCase();
+  return DEEP_EXTRACT_EXCLUDED_KEYS.has(k) || (provider !== "grok" && GROK_ONLY_ANSWER_KEYS.has(k));
+}
+
 /**
  * 후보 키 하나의 값 **안에서만** 판정할 문자열을 문서 순서대로 모은다 (Codex 2차 C2 잔여).
  *   - 값 자체가 문자열이면 비어 있지 않은 한 그대로 후보다(예전 1차 후보와 같은 기준).
@@ -743,8 +829,9 @@ const MAX_CANDIDATE_TEXTS = 50;
  *   - 객체에서는 **본문용 키(DEEP_TEXT_KEYS)만** 따라간다. title·name·model·snippet·url 같은 그 밖의 키는
  *     따라가지 않는다 — 앞 후보가 비응답일 때 제목·메타 문자열이 답으로 뽑히던 것을 막는다(3회차 R3-3).
  *     그런 키는 후보 문자열이 하나도 없을 때의 전역 깊은 추출(normalizeAnswer)에만 맡긴다.
+ *   - 본문용 키 목록은 AI 별이다(deepTextKeys — Grok 이 아니면 response_raw 제외).
  */
-function collectCandidateTexts(value: unknown, depth: number, out: string[]): void {
+function collectCandidateTexts(value: unknown, depth: number, out: string[], keys: readonly string[]): void {
   if (out.length >= MAX_CANDIDATE_TEXTS || depth > 3) return;
   if (typeof value === "string") {
     const text = value.trim();
@@ -752,20 +839,25 @@ function collectCandidateTexts(value: unknown, depth: number, out: string[]): vo
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) collectCandidateTexts(entry, depth + 1, out);
+    for (const entry of value) collectCandidateTexts(entry, depth + 1, out, keys);
     return;
   }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    for (const key of DEEP_TEXT_KEYS) {
+    for (const key of keys) {
       if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
-      collectCandidateTexts(record[key], depth + 1, out);
+      collectCandidateTexts(record[key], depth + 1, out, keys);
     }
   }
 }
 
-export function normalizeAnswer(rawRecord: Record<string, unknown>) {
-  const answerCandidates = ANSWER_CANDIDATE_KEYS.map((key) => rawRecord[key]);
+/**
+ * 레코드에서 답 문자열을 뽑는다(판정 없음). 1차 후보 필드 → 깊은 추출 → 파싱 실패 표식.
+ * provider 는 필수다 — AI 마다 답 후보 필드가 다르다(§ RESPONSE_RAW_GROK_ONLY).
+ */
+export function normalizeAnswer(rawRecord: Record<string, unknown>, provider: Provider) {
+  const textKeys = deepTextKeys(provider);
+  const answerCandidates = answerCandidateKeys(provider).map((key) => rawRecord[key]);
 
   for (const item of answerCandidates) {
     if (typeof item === "string" && item.trim()) {
@@ -791,14 +883,14 @@ export function normalizeAnswer(rawRecord: Record<string, unknown>) {
       // `message` 는 Bright Data not-ready 상태 안내가 담기는 필드라 답변 후보에서 제외.
       // body/summary/description 은 정상 답변 deep fallback 가능성이 있어 유지 —
       // 주 방어선은 isNotReadyPayload detector 다(plan-v2 결정 3, 회귀 위험 최소화).
-      for (const key of DEEP_TEXT_KEYS) {
+      for (const key of textKeys) {
         if (typeof record[key] === "string" && isAnswerLikeString(record[key] as string)) {
           return (record[key] as string).trim();
         }
       }
-      // Recurse into any value — 단 메타 필드(url·prompt·timestamp 등)는 건너뛴다.
+      // Recurse into any value — 단 메타 필드(url·prompt·timestamp 등)와 이 AI 의 답이 아닌 필드는 건너뛴다.
       for (const [key, val] of Object.entries(record)) {
-        if (DEEP_EXTRACT_EXCLUDED_KEYS.has(key.toLowerCase())) continue;
+        if (isDeepExcludedKey(key, provider)) continue;
         const found = extractDeepText(val, depth + 1);
         if (found) return found;
       }
@@ -821,12 +913,21 @@ export function normalizeAnswer(rawRecord: Record<string, unknown>) {
 export type AnswerSelection =
   | { kind: "answer"; answer: string }
   | { kind: "non_answer"; answer: string; reason: NonAnswerReason; meaningfulChars: number }
-  | { kind: "parse_failure"; marker: string };
+  /** rawPayload 가 있으면 답 필드에 답 대신 원시 통신 기록·JSON 덩어리가 왔다(§ 원시 통신 기록 판정). */
+  | { kind: "parse_failure"; marker: string; rawPayload?: { kind: RawPayloadKind; length: number } };
+
+function rawPayloadFailure(raw: { kind: RawPayloadKind; length: number }): AnswerSelection {
+  return {
+    kind: "parse_failure",
+    marker: `${PARSE_FAILURE_MARKER} 답 대신 ${RAW_PAYLOAD_TEXT[raw.kind]} · 길이 ${raw.length}자]`,
+    rawPayload: raw,
+  };
+}
 
 /**
  * 후보 필드별로 내용 없는 답 판정을 거쳐 답을 고른다 (Codex 1차 검수 C2 반영).
  *
- *   1. ANSWER_CANDIDATE_KEYS 순서대로, 각 후보 키의 값 안에서 모은 문자열(collectCandidateTexts —
+ *   1. 이 AI 의 후보 키(answerCandidateKeys) 순서대로, 각 후보 키의 값 안에서 모은 문자열(collectCandidateTexts —
  *      문자열 값 · 배열/객체 안의 답 같은 문자열)마다 detectNonAnswer 를 적용해 **첫 정상 후보**를
  *      고른다(Codex 2차 C2 잔여 — 예전엔 문자열 값만 봐서 `content: [{text}]` 의 정상 답을 놓쳤다). `answer_text` 가 별표뿐이어도 `answer_text_markdown` 에 정상 답이
  *      있으면 그것을 쓴다(예전엔 첫 후보만 보고 전체를 실패로 던졌다).
@@ -835,24 +936,42 @@ export type AnswerSelection =
  *      부속 필드를 답으로 오인할 위험이 있다.
  *   3. 1차 후보가 없으면 예전과 똑같이 normalizeAnswer(깊은 추출 → 파싱 실패 표식)로 가고, 깊은
  *      추출로 얻은 답에도 같은 판정을 적용한다.
+ *   4. (2026-09-25) 후보 문자열이 원시 통신 기록·JSON 덩어리면(detectRawPayload) 답이 아니다 — 다음 후보를
+ *      본다. 정상 후보도 내용 없는 답도 없고 이런 후보만 있었으면 parse_failure(rawPayload). 이때도 깊은
+ *      추출로 넘어가지 않는다(1차 후보가 있었으므로 2와 같은 이유).
+ * 후보 필드는 AI 별이다(answerCandidateKeys — Grok 이 아니면 response_raw 제외).
  * 고른 답은 trim 한 원문 그대로다(판정용 정리는 저장값에 반영하지 않는다).
  */
-export function selectAnswer(rawRecord: Record<string, unknown>, prompt: string): AnswerSelection {
+export function selectAnswer(
+  rawRecord: Record<string, unknown>,
+  prompt: string,
+  provider: Provider,
+): AnswerSelection {
+  const textKeys = deepTextKeys(provider);
   let firstNonAnswer: Extract<AnswerSelection, { kind: "non_answer" }> | null = null;
-  for (const key of ANSWER_CANDIDATE_KEYS) {
+  let firstRaw: { kind: RawPayloadKind; length: number } | null = null;
+  for (const key of answerCandidateKeys(provider)) {
     const texts: string[] = [];
-    collectCandidateTexts(rawRecord[key], 0, texts);
+    collectCandidateTexts(rawRecord[key], 0, texts, textKeys);
     for (const text of texts) {
+      const raw = detectRawPayload(text);
+      if (raw) {
+        firstRaw ??= { kind: raw, length: text.length };
+        continue;
+      }
       const judged = detectNonAnswer(text, prompt);
       if (!judged) return { kind: "answer", answer: text };
       firstNonAnswer ??= { kind: "non_answer", answer: text, ...judged };
     }
   }
   if (firstNonAnswer) return firstNonAnswer;
+  if (firstRaw) return rawPayloadFailure(firstRaw);
 
   // 후보 키 안에서 판정할 문자열을 하나도 못 찾았다 → 예전과 같은 전역 깊은 추출·파싱 실패 표식.
-  const fallback = normalizeAnswer(rawRecord);
+  const fallback = normalizeAnswer(rawRecord, provider);
   if (fallback.startsWith(PARSE_FAILURE_MARKER)) return { kind: "parse_failure", marker: fallback };
+  const fallbackRaw = detectRawPayload(fallback);
+  if (fallbackRaw) return rawPayloadFailure({ kind: fallbackRaw, length: fallback.length });
   const judged = detectNonAnswer(fallback, prompt);
   return judged ? { kind: "non_answer", answer: fallback, ...judged } : { kind: "answer", answer: fallback };
 }
@@ -984,7 +1103,10 @@ export async function runAiScraper(
     );
   }
 
-  const cacheKey = buildCacheKey(request);
+  // § PERPLEXITY_NO_COUNTRY — 실제로 보낼 요청 기준으로 캐시 키도 만든다(Perplexity 는 국가를 받아도
+  // 빼므로 국가 유무가 다른 두 요청이 같은 요청이다).
+  const effective: ScrapeRequest = { ...request, country: requestCountryFor(parsed, request.country) };
+  const cacheKey = buildCacheKey(effective);
   if (!request.forceRefresh) {
     const cacheHit = inMemoryCache.get(cacheKey);
     if (cacheHit && cacheHit.expiresAt > Date.now()) {
@@ -995,11 +1117,7 @@ export async function runAiScraper(
     }
   }
 
-  // § PERPLEXITY_COUNTRY_FALLBACK — 최근에 country 로 실패했다면 곧바로 생략하고 요청한다.
-  // (매 요청마다 "실패 5분 + 재시도 5분" 을 반복해 tick 시간이 2배가 되는 것을 막는다)
-  const effectiveCountry =
-    parsed === "perplexity" && shouldSkipPerplexityCountry() ? undefined : request.country;
-  const inputRecord = buildInputRecord(parsed, request.prompt, effectiveCountry);
+  const inputRecord = buildInputRecord(parsed, effective.prompt, effective.country);
 
   const scrapeResponse = await fetch(
     `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
@@ -1030,34 +1148,9 @@ export async function runAiScraper(
   // normalizeScrapePayload 로 옮겼다(계획 geotracker-collect-speed-260924 Step 1) — 자동 수집
   // 엔진이 요청 번호로 나중에 내려받은 결과에도 같은 판정을 쓰기 위해서다. 판정 순서·오류 문구는
   // 옮기기 전과 같다.
-  let normalized: NormalizedScrapeResult;
-  try {
-    normalized = normalizeScrapePayload({ provider: parsed, prompt: request.prompt, payload });
-  } catch (err) {
-    // § PERPLEXITY_COUNTRY_FALLBACK (2026-08-29)
-    // Perplexity 는 country 를 지정하면 Bright Data 스크래퍼가 선택자 타임아웃으로 실패한다.
-    // 한국 결과 확보가 우선이라 country 를 계속 보내되, 이 실패에 한해 country 없이 1회 재시도한다.
-    // (country 없이도 한국어 프롬프트면 한국 사이트 출처가 나오는 것을 실측 확인 — naver/tistory 등)
-    // 스크래퍼가 복구되면 첫 시도가 성공하므로 재시도 자체가 사라진다.
-    // effectiveCountry 기준으로 판단한다 — 실제로 country 를 보냈을 때만 재시도한다.
-    // (request.country 로 판단하면 억제 중에도 재귀가 돌아 무한 재시도가 된다)
-    // 크롤러 오류 코드가 세분돼도(가입 화면 차단·브라우저 끊김·선택자 시간 초과) 모두 크롤러
-    // 계열이라 옮기기 전과 똑같이 이 재시도에 들어온다.
-    if (
-      err instanceof ScrapeFailure &&
-      isCrawlerCode(err.code) &&
-      parsed === "perplexity" &&
-      effectiveCountry
-    ) {
-      markPerplexityCountryFailed();
-      console.warn(
-        `[PERPLEXITY_COUNTRY_FALLBACK] country=${request.country} 실패 → country 없이 재시도합니다. ` +
-          `이후 ${COUNTRY_FALLBACK_SUPPRESS_MS / 3600000}시간 동안은 country 를 생략해 바로 요청합니다.`,
-      );
-      return runAiScraper({ ...request, country: undefined, forceRefresh: true });
-    }
-    throw err;
-  }
+  // 판정에 걸리면 그대로 던진다. 예전의 "Perplexity 크롤러 오류 → 국가 없이 1회 재시도"
+  // (§ PERPLEXITY_COUNTRY_FALLBACK)는 2026-09-25 폐지 — 처음부터 국가 없이 보내 다시 보낼 이유가 없다.
+  const normalized = normalizeScrapePayload({ provider: parsed, prompt: request.prompt, payload });
 
   inMemoryCache.set(cacheKey, {
     expiresAt: Date.now() + OUTPUT_CACHE_TTL_MS,
@@ -1431,7 +1524,7 @@ function toClassifyText(value: unknown): string {
  * 그대로 옮긴 것이다: 첫 레코드 선택 → not-ready 감지 → 크롤러 오류(답변 필드 없음 + error/
  * error_code) → answer_html 제거 → normalizeAnswer → 파싱 실패 → 내용 없는 답(EMPTY_ANSWER,
  * 2026-09-25 추가) → 인용 추출 → 결과 조립.
- * 캐시 기록·perplexity 지역값 재시도는 넣지 않는다(호출부 몫). 판정은 전부 여기서 던지므로
+ * 캐시 기록은 넣지 않는다(호출부 몫). 판정은 전부 여기서 던지므로
  * 호출부의 캐시 기록(runAiScraper)은 판정을 통과한 결과만 받는다.
  *
  * prompt 는 **Bright Data 에 실제로 보낸 질문 문장**이어야 한다 — 질문 되돌림 판정에 쓴다
@@ -1470,8 +1563,10 @@ export function normalizeScrapePayload(args: {
   // 이 문구는 NOT_READY_PATTERN 에 걸리지 않아 not-ready 검출을 통과했고, 그 결과 deep fallback 이
   // timestamp 를 답변으로 채택해 가짜 정상 run 이 쌓였다. 답변이 없는 상태에서 오류 필드가 있으면
   // 즉시 실패로 처리해 run 을 저장하지 않는다.
+  // 답 필드 목록은 selectAnswer 와 같은 AI 별 목록이다 — Grok 이 아닌데 response_raw(원시 통신 기록)만
+  // 있는 오류 레코드도 "답 없음 + 오류" 로 본다(§ RESPONSE_RAW_GROK_ONLY).
   const crawlerError = rawRecord.error ?? rawRecord.error_code;
-  const hasAnswerField = ANSWER_CANDIDATE_KEYS.some((key) => {
+  const hasAnswerField = answerCandidateKeys(parsed).some((key) => {
     const value = rawRecord[key];
     if (typeof value === "string") return value.trim().length > 0;
     if (Array.isArray(value)) {
@@ -1500,12 +1595,20 @@ export function normalizeScrapePayload(args: {
     : (sanitizedPayload as Record<string, unknown>);
   const record = (sanitizedFirst ?? {}) as Record<string, unknown>;
   // 후보 필드별로 내용 없는 답 판정을 거쳐 첫 정상 후보를 고른다(selectAnswer — Codex 1차 C2).
-  const selection = selectAnswer(record, prompt);
+  const selection = selectAnswer(record, prompt, parsed);
 
   // 파싱 실패는 run 으로 저장하지 않는다 (2026-08-29).
   // 예전에는 실패 메시지를 answer 에 담아 그대로 저장했는데, 그러면 답변이 없는데도
   // 정상 run 으로 집계돼 가시성 0점이 평균을 끌어내린다.
   if (selection.kind === "parse_failure") {
+    // 답 필드에 답 대신 원시 통신 기록·JSON 덩어리가 왔다(2026-09-25) — 형식·길이만 남기고 내용은 넣지 않는다.
+    if (selection.rawPayload) {
+      throw new ScrapeFailure(
+        "PARSE_FAILURE",
+        `[PARSE_FAILURE] 답 필드에 답이 아닌 데이터가 왔다 (provider=${parsed}) — ` +
+          `${RAW_PAYLOAD_TEXT[selection.rawPayload.kind]} · 길이 ${selection.rawPayload.length}자`,
+      );
+    }
     const answer = selection.marker;
     const errorCount = progress?.errors ?? 0;
     if (progress?.records === 0 && errorCount > 0) {

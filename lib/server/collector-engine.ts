@@ -40,10 +40,10 @@ import {
   cancelSnapshot,
   downloadSnapshotPayload,
   getSnapshotProgress,
-  isCrawlerCode,
   isKnownProvider,
   normalizeScrapePayload,
   redactErrorText,
+  requestCountryFor,
   ScrapeFailure,
   submitScrape,
   type NormalizedScrapeResult,
@@ -92,7 +92,6 @@ import {
   limitReached,
   nextPollDelayMs,
   retryBudget,
-  shouldSkipPerplexityCountry,
   type CollectorErrorCode,
 } from "@/lib/server/collector-policy";
 import { computeRoundTiming, formatIntervalSlot, kstDateString } from "@/lib/server/collector-schedule";
@@ -422,8 +421,6 @@ async function failItem(
     const d = decideAfterFailure({
       code,
       provider: cur.provider,
-      countrySent: lastAttempt(cur)?.country != null,
-      countryFallbacks: cur.countryFallbacks,
       paidRetries: cur.paidRetries,
       usedRetries: Number(agg?.used ?? 0),
       budget: retryBudget(Number(agg?.n ?? 0), getRetryRatio()),
@@ -442,17 +439,8 @@ async function failItem(
       }),
       ...opts.extraSet,
     };
-    if (d.action === "retry" && d.kind === "country_fallback") {
-      Object.assign(set, {
-        status: "queued",
-        countryFallbacks: cur.countryFallbacks + 1,
-        dropCountry: true,
-        snapshotId: null,
-        nextPollAt: null,
-        pollDeadlineAt: null,
-        nextAttemptAt: now,
-      });
-    } else if (d.action === "retry") {
+    // 국가 대체 재시도(country_fallbacks·drop_country 칸)는 2026-09-25 폐지 — 칸은 옛 회차 기록으로만 남는다.
+    if (d.action === "retry") {
       Object.assign(set, {
         status: "queued",
         paidRetries: cur.paidRetries + 1,
@@ -526,10 +514,6 @@ async function finalizeWithPayload(
       // 5회 넘게 이어지면 그때 원인 코드(NOT_READY)로 실패 처리한다 — 재시도 규칙이 적용된다.
       if (err.code === "NOT_READY" && expectedStatus === "submitted" && item.snapshotId) {
         return retryDownloadLater(pass, item, "NOT_READY", err.message, NOT_READY_RETRY_MS);
-      }
-      const countrySent = lastAttempt(item)?.country != null;
-      if (item.provider === "perplexity" && isCrawlerCode(err.code) && countrySent) {
-        await setStateValue("perplexity_country_failed_at", { at: now.toISOString() }, now);
       }
       return failItem(pass, item, err.code, err.message, expectedStatus);
     }
@@ -937,7 +921,8 @@ async function createRoundInTx(
           promptText,
           provider,
           seq: qi * providers.length + pi,
-          countryRequested: sched.geolocation ?? "KR",
+          // Perplexity 는 국가를 요청하지 않는다(NULL) — § PERPLEXITY_NO_COUNTRY. 다른 AI 는 예전 그대로.
+          countryRequested: requestCountryFor(provider, sched.geolocation ?? "KR") ?? null,
           status: "queued",
           createdAt: now,
           updatedAt: now,
@@ -978,7 +963,7 @@ async function topUpRunningRound(
         promptText,
         provider,
         seq: seq++,
-        countryRequested: sched.geolocation ?? "KR",
+        countryRequested: requestCountryFor(provider, sched.geolocation ?? "KR") ?? null,
         status: "queued",
         createdAt: now,
         updatedAt: now,
@@ -1267,8 +1252,6 @@ async function submitQueuedItems(pass: PassCtx, stats: DispatchStats): Promise<v
   const { now } = pass;
   const authUntil = await getUntil("auth_pause_until");
   if (authUntil && authUntil.getTime() > now.getTime()) return;
-  const countryState = await getStateValue<{ at?: string }>("perplexity_country_failed_at");
-  const skipCountry = shouldSkipPerplexityCountry(countryState?.at ? new Date(countryState.at) : null, now);
 
   const providerRows = await db
     .selectDistinct({ provider: items.provider })
@@ -1283,19 +1266,14 @@ async function submitQueuedItems(pass: PassCtx, stats: DispatchStats): Promise<v
     );
   const providers = providerRows.map((r) => r.provider).filter(isKnownProvider);
   const settled = await Promise.allSettled(
-    providers.map((p) => submitForProvider(pass, stats, p, skipCountry)),
+    providers.map((p) => submitForProvider(pass, stats, p)),
   );
   for (const r of settled) {
     if (r.status === "rejected") pass.errors.push({ scheduleId: "collector:submit", message: errorMessage(r.reason) });
   }
 }
 
-async function submitForProvider(
-  pass: PassCtx,
-  stats: DispatchStats,
-  p: Provider,
-  skipCountry: boolean,
-): Promise<void> {
+async function submitForProvider(pass: PassCtx, stats: DispatchStats, p: Provider): Promise<void> {
   const { now } = pass;
   const rateUntil = await getUntil(`rate_pause:${p}`);
   if (rateUntil && rateUntil.getTime() > now.getTime()) return;
@@ -1365,7 +1343,9 @@ async function submitForProvider(
       continue;
     }
     // ③ 돈이 드는 요청 전에 "보내는 중"으로 먼저 표시한다(끊기면 복구가 다시 보낸다)
-    const country = p === "perplexity" && (skipCountry || c.dropCountry) ? null : c.countryRequested ?? null;
+    // 시도 기록의 국가 = 실제로 보내는 국가. Perplexity 는 항목에 국가가 남아 있어도(이 변경 전에 만든
+    // 항목의 "KR"·drop_country) 늘 NULL 이다(§ PERPLEXITY_NO_COUNTRY). submitOne 은 이 기록 값을 그대로 보낸다.
+    const country = requestCountryFor(p, c.countryRequested) ?? null;
     const [row] = await db
       .update(items)
       .set({

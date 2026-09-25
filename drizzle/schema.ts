@@ -422,7 +422,7 @@ export type CollectionRoundSummary = {
   unknownSubmits: number;
   /** 일반 재시도 수 (회차당 AI별 예산 안) */
   paidRetries: number;
-  /** perplexity 지역값 없이 재시도 수 (예산 밖) */
+  /** perplexity 지역값 없이 재시도 수 (예산 밖) — 2026-09-25 폐지 뒤 새 회차는 늘 0 */
   countryFallbacks: number;
   byProvider: Record<
     string,
@@ -503,9 +503,9 @@ export const collectionItems = pgTable(
     promptText: text("prompt_text").notNull(),
     provider: text("provider").notNull(),
     seq: integer("seq").notNull(),
-    /** 스케줄 geolocation ?? "KR" (지금 수집과 같음) */
+    /** 스케줄 geolocation ?? "KR". 단 Perplexity 는 NULL — 2026-09-25부터 국가를 요청하지 않는다 */
     countryRequested: text("country_requested"),
-    /** perplexity 지역값 재시도 뒤 true — 이후 이 항목은 지역값 없이 보낸다 */
+    /** (2026-09-25부터 쓰지 않음 — 옛 기록) perplexity 지역값 재시도 뒤 true 였다 */
     dropCountry: boolean("drop_country").notNull().default(false),
     /** queued | submitting | submitted | saved | duplicate | failed | cancelled */
     status: text("status").notNull(),
@@ -517,7 +517,7 @@ export const collectionItems = pgTable(
     unknownSubmits: integer("unknown_submits").notNull().default(0),
     /** 일반 재시도 0/1 */
     paidRetries: integer("paid_retries").notNull().default(0),
-    /** perplexity 지역값 없이 재시도 0/1 (예산 밖) */
+    /** (2026-09-25부터 쓰지 않음 — 옛 기록) perplexity 지역값 없이 재시도 0/1 (예산 밖) */
     countryFallbacks: integer("country_fallbacks").notNull().default(0),
     /** 429 재대기 */
     freeRequeues: integer("free_requeues").notNull().default(0),
@@ -548,8 +548,9 @@ export const collectionItems = pgTable(
 );
 
 /**
- * 엔진 공용 작은 상태 — 키: perplexity_country_failed_at · auth_pause_until · rate_pause:<provider>
- * · daily_rollup · process. 재시작해도 유지돼야 하는 값만 둔다(예전엔 메모리에 있어 배포마다 사라졌다).
+ * 엔진 공용 작은 상태 — 키: auth_pause_until · rate_pause:<provider> · daily_rollup · process
+ * (perplexity_country_failed_at 은 2026-09-25부터 쓰지 않는다 — 남은 행은 무해).
+ * 재시작해도 유지돼야 하는 값만 둔다(예전엔 메모리에 있어 배포마다 사라졌다).
  */
 export const collectorState = pgTable("collector_state", {
   key: text("key").primaryKey(),

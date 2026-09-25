@@ -116,8 +116,6 @@ export const HARVEST_SOFT_BUDGET_MS = 45_000;
 export const POLL_BATCH_LIMIT = 60;
 export const POLL_CONCURRENCY = 8;
 export const DOWNLOAD_CONCURRENCY = 3;
-/** perplexity 지역값 실패 뒤 지역값 없이 보내는 기간 (지금 값 유지) */
-export const PERPLEXITY_COUNTRY_SUPPRESS_MS = 6 * 3600_000;
 /** 인증 실패 시 전체 제출 멈춤 */
 export const AUTH_PAUSE_MS = 10 * 60_000;
 /** cron 해석 실패 시 다음 확인까지 */

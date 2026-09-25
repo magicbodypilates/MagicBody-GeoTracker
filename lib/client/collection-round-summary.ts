@@ -34,6 +34,8 @@ export function reasonLabel(code: string): string {
       return "응답 지연";
     case "PARSE_FAILURE":
       return "응답 형식 이상";
+    case "EMPTY_ANSWER":
+      return "내용 없는 답";
     case "SNAPSHOT_FAILED":
     case "SNAPSHOT_MISSING":
     case "SNAPSHOT_CANCELED":

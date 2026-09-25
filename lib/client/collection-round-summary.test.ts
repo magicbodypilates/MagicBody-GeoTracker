@@ -33,6 +33,7 @@ describe("reasonLabel — 원인 코드는 쉬운 말로만", () => {
     ["CRAWLER_ERROR", "수집 오류"],
     ["TIMEOUT", "응답 지연"],
     ["PARSE_FAILURE", "응답 형식 이상"],
+    ["EMPTY_ANSWER", "내용 없는 답"],
     ["SNAPSHOT_FAILED", "수집 실패"],
     ["SNAPSHOT_MISSING", "수집 실패"],
     ["SNAPSHOT_CANCELED", "수집 실패"],

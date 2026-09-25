@@ -1105,4 +1105,65 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(legacyRuns[0].citedSocialDomains).toEqual(["instagram.com"]);
     vi.mocked(llm.classifySentiment).mockResolvedValue(null);
   }, 60_000);
+  it("t · 내용 없는 답(질문 되돌림·별표만) — 예전 경로·새 경로 모두 저장하지 않고 EMPTY_ANSWER 로 남긴다", async () => {
+    // 2026-09-25 결함 D1. chatgpt 는 별표만, perplexity 는 보낸 질문을 그대로 돌려준다.
+    const emptyFor = (provider: string, prompt: string) => [
+      { answer_text: provider === "chatgpt" ? "★ ★ ★ ★ ★" : prompt },
+    ];
+    const providers = ["chatgpt", "perplexity"];
+    const texts = promptTexts("t", 2);
+
+    // ── 예전 경로: runTick → runAiScraper(가짜 fetch 200) → 던짐 → 공급자 실패로만 기록
+    vi.stubEnv("BRIGHT_DATA_KEY", "fake-int-test-key");
+    const bd = await import("./brightdata-scraper");
+    bd.clearScrapeCache();
+    let scrapeCalls = 0;
+    fetchHandler = async (url, init) => {
+      if (!url.startsWith("https://api.brightdata.com/datasets/v3/scrape")) return unexpectedFetch(url, init);
+      scrapeCalls++;
+      const body = JSON.parse(String(init?.body)) as { input: { url: string; prompt: string }[] };
+      const rec = body.input[0];
+      const provider = rec.url.includes("chatgpt") ? "chatgpt" : "perplexity";
+      return new Response(JSON.stringify(emptyFor(provider, rec.prompt)), { status: 200 });
+    };
+    const wsLegacy = await makeWorkspace("t-legacy");
+    await makePrompts(wsLegacy.id, texts);
+    const sLegacy = await makeSchedule(wsLegacy.id, { providers, nextRunAt: new Date(Date.now() - 60_000) });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tick = await runner.runTick();
+    errSpy.mockRestore();
+    expect(tick.errors).toEqual([]);
+    const legacyFailures = tick.providerFailures.filter((f) => f.workspaceId === wsLegacy.id);
+    expect(legacyFailures).toHaveLength(4);
+    for (const f of legacyFailures) {
+      expect(f.reason.startsWith("[EMPTY_ANSWER]")).toBe(true);
+      expect(f.reason).not.toContain(f.prompt); // 오류 문구에 질문 원문이 없다
+    }
+    expect(scrapeCalls).toBe(4); // perplexity 지역값 재시도 대상이 아니다(크롤러 오류가 아님)
+    expect(await runsOf(wsLegacy.id)).toHaveLength(0);
+    await dbm.db.update(dbm.schema.schedules).set({ active: false }).where(eq(dbm.schema.schedules.id, sLegacy.id));
+    fetchHandler = unexpectedFetch;
+    vi.unstubAllEnvs();
+
+    // ── 새 경로: 보내기 줄기 → 200 바로 결과 → 판정에서 실패 → 재시도 규칙(20% 예산) 적용
+    const wsQueue = await makeWorkspace("t-queue");
+    await makePrompts(wsQueue.id, texts);
+    await makeSchedule(wsQueue.id, { providers, nextRunAt: new Date(Date.now() - 60_000) });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) => fake.inline(req, emptyFor(req.provider, req.prompt));
+    const d = await engine.runDispatchPass(new Date(), deps(fake));
+    expect(d.errors).toEqual([]);
+    expect(d.stats.savedInline).toBe(0);
+    const queueItems = await itemsOfWorkspace(wsQueue.id);
+    expect(queueItems).toHaveLength(4);
+    for (const item of queueItems) {
+      expect(item.lastErrorCode).toBe("EMPTY_ANSWER");
+      expect(item.runId).toBeNull();
+      expect(item.lastError ?? "").not.toContain(item.promptText);
+    }
+    // AI 별 항목 2건 → 재시도 예산 1 → AI 마다 1건은 다시 보내려고 대기, 1건은 실패로 끝난다.
+    expect(queueItems.filter((i) => i.status === "queued")).toHaveLength(2);
+    expect(queueItems.filter((i) => i.status === "failed")).toHaveLength(2);
+    expect(await runsOf(wsQueue.id)).toHaveLength(0);
+  }, 60_000);
 });

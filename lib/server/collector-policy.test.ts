@@ -42,6 +42,7 @@ describe("isPaidRetryable — 원인 코드별 판정", () => {
     "SNAPSHOT_MISSING",
     "NOT_READY",
     "PARSE_FAILURE",
+    "EMPTY_ANSWER",
   ];
   const notRetryable: CollectorErrorCode[] = [
     "TIMEOUT",
@@ -70,6 +71,12 @@ describe("decideAfterFailure", () => {
       delayMs: 10 * 60_000,
     });
     expect(decideAfterFailure({ ...base, code: "PARSE_FAILURE" })).toEqual({
+      action: "retry",
+      kind: "paid_retry",
+      delayMs: 2 * 60_000,
+    });
+    // 2026-09-25 D1 — 내용 없는 답도 PARSE_FAILURE 와 같은 규칙(2분 뒤 · 20% 예산 안)
+    expect(decideAfterFailure({ ...base, code: "EMPTY_ANSWER" })).toEqual({
       action: "retry",
       kind: "paid_retry",
       delayMs: 2 * 60_000,

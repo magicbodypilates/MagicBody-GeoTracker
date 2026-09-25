@@ -26,11 +26,15 @@ const PAID_RETRYABLE_NON_CRAWLER: ReadonlySet<string> = new Set([
   "SNAPSHOT_MISSING",
   "NOT_READY",
   "PARSE_FAILURE",
+  // 2026-09-25 D1 — 질문 되돌림·별표만 온 답. PARSE_FAILURE 와 같은 성격(수집기가 답 영역을 제대로
+  // 못 읽은 일회성 이상)이라 같은 규칙으로 20% 예산 안에서 1회 다시 보낸다. 예산이 곧 비용 상한이다.
+  "EMPTY_ANSWER",
 ]);
 
 /**
  * 돈을 한 번 더 들여 다시 보낼 가치가 있는 원인인지 — 크롤러 계열 4종 · SNAPSHOT_FAILED ·
- * SNAPSHOT_MISSING · NOT_READY · PARSE_FAILURE. TIMEOUT 은 이미 오래 돌았으니 재시도하지 않는다.
+ * SNAPSHOT_MISSING · NOT_READY · PARSE_FAILURE · EMPTY_ANSWER. TIMEOUT 은 이미 오래 돌았으니
+ * 재시도하지 않는다.
  */
 export function isPaidRetryable(code: CollectorErrorCode): boolean {
   return isCrawlerCode(code) || PAID_RETRYABLE_NON_CRAWLER.has(code);

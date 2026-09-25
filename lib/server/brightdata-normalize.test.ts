@@ -12,8 +12,10 @@ import {
   ScrapeFailure,
   classifyCrawlerError,
   clearScrapeCache,
+  detectNonAnswer,
   isCrawlerCode,
   isKnownProvider,
+  meaningfulText,
   normalizeScrapePayload,
   redactErrorText,
   runAiScraper,
@@ -330,5 +332,124 @@ describe("runAiScraper — 동작 불변", () => {
     await expect(runAiScraper({ provider: "gemini", prompt: `${PROMPT} 2` })).rejects.toThrow(
       "[PARSE_FAILURE] 답변 필드를 찾지 못했다 (provider=gemini)",
     );
+  });
+});
+
+/**
+ * 내용 없는 답(EMPTY_ANSWER) — 2026-09-25 결함 D1.
+ * 운영에서 질문 문장만 돌아온 답·별표만 온 답이 정상 답으로 저장돼 통계를 끌어내렸다.
+ * 질문·답은 전부 지어낸 일반 문장이다(PUBLIC 저장소).
+ */
+describe("detectNonAnswer — 실제 답이 아닌 경우만 가린다", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+
+  it("질문을 그대로 되돌림 → prompt_echo", () => {
+    expect(detectNonAnswer(Q, Q)?.reason).toBe("prompt_echo");
+  });
+
+  it("공백·문장부호·따옴표 차이와 짧은 머리말은 걷어내고 본다 → prompt_echo", () => {
+    expect(detectNonAnswer(`"${Q}?"`, Q)?.reason).toBe("prompt_echo");
+    expect(detectNonAnswer(`질문: ${Q.replace(/ /g, "")} …`, Q)?.reason).toBe("prompt_echo");
+    expect(detectNonAnswer(`${Q}\n${Q}`, Q)?.reason).toBe("prompt_echo"); // 두 번 되돌려도 같다
+  });
+
+  it("영문 질문 되돌림은 대소문자 차이를 무시한다 → prompt_echo", () => {
+    const en = "Which fitness studio is best for beginners?";
+    expect(detectNonAnswer("which Fitness Studio is best for beginners", en)?.reason).toBe("prompt_echo");
+  });
+
+  it("별표·기호만 → too_few_chars (의미 문자 0)", () => {
+    expect(detectNonAnswer("★ ★ ★ ★ ★", Q)).toEqual({ reason: "too_few_chars", meaningfulChars: 0 });
+  });
+
+  it("경계 — 질문 뒤 의미 문자 10자까지는 되돌림, 11자부터는 통과", () => {
+    const ten = "가나다라마바사아자차";
+    expect(detectNonAnswer(`${Q} ${ten}`, Q)?.reason).toBe("prompt_echo");
+    expect(detectNonAnswer(`${Q} ${ten}카`, Q)).toBeNull();
+  });
+
+  it("경계 — 의미 문자 19자는 부족, 20자는 통과", () => {
+    const nineteen = "가".repeat(19);
+    expect(detectNonAnswer(`${nineteen}!!`, "무관한 질문")?.reason).toBe("too_few_chars");
+    expect(detectNonAnswer(`${nineteen}나.`, "무관한 질문")).toBeNull();
+  });
+
+  it("오탈락 금지 — 짧지만 내용 있는 한국어 한 문장 답(100자 안팎)은 통과", () => {
+    const short =
+      "나이 제한은 거의 없습니다. 기초 체력이 약해도 강사가 동작 강도를 조절해 주므로 처음 시작하는 분도 부담 없이 따라갈 수 있고, 첫 달은 주 2회를 권합니다.";
+    expect(short.length).toBeGreaterThan(80);
+    expect(detectNonAnswer(short, Q)).toBeNull();
+  });
+
+  it("오탈락 금지 — 짧은 영문 답은 통과", () => {
+    expect(detectNonAnswer("Yes, most studios accept beginners of any age.", "Can beginners join?")).toBeNull();
+  });
+
+  it("오탈락 금지 — 질문을 인용한 뒤 긴 내용이 이어지는 답은 통과", () => {
+    const quoted = `"${Q}" 라는 질문에 답하면, 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. 체험 수업을 먼저 들어 보세요.`;
+    expect(detectNonAnswer(quoted, Q)).toBeNull();
+  });
+
+  it("다른 문자로 쓴 정상 답을 의미 문자 0 으로 버리지 않는다", () => {
+    expect(detectNonAnswer("初心者でも安心して通えるスタジオを選ぶのがおすすめです。", Q)).toBeNull();
+  });
+
+  it("질문이 비어 있으면 되돌림 판정을 하지 않고 글자 수만 본다", () => {
+    expect(detectNonAnswer("충분히 긴 정상 답변 문장이 여기에 이어집니다 정말로", "")).toBeNull();
+    expect(meaningfulText(" ★ A-b 1 ")).toBe("ab1");
+  });
+});
+
+describe("normalizeScrapePayload — 내용 없는 답(EMPTY_ANSWER)", () => {
+  it("질문 되돌림 → EMPTY_ANSWER · 문구에 길이·사유만(답·질문 원문 없음)", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({ provider: "perplexity", prompt: PROMPT, payload: [{ answer_text: PROMPT }] }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+    expect(f.message).toBe(
+      `[EMPTY_ANSWER] 실제 답이 아닌 응답 (provider=perplexity) — 질문 되돌림 · 답 길이 ${PROMPT.length}자 · 의미 문자 ${meaningfulText(PROMPT).length}자`,
+    );
+    expect(f.message).not.toContain("예시 교육기관");
+    expect(isCrawlerCode(f.code)).toBe(false); // perplexity 지역값 재시도 대상이 아니다
+  });
+
+  it("별표만 → EMPTY_ANSWER(의미 문자 부족)", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({ provider: "chatgpt", prompt: PROMPT, payload: [{ answer_text: "★ ★ ★ ★ ★" }] }),
+    );
+    expect(f.code).toBe("EMPTY_ANSWER");
+    expect(f.message).toBe("[EMPTY_ANSWER] 실제 답이 아닌 응답 (provider=chatgpt) — 의미 문자 부족 · 답 길이 9자 · 의미 문자 0자");
+  });
+
+  it("답 필드가 아예 없으면 여전히 PARSE_FAILURE 가 먼저다(판정 순서 불변)", () => {
+    const f = failureOf(() => normalizeScrapePayload({ provider: "gemini", prompt: PROMPT, payload: [] }));
+    expect(f.code).toBe("PARSE_FAILURE");
+  });
+});
+
+describe("runAiScraper — 내용 없는 답은 던지고 캐시에 남기지 않는다", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("BRIGHT_DATA_KEY", "fake-test-key-for-empty-answer");
+    clearScrapeCache();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    clearScrapeCache();
+  });
+
+  it("되돌림 답 → [EMPTY_ANSWER] 로 던지고, 같은 요청을 다시 하면 캐시가 아니라 새로 받는다", async () => {
+    const respond = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+    fetchMock
+      .mockResolvedValueOnce(respond([{ answer_text: PROMPT }]))
+      .mockResolvedValueOnce(respond([{ answer_text: ANSWER }]));
+    await expect(runAiScraper({ provider: "perplexity", prompt: PROMPT })).rejects.toThrow("[EMPTY_ANSWER]");
+    const r = await runAiScraper({ provider: "perplexity", prompt: PROMPT });
+    expect(r.answer).toBe(ANSWER);
+    expect(r.cached).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -505,6 +505,65 @@ export function isAnswerLikeString(value: string): boolean {
   return true;
 }
 
+/**
+ * § 내용 없는 답 판정 (2026-09-25 결함 D1)
+ *
+ * 운영 실측 — Perplexity 가 답 없이 보낸 질문 문장만 돌려준 기록(21～35자)과 ChatGPT 가 별표
+ * 다섯 개(`★ ★ ★ ★ ★`, 9자)만 준 기록이 정상 답으로 저장돼 "브랜드 언급 0 · 인용 0"으로 통계를
+ * 끌어내렸다. normalizeAnswer 는 1차 후보 필드가 비어 있지만 않으면 그대로 돌려주고, 저장 전
+ * 검사는 PARSE_FAILURE_MARKER 하나뿐이라 이런 값이 그대로 통과했다.
+ *
+ * "의미 문자" = 유니코드 글자(\p{L})·숫자(\p{N}). 공백·문장부호·따옴표·기호(★ 등)·이모지는 뺀다.
+ * 한글·영문·숫자만 세지 않고 글자 전체를 세는 이유 — 다른 문자로 쓴 정상 답을 "의미 문자 0"으로
+ * 잘못 버리지 않기 위해서다(오탈락 방지가 우선). NFKC 로 전각·호환 문자를 먼저 맞춘다.
+ */
+const NON_MEANINGFUL_CHAR_RE = /[^\p{L}\p{N}]/gu;
+/** 이보다 의미 문자가 적은 답은 답이 아니다(별표·기호만 있는 답). */
+export const MIN_MEANINGFUL_ANSWER_CHARS = 20;
+/** 질문을 되돌린 답에 덧붙어도 되는 의미 문자 수 상한("질문:" 같은 머리말·끝 기호 흡수). */
+export const PROMPT_ECHO_EXTRA_MAX_CHARS = 10;
+
+export type NonAnswerReason = "prompt_echo" | "too_few_chars";
+
+/** 대소문자·전각 차이를 맞추고 의미 문자만 남긴다. */
+export function meaningfulText(value: string): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(NON_MEANINGFUL_CHAR_RE, "");
+}
+
+/**
+ * 추출한 답이 "실제 답이 아닌" 경우를 가린다. 아니면 null.
+ *   (a) prompt_echo  — 의미 문자만 남긴 답이 보낸 질문과 같거나, 질문을 담고 있으면서 질문을 뺀
+ *                      나머지 의미 문자가 PROMPT_ECHO_EXTRA_MAX_CHARS 이하.
+ *   (b) too_few_chars — 답의 의미 문자가 MIN_MEANINGFUL_ANSWER_CHARS 미만.
+ * 질문을 인용한 뒤 내용이 길게 이어지는 답, 짧아도 내용이 있는 한 문장 답은 통과한다.
+ */
+export function detectNonAnswer(
+  answer: string,
+  prompt: string,
+): { reason: NonAnswerReason; meaningfulChars: number } | null {
+  const a = meaningfulText(answer);
+  const p = meaningfulText(prompt);
+  if (p.length > 0 && a.includes(p)) {
+    // 질문이 여러 번 되돌아와도(질문+질문) 나머지만 센다.
+    const rest = a.split(p).join("");
+    if (rest.length <= PROMPT_ECHO_EXTRA_MAX_CHARS) {
+      return { reason: "prompt_echo", meaningfulChars: a.length };
+    }
+  }
+  if (a.length < MIN_MEANINGFUL_ANSWER_CHARS) {
+    return { reason: "too_few_chars", meaningfulChars: a.length };
+  }
+  return null;
+}
+
+const NON_ANSWER_REASON_TEXT: Record<NonAnswerReason, string> = {
+  prompt_echo: "질문 되돌림",
+  too_few_chars: "의미 문자 부족",
+};
+
 export function normalizeAnswer(rawRecord: Record<string, unknown>) {
   const answerCandidates = ANSWER_CANDIDATE_KEYS.map((key) => rawRecord[key]);
 
@@ -800,6 +859,7 @@ export type ScrapeErrorCode =
   | CrawlerErrorCode
   | "NOT_READY"
   | "PARSE_FAILURE"
+  | "EMPTY_ANSWER" // 답 필드는 있으나 실제 답이 아님(질문 되돌림 · 의미 문자 부족) — 2026-09-25 D1
   | "SNAPSHOT_FAILED"
   | "SNAPSHOT_CANCELED"
   | "SNAPSHOT_MISSING"
@@ -1130,8 +1190,13 @@ function toClassifyText(value: unknown): string {
 /**
  * 받은 결과(payload) → 정규화된 수집 결과. runAiScraper 의 "payload 를 얻은 뒤" 블록을 순서
  * 그대로 옮긴 것이다: 첫 레코드 선택 → not-ready 감지 → 크롤러 오류(답변 필드 없음 + error/
- * error_code) → answer_html 제거 → normalizeAnswer → 파싱 실패 → 인용 추출 → 결과 조립.
- * 캐시 기록·perplexity 지역값 재시도는 넣지 않는다(호출부 몫).
+ * error_code) → answer_html 제거 → normalizeAnswer → 파싱 실패 → 내용 없는 답(EMPTY_ANSWER,
+ * 2026-09-25 추가) → 인용 추출 → 결과 조립.
+ * 캐시 기록·perplexity 지역값 재시도는 넣지 않는다(호출부 몫). 판정은 전부 여기서 던지므로
+ * 호출부의 캐시 기록(runAiScraper)은 판정을 통과한 결과만 받는다.
+ *
+ * prompt 는 **Bright Data 에 실제로 보낸 질문 문장**이어야 한다 — 질문 되돌림 판정에 쓴다
+ * (runAiScraper = request.prompt, 자동 수집 엔진 = collection_items.prompt_text, 둘 다 보낸 값 그대로).
  *
  * 옮기면서 달라진 것 두 가지(계획 v2 §4):
  *   - 크롤러 오류 코드는 classifyCrawlerError 로 세분한다. 메시지 접두사는 그대로 "[CRAWLER_ERROR] …".
@@ -1212,6 +1277,17 @@ export function normalizeScrapePayload(args: {
     throw new ScrapeFailure(
       "PARSE_FAILURE",
       `[PARSE_FAILURE] 답변 필드를 찾지 못했다 (provider=${parsed}) — ${answer}`,
+    );
+  }
+
+  // 내용 없는 답은 run 으로 저장하지 않는다 (2026-09-25 결함 D1 — 위 detectNonAnswer 주석).
+  // 오류 문구에는 길이·사유만 담는다. 답·질문 원문은 넣지 않는다(DB last_error·로그로 흘러간다).
+  const nonAnswer = detectNonAnswer(answer, prompt);
+  if (nonAnswer) {
+    throw new ScrapeFailure(
+      "EMPTY_ANSWER",
+      `[EMPTY_ANSWER] 실제 답이 아닌 응답 (provider=${parsed}) — ${NON_ANSWER_REASON_TEXT[nonAnswer.reason]} · ` +
+        `답 길이 ${answer.length}자 · 의미 문자 ${nonAnswer.meaningfulChars}자`,
     );
   }
 

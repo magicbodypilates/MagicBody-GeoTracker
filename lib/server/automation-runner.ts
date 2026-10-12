@@ -20,7 +20,7 @@
  * Worker 컨테이너는 이 함수를 직접 임포트하지 않고 HTTP 로 트리거.
  */
 
-import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { ExtractTablesWithRelations } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
@@ -37,7 +37,8 @@ import {
 import type { Citation } from "@/components/dashboard/types";
 import type { Schedule, Prompt, BrandConfig, ScoringSnapshot } from "@/drizzle/schema";
 import { buildCollectionBrandTerms } from "@/lib/server/branded-query-filter";
-import { formatIntervalSlot } from "@/lib/server/collector-schedule";
+import { formatIntervalSlot, kstDateString } from "@/lib/server/collector-schedule";
+import { shouldLimitPerplexityDaily } from "@/lib/server/perplexity-openrouter";
 import {
   calcVisibilityFromText,
   SCORE_SETS,
@@ -556,6 +557,35 @@ export async function findAutoRunId(
 }
 
 /**
+ * 같은 한국 날짜에 이미 저장된 자동 결과가 있으면 그 run id — "같은 질문 하루 1회" (계획
+ * geotracker-pplx-openrouter-261012 v2 §3). 시간대(interval_slot)와 무관하게 같은 워크스페이스·질문·AI 의
+ * 자동 결과(is_auto)가 오늘(KST 자정 이후) 있으면 다시 묻지 않는다(무료 건너뜀). 보관 행도 센다.
+ * 호출 횟수를 보장하는 장치가 아니다 — 그건 하루 호출 상한이 맡는다(perplexity-openrouter.ts).
+ * 적용 여부는 호출부가 shouldLimitPerplexityDaily 로 정한다(Perplexity · OpenRouter 경로 한정).
+ */
+export async function findSameKstDayAutoRunId(
+  t: Pick<AutoRunTarget, "workspaceId" | "promptText" | "provider">,
+  now: Date,
+  dbOrTx: DbOrTx = db,
+): Promise<string | null> {
+  const kstMidnight = new Date(Date.parse(`${kstDateString(now)}T00:00:00+09:00`));
+  const [existing] = await dbOrTx
+    .select({ id: schema.runs.id })
+    .from(schema.runs)
+    .where(
+      and(
+        eq(schema.runs.workspaceId, t.workspaceId),
+        eq(schema.runs.promptText, t.promptText),
+        eq(schema.runs.provider, t.provider),
+        eq(schema.runs.isAuto, true),
+        gte(schema.runs.createdAt, kstMidnight),
+      ),
+    )
+    .limit(1);
+  return existing?.id ?? null;
+}
+
+/**
  * 수집 결과 → runs INSERT 값. 옮기기 전 runOneProviderForPrompt 의 "runAiScraper 결과 이후부터
  * INSERT values 까지" 블록 그대로다: 언급 → 감성(+LLM) → 브랜드 검색 여부 → 본문 URL →
  * resolveCitationJudgment → calcVisibilityFull → values.
@@ -765,6 +795,14 @@ async function runOneProviderForPrompt(args: {
     if (existingId) {
       return { executedRuns: 0, skippedDuplicates: 1, failure: null };
     }
+    // 같은 질문 하루 1회(Perplexity · OpenRouter 시험 한정) — 다른 시간대에 오늘 이미 받은 결과가 있으면
+    // 다시 묻지 않는다(무료). Bright Data 경로·다른 AI 는 영향 없음(계획 geotracker-pplx-openrouter-261012 v2 §3).
+    if (shouldLimitPerplexityDaily(provider, process.env)) {
+      const sameDayId = await findSameKstDayAutoRunId(target, args.now);
+      if (sameDayId) {
+        return { executedRuns: 0, skippedDuplicates: 1, failure: null };
+      }
+    }
 
     const started = Date.now();
     const result = await runAiScraper({
@@ -772,6 +810,8 @@ async function runOneProviderForPrompt(args: {
       prompt: prompt.text,
       // Perplexity 는 runAiScraper 가 국가를 뺀다(§ PERPLEXITY_NO_COUNTRY) — 여기 KR 은 다른 AI 용이다.
       country: sched.geolocation ?? "KR",
+      // 자동 수집 — OpenRouter Perplexity 경로의 하루 상한을 자동 수집 몫으로 센다(수동 수집과 분리).
+      purpose: "auto",
     });
 
     const executionDurationMs = Date.now() - started;

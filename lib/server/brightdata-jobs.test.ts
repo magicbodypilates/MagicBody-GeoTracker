@@ -15,6 +15,9 @@ import {
   parseRetryAfterMs,
   submitScrape,
 } from "./brightdata-scraper";
+// OpenRouter Perplexity 경로 추가 테스트용(계획 geotracker-pplx-openrouter-261012 v2 §8-2 — 파일 끝 묶음)
+import { ScrapeFailure, clearScrapeCache, redactErrorText, runAiScraper } from "./brightdata-scraper";
+import { __resetOpenRouterStateForTest, type DailyCapStore } from "./perplexity-openrouter";
 
 /** 테스트 전용 가짜 키 — 오류 문구에 새어 나가지 않는지 확인하는 표식으로도 쓴다. */
 const FAKE_KEY = "fake-test-key-0123456789abcdefghijklmnopqrstuvwxyz";
@@ -300,5 +303,257 @@ describe("parseRetryAfterMs", () => {
     expect(parseRetryAfterMs(null, NOW)).toBeNull();
     expect(parseRetryAfterMs("", NOW)).toBeNull();
     expect(parseRetryAfterMs("soon", NOW)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------
+ * OpenRouter Perplexity 경로 (계획 geotracker-pplx-openrouter-261012 v2 §1-3 · §8-2)
+ * 설정 PERPLEXITY_BACKEND=openrouter 일 때 Perplexity 만 OpenRouter 로 간다. 하루 상한 저장소는 메모리 가짜.
+ * ------------------------------------------------------------------ */
+describe("OpenRouter Perplexity 경로 — 설정 PERPLEXITY_BACKEND=openrouter", () => {
+  const OR_KEY = "or-jobs-fake-key-0001";
+  const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
+  const OR_ANSWER = "가짜 답변 첫 문장입니다 [1]. 둘째 문장은 예시 기관의 교육 과정을 소개합니다 [3].";
+  const orAnn = (url: string, title: string) => ({ type: "url_citation", url_citation: { url, title } });
+  const orOk = (content = OR_ANSWER) => ({
+    model: "perplexity/sonar",
+    provider: "Perplexity",
+    choices: [
+      {
+        finish_reason: "stop",
+        message: {
+          content,
+          annotations: [
+            orAnn("https://example-a.test/one", "가짜 제목 하나"),
+            orAnn("https://example-b.test/two", "본문이 참조하지 않은 검색 결과"),
+            orAnn("https://example-c.test/three", "가짜 제목 셋"),
+          ],
+        },
+      },
+    ],
+    usage: { cost: 0.003 },
+  });
+  const orErr = (status: number) => ({ error: { code: status, message: "가짜 오류" } });
+  const BD_PAYLOAD = [{ answer_text: "충분히 긴 테스트 답변 문장입니다. 예시 기관 소개 — Bright Data 경로." }];
+
+  let capLeft = 100;
+  const store: DailyCapStore = {
+    reserve: async () => (capLeft-- > 0 ? 1 : null),
+    addCost: async () => {},
+  };
+
+  beforeEach(() => {
+    capLeft = 100;
+    __resetOpenRouterStateForTest({ store });
+    clearScrapeCache();
+    vi.stubEnv("OPENROUTER_KEY", OR_KEY);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    __resetOpenRouterStateForTest();
+    clearScrapeCache();
+  });
+
+  it("submitScrape(perplexity) → OpenRouter 로 보내고 200 즉시 결과(kind:payload) · Bright Data 레코드 모양", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    fetchMock.mockImplementation(async () => respond(200, orOk()));
+    const r = await submitScrape({ provider: "perplexity", prompt: PROMPT, country: "KR" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(OR_URL);
+    expect(r.ok && r.kind).toBe("payload");
+    if (!r.ok || r.kind !== "payload") return;
+    const [rec] = r.payload as { answer_text: string; citations: { url: string }[]; backend_meta: Record<string, unknown> }[];
+    expect(rec.answer_text).toBe(OR_ANSWER);
+    expect(rec.citations.map((c) => c.url)).toEqual(["https://example-a.test/one", "https://example-c.test/three"]);
+    expect(rec.backend_meta).toMatchObject({ backend: "openrouter", model: "perplexity/sonar", annotationsTotal: 3, referenced: 2 });
+  });
+
+  it("같은 설정에서도 다른 AI(chatgpt)는 Bright Data 로 간다", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    fetchMock.mockImplementation(async () => respond(200, BD_PAYLOAD));
+    await submitScrape({ provider: "chatgpt", prompt: PROMPT });
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/^https:\/\/api\.brightdata\.com\/datasets\/v3\/scrape\?/);
+  });
+
+  it.each([undefined, "", "open-router", "brightdata"])("설정 %j → Perplexity 도 Bright Data (회귀)", async (value) => {
+    if (value !== undefined) vi.stubEnv("PERPLEXITY_BACKEND", value);
+    fetchMock.mockImplementation(async () => respond(200, BD_PAYLOAD));
+    const r = await submitScrape({ provider: "perplexity", prompt: PROMPT });
+    expect(String(fetchMock.mock.calls[0][0])).toMatch(/^https:\/\/api\.brightdata\.com\//);
+    expect(r).toEqual({ ok: true, kind: "payload", payload: BD_PAYLOAD });
+  });
+
+  it("BRIGHT_DATA_KEY 가 없어도 OpenRouter 경로는 동작한다", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    vi.stubEnv("BRIGHT_DATA_KEY", "");
+    fetchMock.mockImplementation(async () => respond(200, orOk()));
+    const r = await submitScrape({ provider: "perplexity", prompt: PROMPT });
+    expect(r).toMatchObject({ ok: true, kind: "payload" });
+  });
+
+  it("실패 코드는 모듈 값 그대로 — 401→BACKEND_BLOCKED · 429→RATE_LIMITED · 상한→DAILY_CAP · 인증 오류 코드 없음", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    fetchMock.mockImplementationOnce(async () => respond(401, orErr(401)));
+    expect(await submitScrape({ provider: "perplexity", prompt: PROMPT })).toMatchObject({ ok: false, code: "BACKEND_BLOCKED" });
+
+    __resetOpenRouterStateForTest({ store });
+    fetchMock.mockImplementationOnce(async () => respond(429, orErr(429), { "Retry-After": "20" }));
+    expect(await submitScrape({ provider: "perplexity", prompt: PROMPT })).toMatchObject({
+      ok: false,
+      code: "RATE_LIMITED",
+      retryAfterMs: 20_000,
+    });
+
+    __resetOpenRouterStateForTest({ store });
+    capLeft = 0;
+    const calls = fetchMock.mock.calls.length;
+    expect(await submitScrape({ provider: "perplexity", prompt: PROMPT })).toMatchObject({ ok: false, code: "DAILY_CAP" });
+    expect(fetchMock.mock.calls.length).toBe(calls); // 상한에 걸리면 요청하지 않는다
+  });
+
+  it("실패 문구에 OpenRouter 키가 남지 않는다", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    fetchMock.mockImplementationOnce(async () =>
+      respond(500, { error: { code: 500, message: `echo ${OR_KEY} and Bearer ${OR_KEY}` } }),
+    );
+    const r = await submitScrape({ provider: "perplexity", prompt: PROMPT });
+    if (r.ok) throw new Error("실패여야 한다");
+    expect(r.code).toBe("SUBMIT_UNKNOWN");
+    expect(r.message).not.toContain(OR_KEY);
+  });
+
+  it("runAiScraper — OpenRouter 결과는 본문에서 참조한 인용만 저장 형식으로 돌려준다", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    fetchMock.mockImplementation(async () => respond(200, orOk()));
+    const res = await runAiScraper({ provider: "perplexity", prompt: PROMPT, country: "KR" });
+    expect(res.answer).toBe(OR_ANSWER);
+    expect(res.cached).toBe(false);
+    expect(res.citations).toEqual([
+      { url: "https://example-a.test/one", domain: "example-a.test", title: "가짜 제목 하나", description: "" },
+      { url: "https://example-c.test/three", domain: "example-c.test", title: "가짜 제목 셋", description: "" },
+    ]);
+    expect(res.sources).toEqual(["https://example-a.test/one", "https://example-c.test/three"]);
+  });
+
+  it("runAiScraper — 실패는 원인 코드가 붙은 ScrapeFailure(문구에 키 없음)", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    fetchMock.mockImplementationOnce(async () => respond(402, { error: { code: 402, message: `no credits ${OR_KEY}` } }));
+    const err = await runAiScraper({ provider: "perplexity", prompt: PROMPT }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ScrapeFailure);
+    expect((err as ScrapeFailure).code).toBe("BACKEND_BLOCKED");
+    expect((err as ScrapeFailure).message.startsWith("[BACKEND_BLOCKED] OpenRouter Perplexity 수집 실패:")).toBe(true);
+    expect((err as ScrapeFailure).message).not.toContain(OR_KEY);
+  });
+
+  it("캐시 키에 수집 방식이 들어간다 — 방식을 바꾸면 20분 캐시가 섞이지 않는다", async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).startsWith(OR_URL) ? respond(200, orOk()) : respond(200, BD_PAYLOAD),
+    );
+    const viaBd = await runAiScraper({ provider: "perplexity", prompt: PROMPT });
+    expect(viaBd.answer).toBe(BD_PAYLOAD[0].answer_text);
+
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    const viaOr = await runAiScraper({ provider: "perplexity", prompt: PROMPT });
+    expect(viaOr.cached).toBe(false);
+    expect(viaOr.answer).toBe(OR_ANSWER);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    vi.stubEnv("PERPLEXITY_BACKEND", "");
+    const again = await runAiScraper({ provider: "perplexity", prompt: PROMPT });
+    expect(again.cached).toBe(true);
+    expect(again.answer).toBe(BD_PAYLOAD[0].answer_text);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("redactErrorText 가 OpenRouter 키 두 개(공백 정리 후 8자 이상)를 가린다", () => {
+    const shared = "or-shared-key-12345";
+    const dedicated = "or-dedicated-key-6789";
+    vi.stubEnv("OPENROUTER_KEY", ` ${shared} `);
+    vi.stubEnv("PERPLEXITY_OPENROUTER_KEY", dedicated);
+    const out = redactErrorText(`upstream said ${shared} / ${dedicated}`);
+    expect(out).not.toContain(shared);
+    expect(out).not.toContain(dedicated);
+    expect(out).toContain("[가림]");
+  });
+});
+
+/* ------------------------------------------------------------------
+ * 1회차 검수 반영 — S-4(수동·자동 하루 상한 분리) · S-1(키 모양 조각 가림)
+ * ------------------------------------------------------------------ */
+describe("OpenRouter Perplexity — 수동 수집과 자동 수집은 하루 상한 행을 따로 쓴다 (S-4)", () => {
+  const OR_KEY = "or-jobs-fake-key-0002";
+  const orOk = () =>
+    respond(200, {
+      model: "perplexity/sonar",
+      provider: "Perplexity",
+      choices: [{ finish_reason: "stop", message: { content: "가짜 답변 문장입니다 — 용도별 상한 시험용으로 충분히 깁니다.", annotations: [] } }],
+      usage: { cost: 0.001 },
+    });
+  let reservedKeys: string[] = [];
+  const recordingStore: DailyCapStore = {
+    reserve: async (key) => {
+      reservedKeys.push(key);
+      return reservedKeys.length;
+    },
+    addCost: async () => {},
+  };
+
+  beforeEach(() => {
+    reservedKeys = [];
+    __resetOpenRouterStateForTest({ store: recordingStore });
+    clearScrapeCache();
+    vi.stubEnv("OPENROUTER_KEY", OR_KEY);
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockImplementation(async () => orOk());
+  });
+
+  afterEach(() => {
+    __resetOpenRouterStateForTest();
+    clearScrapeCache();
+  });
+
+  it("runAiScraper 기본(수동 수집 화면) → 수동 행 · purpose auto(예전 엔진) → 자동 행 · submitScrape(새 엔진) → 자동 행", async () => {
+    await runAiScraper({ provider: "perplexity", prompt: `${PROMPT} 1` });
+    await runAiScraper({ provider: "perplexity", prompt: `${PROMPT} 2`, purpose: "auto" });
+    await submitScrape({ provider: "perplexity", prompt: `${PROMPT} 3` });
+    expect(reservedKeys.map((k) => k.split(":")[0])).toEqual([
+      "openrouter_pplx_manual_daily",
+      "openrouter_pplx_daily",
+      "openrouter_pplx_daily",
+    ]);
+  });
+
+  it("수동 수집 라우트(/api/scrape)는 본문에 purpose:auto 를 넣어도 수동 행으로 센다(입력 규칙이 그 칸을 버린다)", async () => {
+    const { NextRequest } = await import("next/server");
+    const { POST } = await import("@/app/api/scrape/route");
+    const res = await POST(
+      new NextRequest("http://localhost/api/scrape", {
+        method: "POST",
+        body: JSON.stringify({ provider: "perplexity", prompt: PROMPT, purpose: "auto", forceRefresh: true }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(reservedKeys).toHaveLength(1);
+    expect(reservedKeys[0].startsWith("openrouter_pplx_manual_daily:")).toBe(true);
+  });
+
+  it("용도는 캐시 키에 들어가지 않는다 — 자동이 받은 결과를 20분 안 수동 조회가 그대로 쓴다(추가 요청 0)", async () => {
+    await runAiScraper({ provider: "perplexity", prompt: PROMPT, purpose: "auto" });
+    const again = await runAiScraper({ provider: "perplexity", prompt: PROMPT });
+    expect(again.cached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("redactErrorText 가 키 모양 조각(sk- + 8자 이상)을 일부만 나와도 가린다 (S-1)", () => {
+    // 진짜 키가 아니다(단어가 섞인 가짜 조각). 소스 점검이 이 고정값을 키로 오인하지 않게 나눠 쓴다.
+    const fragment = "sk-" + "or-v1-" + "fakefragment4567";
+    const out = redactErrorText(`provider said key ${fragment}... is invalid`);
+    expect(out).not.toContain("fakefragment4567");
+    expect(out).toContain("[가림]");
+    expect(redactErrorText("task-runner risk-assessment sk-short")).toBe("task-runner risk-assessment sk-short");
   });
 });

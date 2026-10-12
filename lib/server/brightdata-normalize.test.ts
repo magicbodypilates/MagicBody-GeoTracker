@@ -23,6 +23,8 @@ import {
   runAiScraper,
   selectAnswer,
 } from "./brightdata-scraper";
+// OpenRouter 변환 레코드 추가 테스트용(계획 geotracker-pplx-openrouter-261012 v2 §8-2 — 파일 끝 묶음)
+import { toScrapeRecord } from "./perplexity-openrouter";
 
 const PROMPT = "테스트 질문 — 예시 교육기관을 추천해 주세요";
 const ANSWER =
@@ -1017,5 +1019,61 @@ describe("판정 성능 (R3-4)", () => {
       "초보자라면 [안내 글](https://guide.example/a) 을 참고해 수업 인원이 적은 곳을 고르세요. 자세한 비교는 https://compare.example/b 에 있습니다.\n";
     const input = para.repeat(Math.ceil(50_000 / para.length)).slice(0, 50_000);
     expect(best(() => detectNonAnswer(input, Q))).toBeLessThan(10);
+  });
+});
+
+/* ------------------------------------------------------------------
+ * OpenRouter 변환 레코드 → 같은 판정 (계획 geotracker-pplx-openrouter-261012 v2 §7-3 · §8-2)
+ * ------------------------------------------------------------------ */
+describe("OpenRouter 변환 레코드 → normalizeScrapePayload", () => {
+  const LONG_TITLE = "아주 길게 늘어진 가짜 검색 결과 제목 문장 — 답으로 뽑히면 안 되는 제목입니다";
+  const OR_ANSWER = "예시 교육기관은 해부학 기반 커리큘럼으로 알려져 있습니다 [1]. 수업 인원이 적은 편입니다.";
+  const orJson = (content: unknown, upstream: unknown = "Perplexity") => ({
+    model: "perplexity/sonar",
+    provider: upstream,
+    choices: [
+      {
+        finish_reason: "stop",
+        message: {
+          content,
+          annotations: [{ type: "url_citation", url_citation: { url: "https://example-a.test/one", title: LONG_TITLE } }],
+        },
+      },
+    ],
+    usage: { cost: 0.002 },
+  });
+  const recordOf = (json: unknown) => {
+    const r = toScrapeRecord(json);
+    if (!r.ok) throw new Error(`변환 실패: ${r.code}`);
+    return r.record;
+  };
+
+  it("변환 레코드가 그대로 판정을 통과한다 — 답·참조 인용(도메인 계산)·sources", () => {
+    const res = normalizeScrapePayload({ provider: "perplexity", prompt: PROMPT, payload: [recordOf(orJson(OR_ANSWER))] });
+    expect(res.answer).toBe(OR_ANSWER);
+    expect(res.citations).toEqual([
+      { url: "https://example-a.test/one", domain: "example-a.test", title: LONG_TITLE, description: "" },
+    ]);
+    expect(res.sources).toEqual(["https://example-a.test/one"]);
+  });
+
+  it.each([[""], [null], [123]])("답이 비면(%j) PARSE_FAILURE — 인용 제목이 답으로 뽑히지 않는다", (content) => {
+    const payload = [recordOf(orJson(content))];
+    const f = failureOf(() => normalizeScrapePayload({ provider: "perplexity", prompt: PROMPT, payload }));
+    expect(f.code).toBe("PARSE_FAILURE");
+    expect(f.message).not.toContain(LONG_TITLE);
+  });
+
+  it("답이 보낸 질문과 같으면 EMPTY_ANSWER", () => {
+    const payload = [recordOf(orJson(PROMPT))];
+    expect(failureOf(() => normalizeScrapePayload({ provider: "perplexity", prompt: PROMPT, payload })).code).toBe("EMPTY_ANSWER");
+  });
+
+  it("backend_meta 는 깊은 추출 제외 키 — 메타에 긴 문장이 있어도 답으로 뽑히지 않는다", () => {
+    const longUpstream = "가짜 업스트림 이름이 아주 길게 들어온 경우를 가정한 문장입니다";
+    const payload = [recordOf(orJson("", longUpstream))];
+    const f = failureOf(() => normalizeScrapePayload({ provider: "perplexity", prompt: PROMPT, payload }));
+    expect(f.code).toBe("PARSE_FAILURE");
+    expect(f.message).not.toContain(longUpstream);
   });
 });

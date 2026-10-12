@@ -189,3 +189,12 @@ describe("한도 경계 — 카운터를 올린 뒤 값이 한도 이상이면 �
     expect(limitReached(max, max)).toBe(true);
   });
 });
+
+describe("OpenRouter Perplexity 경로 코드 — 재시도 없이 실패 (계획 geotracker-pplx-openrouter-261012 v2 §4-3)", () => {
+  // collector-policy.ts 는 바꾸지 않았다 — 새 코드 2종은 크롤러 코드도 유료 재시도 목록도 아니라 이미 failed 다.
+  it.each(["BACKEND_BLOCKED", "DAILY_CAP"] as const)("%s → 재시도 대상 아님 · decideAfterFailure 는 fail", (code) => {
+    expect(isPaidRetryable(code)).toBe(false);
+    expect(decideAfterFailure({ ...base, provider: "perplexity", code })).toEqual({ action: "fail" });
+    expect(decideAfterFailure({ ...base, provider: "perplexity", code, budget: 99 })).toEqual({ action: "fail" });
+  });
+});

@@ -17,6 +17,8 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { eq, like } from "drizzle-orm";
+// OpenRouter Perplexity 하루 1회 추가 테스트용(계획 geotracker-pplx-openrouter-261012 v2 §8-2 — 파일 끝 묶음)
+import { vi, beforeEach } from "vitest";
 import {
   TEST_WORKSPACE_PREFIX,
   assertOnlyTestData,
@@ -204,5 +206,177 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
     expect(saved).toHaveLength(1);
     expect(saved[0].sampleCount).toBe(1);
     expect(Number(saved[0].avgVisibility)).toBeCloseTo(70, 5);
+  });
+
+  /* ----------------------------------------------------------------
+   * 같은 질문 하루 1회 · OpenRouter Perplexity — 예전 엔진(runTick)
+   * 계획 geotracker-pplx-openrouter-261012 v2 §3 · §8-2. 전역 fetch 는 가짜(OpenRouter·Bright Data 모두).
+   * runTick 은 실제 현재 시각으로 돈다 — "오늘(KST)" 기준 행을 현재 시각으로 만든다.
+   * ---------------------------------------------------------------- */
+  describe("같은 질문 하루 1회 · OpenRouter Perplexity (예전 엔진 runTick)", () => {
+    const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
+    const BD_URL = "https://api.brightdata.com/datasets/v3/scrape";
+    let fetchCalls: string[] = [];
+
+    const orOk = () =>
+      new Response(
+        JSON.stringify({
+          model: "perplexity/sonar",
+          provider: "Perplexity",
+          choices: [
+            {
+              finish_reason: "stop",
+              message: {
+                content: "가짜 응답입니다 — OpenRouter 시험용 문장이 충분히 깁니다 [1].",
+                annotations: [{ type: "url_citation", url_citation: { url: "https://example-a.test/one", title: "가짜 제목" } }],
+              },
+            },
+          ],
+          usage: { cost: 0.001 },
+        }),
+        { status: 200 },
+      );
+    const bdOk = () =>
+      new Response(JSON.stringify([{ answer_text: "가짜 응답입니다 — Bright Data 시험용 문장이 충분히 깁니다." }]), {
+        status: 200,
+      });
+
+    /** 오늘(KST) 자정 */
+    const kstMidnightMs = () => {
+      const kstDate = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+      return Date.parse(`${kstDate}T00:00:00+09:00`);
+    };
+
+    async function addAutoRun(wsId: string, text: string, provider: string, createdAt: Date) {
+      await dbm.db.insert(dbm.schema.runs).values({
+        workspaceId: wsId,
+        promptText: text,
+        provider,
+        visibilityScore: 0,
+        sentiment: "not-mentioned",
+        isAuto: true,
+        intervalSlot: "2000-01-01T00", // 지금 시간대와 다른 칸
+        createdAt,
+      });
+    }
+
+    async function addDueSchedule(wsId: string, providers: string[]) {
+      await dbm.db.insert(dbm.schema.schedules).values({
+        workspaceId: wsId,
+        name: "가짜 하루 1회 시험",
+        cronExpression: "0 0 * * *",
+        providers,
+        promptIds: [],
+        active: true,
+        nextRunAt: new Date(Date.now() - 60_000),
+      });
+    }
+
+    async function runsCount(wsId: string, provider: string) {
+      const rows = await dbm.db.select().from(dbm.schema.runs).where(eq(dbm.schema.runs.workspaceId, wsId));
+      return rows.filter((r) => r.provider === provider).length;
+    }
+
+    beforeEach(async () => {
+      fetchCalls = [];
+      vi.stubGlobal("fetch", async (url: string) => {
+        fetchCalls.push(String(url));
+        if (String(url).startsWith(OR_URL)) return orOk();
+        if (String(url).startsWith(BD_URL)) return bdOk();
+        throw new Error(`예상하지 못한 네트워크 호출: ${String(url).slice(0, 60)}`);
+      });
+      vi.stubEnv("BRIGHT_DATA_KEY", "fake-int-test-key");
+      vi.stubEnv("OPENROUTER_KEY", "or-int-fake-key-0001");
+      (await import("./brightdata-scraper")).clearScrapeCache();
+      (await import("./perplexity-openrouter")).__resetOpenRouterStateForTest();
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(async () => {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      (await import("./perplexity-openrouter")).__resetOpenRouterStateForTest();
+      // 이 묶음이 만든 하루 상한 행만 지운다(파일 전용 시험 DB)
+      await dbm.db.delete(dbm.schema.collectorState).where(like(dbm.schema.collectorState.key, "openrouter_pplx_%"));
+    });
+
+    it("5 · 같은 날 다른 시간대 결과가 있으면 skippedDuplicates · OpenRouter 요청 0", async () => {
+      vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+      const ws = await makeWorkspace("5");
+      await addPrompt(ws.id, "가짜 하루 1회 질문 5");
+      await addAutoRun(ws.id, "가짜 하루 1회 질문 5", "perplexity", new Date(Math.max(Date.now() - 60_000, kstMidnightMs())));
+      await addDueSchedule(ws.id, ["perplexity"]);
+
+      const tick = await R.runTick();
+      expect(tick.errors).toEqual([]);
+      expect(tick.skippedDuplicates).toBe(1);
+      expect(tick.executedRuns).toBe(0);
+      expect(fetchCalls).toEqual([]);
+      expect(await runsCount(ws.id, "perplexity")).toBe(1);
+    });
+
+    it("6 · 전날(KST) 결과만 있으면 다시 묻는다 — OpenRouter 로 수집·저장(참조 인용) · 오늘 상한 행 count 1", async () => {
+      vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+      const ws = await makeWorkspace("6");
+      await addPrompt(ws.id, "가짜 하루 1회 질문 6");
+      await addAutoRun(ws.id, "가짜 하루 1회 질문 6", "perplexity", new Date(kstMidnightMs() - 3600_000));
+      await addDueSchedule(ws.id, ["perplexity"]);
+
+      const tick = await R.runTick();
+      expect(tick.errors).toEqual([]);
+      expect(tick.providerFailures).toEqual([]);
+      expect(tick.executedRuns).toBe(1);
+      expect(fetchCalls).toEqual([OR_URL]);
+      const rows = await dbm.db.select().from(dbm.schema.runs).where(eq(dbm.schema.runs.workspaceId, ws.id));
+      const fresh = rows.find((r) => r.intervalSlot !== "2000-01-01T00")!;
+      expect(fresh.answer).toContain("OpenRouter 시험용");
+      expect((fresh.citations as { url: string }[]).map((c) => c.url)).toEqual(["https://example-a.test/one"]);
+      const OR = await import("./perplexity-openrouter");
+      const [state] = await dbm.db
+        .select()
+        .from(dbm.schema.collectorState)
+        .where(eq(dbm.schema.collectorState.key, OR.dailyCapKey(new Date())));
+      expect(state?.value).toMatchObject({ count: 1, costed: 1 });
+      // 예전 엔진은 자동 수집 몫으로 센다 — 수동 수집 행은 생기지 않는다(1회차 검수 S-4)
+      const [manual] = await dbm.db
+        .select()
+        .from(dbm.schema.collectorState)
+        .where(eq(dbm.schema.collectorState.key, OR.dailyCapKey(new Date(), "manual")));
+      expect(manual).toBeUndefined();
+    });
+
+    it("7 · 설정이 brightdata 면 하루 1회 미적용 — 같은 날 결과가 있어도 Bright Data 로 수집", async () => {
+      const ws = await makeWorkspace("7");
+      await addPrompt(ws.id, "가짜 하루 1회 질문 7");
+      await addAutoRun(ws.id, "가짜 하루 1회 질문 7", "perplexity", new Date(Math.max(Date.now() - 60_000, kstMidnightMs())));
+      await addDueSchedule(ws.id, ["perplexity"]);
+
+      const tick = await R.runTick();
+      expect(tick.executedRuns).toBe(1);
+      expect(tick.skippedDuplicates).toBe(0);
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0].startsWith(BD_URL)).toBe(true);
+    });
+
+    it("8 · runAiScraper 가 DAILY_CAP 을 던지면 그 질문의 Perplexity 만 실패 · 같은 질문의 다른 AI 는 저장", async () => {
+      vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+      vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "0");
+      const ws = await makeWorkspace("8");
+      await addPrompt(ws.id, "가짜 하루 1회 질문 8");
+      await addDueSchedule(ws.id, ["perplexity", "chatgpt"]);
+
+      const tick = await R.runTick();
+      expect(tick.errors).toEqual([]);
+      expect(tick.executedRuns).toBe(1);
+      expect(tick.providerFailures).toHaveLength(1);
+      expect(tick.providerFailures[0].provider).toBe("perplexity");
+      expect(tick.providerFailures[0].reason.startsWith("[DAILY_CAP]")).toBe(true);
+      expect(fetchCalls.some((u) => u.startsWith(OR_URL))).toBe(false); // 상한에 걸리면 요청하지 않는다
+      expect(await runsCount(ws.id, "chatgpt")).toBe(1);
+      expect(await runsCount(ws.id, "perplexity")).toBe(0);
+    });
   });
 });

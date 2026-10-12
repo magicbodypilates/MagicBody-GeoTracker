@@ -1,4 +1,22 @@
+/**
+ * brightdata-scraper.ts — AI 답변 수집(Bright Data) · 받은 결과 판정 · 자동 수집 엔진용 단계별 호출.
+ *
+ * ⚠️ Perplexity 는 설정에 따라 OpenRouter 로 간다 (계획 geotracker-pplx-openrouter-261012 v2 §1-3).
+ *   PERPLEXITY_BACKEND=openrouter 이면 runAiScraper·submitScrape 가 Perplexity 만 perplexity-openrouter.ts
+ *   (OpenRouter 공식 모델 perplexity/sonar)로 보내고, 받은 결과를 Bright Data 레코드 모양으로 바꿔 아래의
+ *   같은 판정(normalizeScrapePayload)에 넘긴다. 설정이 없거나 다른 값이면 예전과 완전히 같다(Bright Data).
+ *   다른 AI 는 설정과 무관하게 언제나 Bright Data 다.
+ */
+
 import { z } from "zod";
+import {
+  KEY_SHAPED_TOKEN_RE,
+  PPLX_OR_KEY_ENV_NAMES,
+  callPerplexityViaOpenRouter,
+  getPerplexityBackend,
+  type OpenRouterPurpose,
+  type PerplexityBackend,
+} from "@/lib/server/perplexity-openrouter";
 
 const ProviderSchema = z.enum([
   "chatgpt",
@@ -130,6 +148,12 @@ type ScrapeRequest = {
   country?: string;
   /** true면 캐시 읽기를 건너뛰고 Bright Data 를 새로 호출한다. 수동 테스트용. 결과는 여전히 캐시에 기록된다. */
   forceRefresh?: boolean;
+  /**
+   * 호출 용도 — OpenRouter Perplexity 경로의 하루 상한을 어느 몫으로 셀지(보안 점검 S-4). 기본 "manual"
+   * (수동 수집 화면 /api/scrape — 그 라우트는 입력 규칙에 이 칸이 없어 사용자가 고를 수 없다). 자동 수집(예전
+   * 엔진)은 "auto" 를 넘긴다. Bright Data 경로·캐시 키에는 영향이 없다.
+   */
+  purpose?: OpenRouterPurpose;
 };
 
 export type StructuredCitation = {
@@ -160,10 +184,18 @@ function getDatasetId(provider: Provider) {
   return process.env[providerToDatasetEnv[provider]] || defaultDatasetIds[provider];
 }
 
-function buildCacheKey(input: ScrapeRequest) {
+function buildCacheKey(input: ScrapeRequest, backend: PerplexityBackend) {
   // forceRefresh 는 캐시 키에서 제외 — 같은 입력은 같은 키로 저장/조회되어야 한다.
+  // 호출 용도(purpose)도 제외 — 같은 질문의 결과는 자동·수동이 같다(상한 몫만 다르다).
+  // 수집 방식(backend)은 넣는다 — 방식을 바꾼 직후 20분 동안 다른 방식의 결과가 섞이지 않게.
   const { forceRefresh: _ignore, ...keyable } = input;
-  return JSON.stringify(keyable);
+  delete keyable.purpose;
+  return JSON.stringify({ ...keyable, backend });
+}
+
+/** 이 AI 를 어느 방식으로 수집하나 — Perplexity + 설정 openrouter 일 때만 openrouter. */
+function backendFor(provider: Provider): PerplexityBackend {
+  return provider === "perplexity" ? getPerplexityBackend(process.env) : "brightdata";
 }
 
 function withAuthHeaders() {
@@ -457,6 +489,9 @@ const DEEP_EXTRACT_EXCLUDED_KEYS = new Set([
   "status",
   "detail",
   "note",
+  // OpenRouter 경로 레코드의 메타(수집 방식·모델·건수) — 답이 비었을 때 메타 문자열이 답으로 뽑히지 않게
+  // (perplexity-openrouter.ts · 계획 geotracker-pplx-openrouter-261012 v2 §1-3).
+  "backend_meta",
 ]);
 
 // 답변으로 볼 수 없는 형태의 문자열(타임스탬프·URL 단독·숫자/식별자 단독)을 거부한다.
@@ -1106,7 +1141,8 @@ export async function runAiScraper(
   // § PERPLEXITY_NO_COUNTRY — 실제로 보낼 요청 기준으로 캐시 키도 만든다(Perplexity 는 국가를 받아도
   // 빼므로 국가 유무가 다른 두 요청이 같은 요청이다).
   const effective: ScrapeRequest = { ...request, country: requestCountryFor(parsed, request.country) };
-  const cacheKey = buildCacheKey(effective);
+  const backend = backendFor(parsed);
+  const cacheKey = buildCacheKey(effective, backend);
   if (!request.forceRefresh) {
     const cacheHit = inMemoryCache.get(cacheKey);
     if (cacheHit && cacheHit.expiresAt > Date.now()) {
@@ -1117,31 +1153,41 @@ export async function runAiScraper(
     }
   }
 
-  const inputRecord = buildInputRecord(parsed, effective.prompt, effective.country);
-
-  const scrapeResponse = await fetch(
-    `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
-    {
-      method: "POST",
-      headers: withAuthHeaders(),
-      body: JSON.stringify({ input: [inputRecord] }),
-    },
-  );
-
   let payload: unknown;
 
-  if (scrapeResponse.status === 202) {
-    const pending = (await scrapeResponse.json()) as {
-      snapshot_id: string;
-    };
-    await monitorUntilReady(pending.snapshot_id, parsed);
-    payload = await downloadSnapshot(pending.snapshot_id);
-  } else {
-    if (!scrapeResponse.ok) {
-      const text = await scrapeResponse.text();
-      throw new Error(`Scrape failed (${scrapeResponse.status}): ${text}`);
+  if (backend === "openrouter") {
+    // Perplexity + 설정 openrouter — OpenRouter(perplexity/sonar) 응답을 Bright Data 레코드 모양으로 받아
+    // 아래 같은 판정으로 넘긴다. 실패는 원인 코드를 붙여 던진다(수동 수집 오류 응답 · 예전 엔진 실패 기록).
+    const r = await callPerplexityViaOpenRouter(effective.prompt, { purpose: request.purpose ?? "manual" });
+    if (!r.ok) {
+      throw new ScrapeFailure(r.code, `[${r.code}] OpenRouter Perplexity 수집 실패: ${redactErrorText(r.message)}`);
     }
-    payload = await scrapeResponse.json();
+    payload = [r.record];
+  } else {
+    const inputRecord = buildInputRecord(parsed, effective.prompt, effective.country);
+
+    const scrapeResponse = await fetch(
+      `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
+      {
+        method: "POST",
+        headers: withAuthHeaders(),
+        body: JSON.stringify({ input: [inputRecord] }),
+      },
+    );
+
+    if (scrapeResponse.status === 202) {
+      const pending = (await scrapeResponse.json()) as {
+        snapshot_id: string;
+      };
+      await monitorUntilReady(pending.snapshot_id, parsed);
+      payload = await downloadSnapshot(pending.snapshot_id);
+    } else {
+      if (!scrapeResponse.ok) {
+        const text = await scrapeResponse.text();
+        throw new Error(`Scrape failed (${scrapeResponse.status}): ${text}`);
+      }
+      payload = await scrapeResponse.json();
+    }
   }
 
   // payload 를 얻은 뒤의 판정(not-ready · 크롤러 오류 · 파싱 실패 · 인용 추출)은
@@ -1201,7 +1247,10 @@ export type ScrapeErrorCode =
   | "HTTP_4XX"
   | "SUBMIT_UNKNOWN"
   | "DOWNLOAD_FAILED"
-  | "NETWORK";
+  | "NETWORK"
+  // OpenRouter Perplexity 경로 전용(perplexity-openrouter.ts) — 둘 다 작업이 생기지 않았고 재시도하지 않는다.
+  | "BACKEND_BLOCKED" // 키 없음·키 거부·잔액 부족(401·402 뒤 30분 차단) — 그 경로만 막는다(전체 제출 정지 아님)
+  | "DAILY_CAP"; // 하루 호출 상한 도달·상한 확인 실패
 
 /** 크롤러 계열 코드인지 — 접두사 "CRAWLER_" 로 판정한다. */
 export function isCrawlerCode(code: string): code is CrawlerErrorCode {
@@ -1248,6 +1297,8 @@ const REDACTED = "[가림]";
 /**
  * 저장·로그용 오류 문구를 만든다. DB(collection_items.last_error)와 로그에 남기 전에 반드시 거친다.
  *   - Bright Data 키 값이 문자열에 있으면 가린다
+ *   - OpenRouter 키 값(OPENROUTER_KEY·PERPLEXITY_OPENROUTER_KEY — 앞뒤 공백 정리 후 8자 이상)도 가린다
+ *   - 키 모양 문자열(`sk-` 로 시작하는 8자 이상 토큰)은 키의 일부만 나와도 가린다(보안 점검 S-1)
  *   - "Bearer" 뒤 값을 가린다
  *   - URL 의 "?" 뒤(쿼리)를 지운다
  *   - 32자 이상 영숫자·_·- 토큰을 가린다
@@ -1258,6 +1309,11 @@ export function redactErrorText(text: string, max = 300): string {
   let s = String(text ?? "");
   const key = getApiKey();
   if (key && key.length >= 4) s = s.split(key).join(REDACTED);
+  for (const name of PPLX_OR_KEY_ENV_NAMES) {
+    const orKey = (process.env[name] ?? "").trim();
+    if (orKey.length >= 8) s = s.split(orKey).join(REDACTED);
+  }
+  s = s.replace(KEY_SHAPED_TOKEN_RE, REDACTED);
   s = s.replace(/\bBearer\s+[^\s"',;]+/gi, `Bearer ${REDACTED}`);
   s = s.replace(/(https?:\/\/[^\s?#"'<>]*)\?[^\s"'<>]*/gi, "$1");
   s = s.replace(/[A-Za-z0-9_-]{32,}/g, REDACTED);
@@ -1315,7 +1371,12 @@ export type SubmitResult =
   /** 인증 실패·입력 거절 — 작업이 생기지 않았다. */
   | { ok: false; code: "AUTH_ERROR" | "HTTP_4XX"; message: string }
   /** 5xx·네트워크·시간 초과 — 작업이 생겼을 수 있다(과금 여부 모름). */
-  | { ok: false; code: "SUBMIT_UNKNOWN"; message: string };
+  | { ok: false; code: "SUBMIT_UNKNOWN"; message: string }
+  /**
+   * OpenRouter Perplexity 경로 전용 — 키 없음·키 거부·잔액 부족 차단(BACKEND_BLOCKED) 또는 하루 상한
+   * (DAILY_CAP). 네트워크 없이 즉시 온다. 엔진은 HTTP_4XX 와 같이 그 항목만 실패시킨다(DB 일시정지 없음).
+   */
+  | { ok: false; code: "BACKEND_BLOCKED" | "DAILY_CAP"; message: string };
 
 /**
  * 제출 — 지금 runAiScraper 의 제출과 같은 동기 요청(`/scrape`)이다(계획 v2 §2-4).
@@ -1330,6 +1391,17 @@ export async function submitScrape(req: {
 }): Promise<SubmitResult> {
   if (!isKnownProvider(req.provider)) {
     return { ok: false, code: "HTTP_4XX", message: "알 수 없는 AI 이름" };
+  }
+  if (backendFor(req.provider) === "openrouter") {
+    // Perplexity + 설정 openrouter — Bright Data 키와 무관하다. 200 즉시 결과(kind:"payload")로 돌려준다.
+    // 실패 코드는 모듈 반환값 그대로(인증 오류 코드는 오지 않는다 — 전체 제출 정지를 부르지 않게).
+    // 이 함수는 자동 수집 엔진만 부른다 — 자동 수집 몫의 하루 상한으로 센다.
+    const r = await callPerplexityViaOpenRouter(req.prompt, { purpose: "auto" });
+    if (r.ok) return { ok: true, kind: "payload", payload: [r.record] };
+    if (r.code === "RATE_LIMITED") {
+      return { ok: false, code: "RATE_LIMITED", retryAfterMs: r.retryAfterMs, message: redactErrorText(r.message) };
+    }
+    return { ok: false, code: r.code, message: redactErrorText(r.message) };
   }
   if (!getApiKey()) return { ok: false, code: "AUTH_ERROR", message: MISSING_KEY_MESSAGE };
 

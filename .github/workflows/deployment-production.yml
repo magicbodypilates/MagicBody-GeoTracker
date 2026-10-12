@@ -231,17 +231,16 @@ jobs:
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
 
-            # ── worker 서비스는 "그 서버 compose 파일에 실제로 있을 때만" 재생성 대상에 넣는다 ──
-            # 새 서버(벌쳐)는 아직 worker 서비스가 없을 수 있다 — 없는 서비스 이름을 그대로
-            # --force-recreate 인자에 넘기면 "no such service" 로 이 명령이 실패하고, 앞서
-            # 나열한 앱 컨테이너 재생성까지 같은 명령 안이라 배포 전체가 실패한다(회귀 방지).
-            # 서비스 이름 목록만 확인하며(공개 저장소 로그에도 안전 — 시크릿·파일 내용 없음),
-            # 없으면 앱만 재생성하고 로그 한 줄만 남긴 뒤 배포는 그대로 성공으로 끝난다.
+            # ── worker 서비스는 "지금 돌고 있을 때만" 재생성 대상에 넣는다 ──
+            # 꺼 둔 워커(옛 애저 서버)를 배포가 되살리지 않게 한다. compose 에 정의가 없는 경우와
+            # 명령이 실패한 경우도 여기서 "재생성 안 함"으로 떨어진다(되살리지 않는 쪽이 안전한 쪽).
+            # 서비스 이름만 확인하며(공개 저장소 로그에도 안전 — 시크릿·파일 내용 없음), 재생성하지
+            # 않으면 앱만 재생성하고 로그 한 줄만 남긴 뒤 배포는 그대로 성공으로 끝난다.
             RECREATE_TARGETS="${CONTAINER_NAME}"
-            if docker compose --file ${FILE_PATH} config --services 2>/dev/null | grep -qx "${WORKER_SERVICE}"; then
+            if docker compose --file ${FILE_PATH} ps --services --status running 2>/dev/null | grep -qx "${WORKER_SERVICE}"; then
               RECREATE_TARGETS="${RECREATE_TARGETS} ${WORKER_SERVICE}"
             else
-              echo "[deploy] worker service '${WORKER_SERVICE}' not found in compose file — skipping (app-only recreate)"
+              echo "[deploy] worker '${WORKER_SERVICE}' not running (or not defined) — left as is (app-only recreate)"
             fi
             docker compose --file ${FILE_PATH} up -d --force-recreate ${RECREATE_TARGETS}
             # 배포 후 이미지 정리 — 서비스별 최신 10벌 유지. 규칙 정본은 서버 /usr/local/bin/mbd-docker-gc.sh
@@ -376,17 +375,16 @@ jobs:
             docker pull ${IMAGE_REPO_LC}:${DEPLOY_TAG}
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
 
-            # ── worker 서비스는 "그 서버 compose 파일에 실제로 있을 때만" 재생성 대상에 넣는다 ──
-            # 새 서버(벌쳐)는 아직 worker 서비스가 없을 수 있다 — 없는 서비스 이름을 그대로
-            # --force-recreate 인자에 넘기면 "no such service" 로 이 명령이 실패하고, 앞서
-            # 나열한 앱 컨테이너 재생성까지 같은 명령 안이라 배포 전체가 실패한다(회귀 방지).
-            # 서비스 이름 목록만 확인하며(공개 저장소 로그에도 안전 — 시크릿·파일 내용 없음),
-            # 없으면 앱만 재생성하고 로그 한 줄만 남긴 뒤 배포는 그대로 성공으로 끝난다.
+            # ── worker 서비스는 "지금 돌고 있을 때만" 재생성 대상에 넣는다 ──
+            # 꺼 둔 워커(옛 애저 서버)를 배포가 되살리지 않게 한다. compose 에 정의가 없는 경우와
+            # 명령이 실패한 경우도 여기서 "재생성 안 함"으로 떨어진다(되살리지 않는 쪽이 안전한 쪽).
+            # 서비스 이름만 확인하며(공개 저장소 로그에도 안전 — 시크릿·파일 내용 없음), 재생성하지
+            # 않으면 앱만 재생성하고 로그 한 줄만 남긴 뒤 배포는 그대로 성공으로 끝난다.
             RECREATE_TARGETS="${CONTAINER_NAME}"
-            if docker compose --file ${FILE_PATH} config --services 2>/dev/null | grep -qx "${WORKER_SERVICE}"; then
+            if docker compose --file ${FILE_PATH} ps --services --status running 2>/dev/null | grep -qx "${WORKER_SERVICE}"; then
               RECREATE_TARGETS="${RECREATE_TARGETS} ${WORKER_SERVICE}"
             else
-              echo "[deploy] worker service '${WORKER_SERVICE}' not found in compose file — skipping (app-only recreate)"
+              echo "[deploy] worker '${WORKER_SERVICE}' not running (or not defined) — left as is (app-only recreate)"
             fi
             docker compose --file ${FILE_PATH} up -d --force-recreate ${RECREATE_TARGETS}
             # 배포 후 이미지 정리 — 서비스별 최신 10벌 유지. 규칙 정본은 서버 /usr/local/bin/mbd-docker-gc.sh

@@ -1292,4 +1292,178 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(await runsOf(ws.id)).toHaveLength(0);
     expect(fake.submitCount()).toBe(2); // 끝난 뒤 추가 제출 없음
   }, 60_000);
+
+  /* ----------------------------------------------------------------
+   * OpenRouter Perplexity 시험 경로 (계획 geotracker-pplx-openrouter-261012 v2 §3 · §4-3 · §8-2)
+   * 가짜 submitScrape 가 OpenRouter 경로의 반환값(200 즉시 결과·BACKEND_BLOCKED·DAILY_CAP)을 흉내 낸다.
+   * ---------------------------------------------------------------- */
+
+  /** 자동 결과 1행을 직접 넣는다(하루 1회 시험용) */
+  async function addAutoRun(wsId: string, promptText: string, provider: string, createdAt: Date, intervalSlot: string) {
+    const [r] = await dbm.db
+      .insert(dbm.schema.runs)
+      .values({
+        workspaceId: wsId,
+        promptText,
+        provider,
+        answer: "가짜 앞선 결과 문장입니다.",
+        visibilityScore: 0,
+        sentiment: "not-mentioned",
+        isAuto: true,
+        intervalSlot,
+        createdAt,
+      })
+      .returning({ id: dbm.schema.runs.id });
+    return r.id;
+  }
+
+  it("v1 · OpenRouter 변환 레코드 → 200 즉시 결과로 저장 · paidAttempts 1 · 본문이 참조한 인용만", async () => {
+    const OR = await import("./perplexity-openrouter");
+    const conv = OR.toScrapeRecord({
+      model: "perplexity/sonar",
+      provider: "Perplexity",
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            content: "가짜 응답입니다 — OpenRouter 시험용 문장이 충분히 깁니다 [2].",
+            annotations: [
+              { type: "url_citation", url_citation: { url: "https://example-a.test/one", title: "가짜 하나" } },
+              { type: "url_citation", url_citation: { url: "https://example-b.test/two", title: "가짜 둘" } },
+            ],
+          },
+        },
+      ],
+      usage: { cost: 0.003 },
+    });
+    if (!conv.ok) throw new Error("변환 실패");
+    const ws = await makeWorkspace("v1");
+    await makePrompts(ws.id, promptTexts("v1", 1));
+    await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60) });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) => fake.inline(req, [conv.record]);
+
+    const d = await engine.runDispatchPass(T0, deps(fake));
+    expect(d.errors).toEqual([]);
+    expect(d.stats.savedInline).toBe(1);
+    const [item] = await itemsOfWorkspace(ws.id);
+    expect(item.status).toBe("saved");
+    expect(item.paidAttempts).toBe(1);
+    const runs = await runsOf(ws.id);
+    expect(runs).toHaveLength(1);
+    expect((runs[0].citations as { url: string }[]).map((c) => c.url)).toEqual(["https://example-b.test/two"]);
+  }, 60_000);
+
+  it("v2 · BACKEND_BLOCKED → 그 항목만 failed · rate_pause·auth_pause 없음 · 같은 회차 ChatGPT 는 계속 제출·저장", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    const ws = await makeWorkspace("v2");
+    await makePrompts(ws.id, promptTexts("v2", 2));
+    await makeSchedule(ws.id, { providers: ["chatgpt", "perplexity"], nextRunAt: at(-60) });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) =>
+      req.provider === "perplexity" ? { ok: false, code: "BACKEND_BLOCKED", message: "402 잔액·한도(시험)" } : fake.inline(req);
+
+    const d = await engine.runDispatchPass(T0, deps(fake));
+    expect(d.errors).toEqual([]);
+    const its = await itemsOfWorkspace(ws.id);
+    const px = its.filter((i) => i.provider === "perplexity");
+    expect(px).toHaveLength(2);
+    for (const i of px) {
+      expect(i.status).toBe("failed");
+      expect(i.lastErrorCode).toBe("BACKEND_BLOCKED");
+      expect(i.paidAttempts).toBe(0);
+      expect(i.paidRetries).toBe(0);
+    }
+    for (const i of its.filter((x) => x.provider === "chatgpt")) expect(i.status).toBe("saved");
+    expect(fake.submitCount((s) => s.provider === "chatgpt")).toBe(2);
+    expect(await stateRow("rate_pause:perplexity")).toBeNull();
+    expect(await stateRow("auth_pause_until")).toBeNull();
+  }, 60_000);
+
+  it("v3 · DAILY_CAP 이 계속 오면 남은 Perplexity 항목이 몇 번의 통과 안에 전부 failed · 회차 완료(만료 아님)", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    const ws = await makeWorkspace("v3");
+    await makePrompts(ws.id, promptTexts("v3", 9)); // AI별 동시 상한 4 → 통과 3번에 나뉜다
+    const s = await makeSchedule(ws.id, { providers: ["perplexity", "chatgpt"], nextRunAt: at(-60) });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) =>
+      req.provider === "perplexity" ? { ok: false, code: "DAILY_CAP", message: "하루 상한 30회 도달(시험)" } : fake.inline(req);
+
+    const end = await runUntilIdle(ws.id, deps(fake), T0);
+    expect(end.getTime() - T0.getTime()).toBeLessThan(10 * 60_000); // 5시간 만료를 기다리지 않는다
+    const px = (await itemsOfWorkspace(ws.id)).filter((i) => i.provider === "perplexity");
+    expect(px).toHaveLength(9);
+    for (const i of px) {
+      expect(i.status).toBe("failed");
+      expect(i.lastErrorCode).toBe("DAILY_CAP");
+      expect(i.paidAttempts).toBe(0);
+    }
+    expect(fake.submitCount((x) => x.provider === "perplexity")).toBe(9); // 항목당 한 번 — 재시도 없음
+    const [r] = await roundsOf(s.id);
+    expect(r.status).toBe("completed");
+    expect(r.summary?.saved).toBe(9); // ChatGPT 는 영향 없음
+    expect(r.summary?.byProvider.perplexity.failedByCode).toEqual({ DAILY_CAP: 9 });
+    expect(await stateRow("rate_pause:perplexity")).toBeNull();
+    expect(await stateRow("auth_pause_until")).toBeNull();
+  }, 60_000);
+
+  it("v4 · 하루 1회 — 같은 한국 날짜 다른 시간대 자동 결과가 있으면 duplicate(그 결과를 가리킴) · 전날 결과는 다시 묻는다", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    const ws = await makeWorkspace("v4");
+    const [p1, p2] = await makePrompts(ws.id, promptTexts("v4", 2));
+    // T0 = 2031-05-05 12:00:30 KST. p1 은 같은 날 07:30 KST, p2 는 전날 23:00 KST 에 자동 결과가 있다.
+    const sameDayRunId = await addAutoRun(ws.id, p1.text, "perplexity", new Date("2031-05-04T22:30:00Z"), "2031-05-04T22");
+    await addAutoRun(ws.id, p2.text, "perplexity", new Date("2031-05-04T14:00:00Z"), "2031-05-04T14");
+    await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60) });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) => fake.inline(req);
+
+    const d = await engine.runDispatchPass(T0, deps(fake));
+    expect(d.errors).toEqual([]);
+    const its = await itemsOfWorkspace(ws.id);
+    const i1 = its.find((i) => i.promptText === p1.text)!;
+    const i2 = its.find((i) => i.promptText === p2.text)!;
+    expect(i1.status).toBe("duplicate");
+    expect(i1.runId).toBe(sameDayRunId);
+    expect(i1.paidAttempts).toBe(0);
+    expect(i2.status).toBe("saved");
+    expect(fake.submitCount((s) => s.prompt === p1.text)).toBe(0);
+    expect(fake.submitCount((s) => s.prompt === p2.text)).toBe(1);
+    expect(d.stats.duplicates).toBe(1);
+  }, 60_000);
+
+  it("v5 · 상한으로 회차가 닫힌 직후 설정을 brightdata 로 되돌리고 새 회차 → Perplexity 항목이 바로 제출된다(남은 정지 없음)", async () => {
+    vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
+    const ws = await makeWorkspace("v5");
+    await makePrompts(ws.id, promptTexts("v5", 5));
+    await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60), name: "시험 중" });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) => ({ ok: false, code: "DAILY_CAP", message: `하루 상한 도달(시험) ${req.provider}` });
+    const end = await runUntilIdle(ws.id, deps(fake), T0);
+    expect((await itemsOfWorkspace(ws.id)).every((i) => i.status === "failed")).toBe(true);
+
+    vi.stubEnv("PERPLEXITY_BACKEND", "brightdata");
+    const s2 = await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: end, name: "되돌린 뒤" });
+    fake.onSubmit = (req) => fake.snapshot(req, "running");
+    const before = fake.submitCount();
+    await engine.runDispatchPass(at(61, end), deps(fake));
+    expect(fake.submitCount() - before).toBe(4); // 첫 보내기 줄기에서 AI별 동시 상한(4)만큼 바로 나간다
+    const [r2] = await roundsOf(s2.id);
+    expect(r2.status).toBe("running");
+    expect(await stateRow("rate_pause:perplexity")).toBeNull();
+    expect(await stateRow("auth_pause_until")).toBeNull();
+  }, 60_000);
+
+  it("v6 · 설정이 brightdata(또는 없음)면 하루 1회를 적용하지 않는다 — 같은 날 다른 시간대 결과가 있어도 보낸다", async () => {
+    const ws = await makeWorkspace("v6");
+    const [p1] = await makePrompts(ws.id, promptTexts("v6", 1));
+    await addAutoRun(ws.id, p1.text, "perplexity", new Date("2031-05-04T22:30:00Z"), "2031-05-04T22");
+    await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60) });
+    const fake = new FakeBd();
+    fake.onSubmit = (req) => fake.inline(req);
+    await engine.runDispatchPass(T0, deps(fake));
+    expect(fake.submitCount((s) => s.prompt === p1.text)).toBe(1);
+    const [item] = await itemsOfWorkspace(ws.id);
+    expect(item.status).toBe("saved");
+  }, 60_000);
 });

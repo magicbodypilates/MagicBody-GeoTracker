@@ -261,6 +261,80 @@ Firebase Web SDK 설정은 기본값이 Dockerfile/workflow 에 하드코딩되�
 
 dev 브랜치 테스트 완료 후 운영 배포용 워크플로우는 `deployment-production.yml`를 추가로 작성해야 합니다. (운영 도메인은 추후 결정)
 
+### 8-1. 운영 배포 동작 — 워커 재생성 조건 (2026-10 변경)
+
+운영 서버 배포(`deployment-production.yml` — main push 자동 배포·수동 실행 모두)는 워커(`mbd-geo-tracker-worker`)를
+**지금 돌고 있을 때만** 앱과 함께 재생성한다. 일부러 멈춰 둔 워커(예: 옛 애저 서버)는 배포가 다시 켜지 않는다 —
+새 서버에서도 워커를 멈춰 두면 배포 뒤에도 꺼진 채 남는다(의도된 동작). 판정 명령은
+`docker compose --file <compose 경로> ps --services --status running` 이며, 배포 로그에 재생성하지 않은 경우
+`[deploy] worker '…' not running (or not defined) — left as is` 한 줄이 남는다.
+
+## 9. Perplexity 수집 방식 전환 (OpenRouter 시험)
+
+Perplexity 자동 조사만 OpenRouter 공식 모델(`perplexity/sonar`)로 돌리고, 설정 한 줄로 Bright Data 로 되돌린다.
+다른 AI(ChatGPT·Gemini·Google AI 등)는 설정과 무관하게 언제나 Bright Data 다. 코드: `lib/server/perplexity-openrouter.ts`.
+
+### 9-1. 넣을 값
+
+서버 `.env` 에 아래 줄을 **덧붙인다**(기존 줄 덮어쓰기 없이, 파일 권한 600 유지).
+
+```
+PERPLEXITY_BACKEND=openrouter
+PERPLEXITY_OPENROUTER_DAILY_CAP=30
+PERPLEXITY_OPENROUTER_MANUAL_DAILY_CAP=10
+PERPLEXITY_OPENROUTER_ONCE_PER_DAY=1
+# 선택(권장): 사용 한도를 건 시험 전용 키. 비워 두면 OPENROUTER_KEY 를 쓴다
+# PERPLEXITY_OPENROUTER_KEY=
+```
+
+| 설정 | 규칙 |
+|---|---|
+| `PERPLEXITY_BACKEND` | 정확히 `openrouter`(대소문자·앞뒤 공백 무시)일 때만 전환한다. 없음·빈 값·오타는 전부 Bright Data |
+| `PERPLEXITY_OPENROUTER_DAILY_CAP` | **자동 수집**(정기 조사·즉시 조사) 하루(한국 날짜) 호출 상한. 정수 0～500, 아니면 30. 0 이면 호출하지 않는다. 실패한 호출도 1건으로 센다 |
+| `PERPLEXITY_OPENROUTER_MANUAL_DAILY_CAP` | **수동 수집 화면**(`/api/scrape`) 하루 호출 상한 — 자동 수집과 따로 센다(수동 실행이 자동 몫을 먹지 않게). 정수 0～500, 아니면 10. 0 이면 수동 수집은 호출하지 않는다 |
+| `PERPLEXITY_OPENROUTER_ONCE_PER_DAY` | 같은 질문 하루 1회 — 같은 한국 날짜에 이미 받은 자동 결과가 있으면 다시 묻지 않는다(무료). 기본 켬, `0`·`false`·`off` 로 끈다 |
+| `PERPLEXITY_OPENROUTER_KEY` | 선택. 비면 `OPENROUTER_KEY` 를 쓴다. 공용 키는 감성 분류와 잔액을 함께 쓰므로 시험 기간에 잔액을 매일 확인한다 |
+
+모델(`perplexity/sonar`)·출력 4,096토큰·질문 1,000자 상한은 코드에 고정이라 설정으로 바꾸지 않는다.
+
+### 9-2. 시간 조건 (전환·되돌리기 공통)
+
+그날 09:00 KST 정기 조사가 **끝난 것을 확인한 뒤**, 다음 정기 조사 30분 전까지만 한다. 조사 중에 앱을 다시 만들면
+예전 엔진이 같은 일정을 다른 시간 칸으로 다시 돌려 다른 AI 까지 다시 부를 수 있다.
+
+### 9-3. 적용 — 앱 컨테이너만 재생성
+
+`.env` 는 컨테이너를 다시 만들 때만 다시 읽힌다(재시작으로는 바뀌지 않는다).
+
+```bash
+docker compose --file /datadrive/apps/geo-tracker/docker-compose.yml up -d --force-recreate mbd-geo-tracker
+docker exec mbd-geo-tracker printenv PERPLEXITY_BACKEND   # openrouter (비밀 아님)
+```
+
+### 9-4. 확인
+
+- 첫 Perplexity 호출 때 앱 로그에 설정 1줄 — `[openrouter-pplx] config backend=openrouter model=perplexity/sonar cap=30 manualCap=10 key=dedicated|shared|missing` (키 값은 찍히지 않는다)
+- 호출마다 1줄 — `[openrouter-pplx] status=200 ms=… cost=… cited=참조/전체 oor=… inv=… trunc=… use=auto|manual day=YYYY-MM-DD n=…`
+- 하루 사용량 — `collector_state` 의 날짜별 행. 자동 수집은 `openrouter_pplx_daily:<한국 날짜>`, 수동 수집은 `openrouter_pplx_manual_daily:<한국 날짜>`. `count`(예약한 호출 수) · `costed`(비용이 응답에 있던 호출 수) · `costUsd`(비용 합) · `firstAt`·`lastAt`. `count − costed` 가 비용 불명 호출 수(실패·시간 초과·도중에 끊긴 호출)다. 시험 비용 합계는 두 종류 행을 모두 더한다.
+  ```sql
+  select key, value from collector_state where key like 'openrouter_pplx_%' order by key;
+  ```
+- 오류 코드
+  - `BACKEND_BLOCKED`(키 없음·키 거부·잔액 부족) — 401·402 뒤 30분 동안 Perplexity 만 막는다. 30분마다 1건으로 재확인하고, 재확인이 **정상 응답일 때만** 풀린다(네트워크 오류·서버 오류 등으로 끝나면 다시 30분). **DB 일시정지를 남기지 않는다.**
+  - `DAILY_CAP`(하루 상한) — 그 질문만 실패로 끝낸다. **DB 일시정지를 남기지 않는다.**
+  - `RATE_LIMITED`(429) — 이 모듈은 최대 120초 동안 Perplexity 요청을 멈춘다. 다만 **새 엔진(queue)에서는 기존 무료 재대기 규칙대로 DB(`collector_state`)에 `rate_pause:perplexity` 가 남아 Perplexity 제출이 최대 약 15분 멈출 수 있다**(429 가 거듭될수록 1분부터 두 배씩, 최대 15분). 예전 엔진은 DB 정지를 쓰지 않고 그 질문만 실패로 남긴다.
+  - 셋 다 다른 AI(ChatGPT·Gemini·Google AI 등) 수집은 멈추지 않는다.
+
+### 9-5. 되돌리기 — 설정 하나
+
+1. 시간 조건(9-2)을 지킨다.
+2. `.env` 에서 `PERPLEXITY_BACKEND` 를 `brightdata` 로 바꾸거나 줄을 지운다.
+3. 앱 컨테이너만 재생성한다(9-3 명령).
+4. 되돌린 시각을 배포 기록에 남긴다.
+
+코드 되돌리기·DB 정리는 필요 없다. 이미 저장된 시험 결과는 그대로 둔다. 재생성 순간 끊긴 호출은 `count − costed` 에 "비용 불명"으로 잡힌다.
+새 엔진에서 429 직후에 되돌렸다면 `rate_pause:perplexity` 가 남은 동안(최대 약 15분) Perplexity 제출만 쉬었다가 Bright Data 로 이어진다.
+
 ## 롤백
 
 ```bash

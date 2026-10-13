@@ -10,6 +10,7 @@ import {
   isAnswerLikeString,
   normalizeAnswer,
   buildInputRecord,
+  countryOrDefault,
   requestCountryFor,
   PARSE_FAILURE_MARKER,
 } from "./brightdata-scraper";
@@ -108,8 +109,48 @@ describe("buildInputRecord — 지역값(country) 전송 규칙", () => {
     expect(buildInputRecord("google_ai", "질문", "KR").country).toBe("KR");
   });
 
-  it("ChatGPT 는 country 를 지원하지 않으므로 보내지 않는다", () => {
-    expect("country" in buildInputRecord("chatgpt", "질문", "KR")).toBe(false);
+  it("ChatGPT 는 country 를 싣고 웹 검색을 켠다 (2026-10-14 § CHATGPT_GEMINI_COUNTRY)", () => {
+    expect(buildInputRecord("chatgpt", "질문", "KR")).toEqual({
+      url: "https://chatgpt.com/",
+      prompt: "질문",
+      web_search: true,
+      additional_prompt: "",
+      country: "KR",
+    });
+  });
+
+  it("ChatGPT 는 country 가 비면 키를 넣지 않는다(웹 검색은 켠다)", () => {
+    for (const c of [undefined, ""]) {
+      const rec = buildInputRecord("chatgpt", "질문", c);
+      expect("country" in rec).toBe(false);
+      expect(rec.web_search).toBe(true);
+    }
+  });
+
+  it("Gemini 는 country 를 싣는다 · 비면 키를 넣지 않는다", () => {
+    expect(buildInputRecord("gemini", "질문", "KR")).toEqual({
+      url: "https://gemini.google.com/",
+      prompt: "질문",
+      index: 1,
+      country: "KR",
+    });
+    expect(buildInputRecord("gemini", "질문", undefined)).toEqual({
+      url: "https://gemini.google.com/",
+      prompt: "질문",
+      index: 1,
+    });
+  });
+
+  it("Google AI·Copilot·Grok 은 바뀌지 않았다", () => {
+    expect(buildInputRecord("google_ai", "질문", "KR")).toEqual({ url: "https://google.com/aimode", prompt: "질문", country: "KR" });
+    expect(buildInputRecord("google_ai", "질문", undefined)).toEqual({ url: "https://google.com/aimode", prompt: "질문" });
+    expect(buildInputRecord("copilot", "질문", "KR")).toEqual({
+      url: "https://copilot.microsoft.com/",
+      prompt: "질문",
+      index: 1,
+      geolocation: "KR",
+    });
+    expect(buildInputRecord("grok", "질문", undefined)).toEqual({ url: "https://grok.com/", prompt: "질문", index: 1 });
   });
 });
 
@@ -118,6 +159,29 @@ describe("requestCountryFor — 요청에 실을 국가 (§ PERPLEXITY_NO_COUNTR
     expect(requestCountryFor("perplexity", "KR")).toBeUndefined();
     expect(requestCountryFor("perplexity", "US")).toBeUndefined();
     expect(requestCountryFor("perplexity", null)).toBeUndefined();
+  });
+
+  it("국가 값 정리 — 공백 제거·대문자, 두 글자 영문이 아니면 없음 (검수 1회차 결함 3)", () => {
+    expect(requestCountryFor("chatgpt", "kr")).toBe("KR");
+    expect(requestCountryFor("gemini", " kr ")).toBe("KR");
+    expect(requestCountryFor("google_ai", "")).toBeUndefined();
+    expect(requestCountryFor("google_ai", "   ")).toBeUndefined();
+    expect(requestCountryFor("chatgpt", "Korea")).toBeUndefined();
+    expect(requestCountryFor("perplexity", " kr ")).toBeUndefined();
+  });
+
+  it("countryOrDefault — 값이 없거나 형식이 틀리면 KR, 있으면 정리된 값", () => {
+    for (const v of [undefined, null, "", "  ", "Korea"]) expect(countryOrDefault(v)).toBe("KR");
+    expect(countryOrDefault(" kr ")).toBe("KR");
+    expect(countryOrDefault("us")).toBe("US");
+  });
+
+  it("buildInputRecord 도 소문자·공백을 정리해 싣고, 빈 값은 싣지 않는다", () => {
+    expect(buildInputRecord("chatgpt", "질문", " kr ").country).toBe("KR");
+    expect(buildInputRecord("gemini", "질문", "kr").country).toBe("KR");
+    expect("country" in buildInputRecord("gemini", "질문", "  ")).toBe(false);
+    expect(buildInputRecord("google_ai", "질문", "kr").country).toBe("KR");
+    expect(buildInputRecord("copilot", "질문", "kr").geolocation).toBe("KR");
   });
 
   it("다른 AI 는 받은 값 그대로 (Google AI 는 KR 을 계속 보낸다)", () => {

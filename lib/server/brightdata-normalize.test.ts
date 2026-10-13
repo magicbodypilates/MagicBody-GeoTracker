@@ -888,6 +888,248 @@ describe("판정 기준표 — 거부 X1～X18 · 저장 O1～O18 · 트레이�
   });
 });
 
+/* ============================================================
+ * 판정 기준표 2 — 짧은 답의 화면 글자·거절 문구 (2026-10-14 운영 실측)
+ *
+ * 거부 줄은 운영 DB 에 정상 답으로 저장됐던 문장이다 — AI 서비스 화면 문구·거절 문구·광고 카드라 고객 정보가
+ * 아니다. 저장 줄은 같은 날 실측한 정상 답과 같은 모양·길이로, 분야 낱말만 바꿨다(PUBLIC 저장소).
+ * ============================================================ */
+describe("판정 기준표 2 — 짧은 답의 화면 글자·거절 문구 (2026-10-14)", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+  const LONG_KO =
+    "초보자라면 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. 첫 달은 주 2회로 시작해 몸이 적응하면 횟수를 늘리세요. " +
+    "체험 수업에서 강사가 자세를 얼마나 자주 잡아 주는지, 수업 뒤 질문을 받아 주는지도 함께 확인해 보세요. 지역과 예산을 알려 주시면 더 좁혀 드릴 수 있습니다.";
+
+  const reject: Array<[string, string, string]> = [
+    ["Gemini 거절 — 텍스트 기반 AI", "저는 텍스트 기반 AI이기 때문에 그것은 도와드릴 수가 없습니다.", "refusal"],
+    ["Gemini 거절 — 언어 모델", "저는 언어 모델입니다. 그것은 제가 할 수 있는 범위를 넘어서는 것이라 할 수 없어요.", "refusal"],
+    ["Gemini 거절 — 프로그래밍 범위", "그것은 저의 프로그래밍 범위를 넘어서는 것입니다. 저는 텍스트를 생성할 뿐이에요.", "refusal"],
+    ["Gemini 거절 — 영어 text-based AI", "I'm a text-based AI and can't help with that.", "refusal"],
+    ["Gemini 거절 — 영어 language model", "I'm a language model and don't have the capacity to help with that.", "refusal"],
+    ["ChatGPT 첫 화면 제안", "What would make your day easier right now? Explain a topic Make a plan Create an image", "ui_chrome"],
+    ["ChatGPT 로그인 권유 — advice", "Log in for advice and recommendations tailored to you. Log in Sign up for free", "ui_chrome"],
+    ["ChatGPT 로그인 권유 — guidance", "Log in for personalized, step-by-step guidance. Log in Sign up for free", "ui_chrome"],
+    [
+      "ChatGPT 로그인 권유 — career",
+      "Log in for more personalized help with work, projects, and career goals. Log in Sign up for free",
+      "ui_chrome",
+    ],
+    ["ChatGPT 위치 버튼 — 구분점", "Kuala Lumpur • Use precise location", "ui_chrome"],
+    ["ChatGPT 위치 버튼", "Auckland Use precise location", "ui_chrome"],
+    ["ChatGPT 대기 안내", "This may take a while...", "ui_chrome"],
+    [
+      "ChatGPT 광고 카드 — Ad Sponsored options",
+      "Resume.io Resume Done Right Turn ChatGPT content into a real resume. Ad Sponsored options",
+      "ui_chrome",
+    ],
+    [
+      "ChatGPT 광고 카드 — Sponsored",
+      "Top10.com Sponsored Online Degree Colleges See Online Schools and Degree Options.",
+      "ui_chrome",
+    ],
+    ["질문 + 로그인 권유", `${Q}\nLog in for advice and recommendations tailored to you. Log in Sign up for free`, "prompt_echo"],
+  ];
+
+  const keep: Array<[string, string]> = [
+    [
+      "짧지만 내용 있는 답",
+      "네 . 온라인으로 가능한 과정이 있습니다. 다만 “온라인 수료증”과 실제로 강사 취업에 활용되는 운동 지도자 자격 은 구분해서 봐야 합니다.",
+    ],
+    [
+      "지역을 되묻는 답",
+      "어느 지역에서 자격증을 따실 예정인지 알려주시면, 그 지역 기준으로 교육기관을 찾아드릴게요. 예를 들어 서울/경기, 부산, 대전, 제주, 해외 처럼 말씀해 주세요.",
+    ],
+    [
+      "긴 정상 답 끝에 로그인 권유",
+      `${LONG_KO} 원하시면 지역별로 비교해드릴게요. Log in for advice and recommendations tailored to you. Log in Sign up for free`,
+    ],
+    ["긴 답 중간의 '도와드릴 수 없'", `${LONG_KO} 다만 의료 진단은 제가 도와드릴 수 없는 부분이라 통증이 있다면 먼저 병원 진료를 받아 보세요. ${LONG_KO}`],
+    ["긴 답 중간의 언어 모델 자기소개", `저는 언어 모델이라 직접 다녀 보지는 못했지만, ${LONG_KO}`],
+    ["긴 답 중간의 Sponsored", `${LONG_KO} 검색 결과 맨 위의 Sponsored 표시가 붙은 곳은 광고이니 후기를 따로 확인해 보세요.`],
+    // 검수 1회차 결함 1·2 — 짧은 답에 거절·광고 낱말이 있어도 내용이 이어지면 정상 답이다.
+    ["짧은 답 — 내용 뒤 '도와드릴 수 없'", "서울 강남에는 A센터, B센터가 있습니다. 수강료는 제가 도와드릴 수 없으니 센터에 직접 문의해 주세요."],
+    ["짧은 답 — '저는 언어 모델이지만' 뒤 내용", "저는 언어 모델이지만 서울에서는 A센터와 B센터가 많이 알려져 있고 자격증 과정도 운영합니다."],
+    [
+      "짧은 답 — 'I am a language model, but' 뒤 내용",
+      "I am a language model, but Seoul has several well known fitness certification academies such as A and B.",
+    ],
+    [
+      "짧은 답 — 'beyond my capabilities' 뒤 내용",
+      "Recovery timelines are beyond my capabilities to guarantee, but most students finish in 3 months at A academy.",
+    ],
+    [
+      "짧은 답 — 문장 속 낱말 Sponsored",
+      "Sponsored posts on Instagram often promote fitness studios in Seoul; check reviews carefully before enrolling.",
+    ],
+    ["짧은 답 — '이전 언어 모델'(앞에 한글이 붙은 '전')", "이전 언어 모델 연구와 무관하게 운동 자격증은 협회별로 다르며 A협회가 가장 대중적입니다."],
+  ];
+
+  it.each(reject)("거부 — %s", (_id, answer, reason) => {
+    expect(detectNonAnswer(answer, Q)?.reason).toBe(reason);
+    for (const provider of ["chatgpt", "gemini"] as const) {
+      const f = failureOf(() => normalizeScrapePayload({ provider, prompt: Q, payload: [{ answer_text: answer }] }));
+      expect(f.code).toBe("EMPTY_ANSWER");
+    }
+  });
+
+  it.each(keep)("저장 — %s (저장 본문은 원문 그대로)", (_id, answer) => {
+    expect(detectNonAnswer(answer, Q)).toBeNull();
+    for (const provider of ["chatgpt", "gemini"] as const) {
+      const r = normalizeScrapePayload({ provider, prompt: Q, payload: [{ answer_text: answer }] });
+      expect(r.answer).toBe(answer);
+    }
+  });
+
+  it("거절 판정은 짧은 답에만 — 문턱 바로 위 길이의 거절 문장은 통과한다", () => {
+    const refusalHead = "저는 텍스트 기반 AI이기 때문에 그것은 도와드릴 수가 없습니다.";
+    expect(detectNonAnswer(refusalHead, Q)?.reason).toBe("refusal");
+    expect(detectNonAnswer(`${refusalHead} ${LONG_KO}`, Q)).toBeNull();
+  });
+
+  it("오류 문구에 사유만 담고 답 원문은 넣지 않는다", () => {
+    const f = failureOf(() =>
+      normalizeScrapePayload({
+        provider: "gemini",
+        prompt: Q,
+        payload: [{ answer_text: "저는 언어 모델입니다. 그것은 제가 할 수 있는 범위를 넘어서는 것이라 할 수 없어요." }],
+      }),
+    );
+    expect(f.message).toContain("AI 거절 문구");
+    expect(f.message).not.toContain("언어 모델입니다");
+    const g = failureOf(() =>
+      normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: "This may take a while..." }] }),
+    );
+    expect(g.message).toContain("화면 메뉴 글자");
+  });
+});
+
+/* ============================================================
+ * ChatGPT 답 영역 HTML 의 외부 링크 → 구조화 인용 (§ CHATGPT_ANSWER_SECTION_LINKS, 2026-10-14)
+ * 실제 수집 레코드와 같은 모양(링크 글자는 숫자 엔티티, 단어마다 span·주석으로 감쌈)을 지어낸 값으로 만든다.
+ * ============================================================ */
+describe("ChatGPT answer_section_html 출처 추출", () => {
+  const Q = "초보자가 다니기 좋은 운동 학원을 추천해 주세요";
+  const ANS =
+    "초보자라면 수업 인원이 적고 동작 설명이 자세한 곳을 고르는 것이 좋습니다. 첫 달은 주 2회로 시작해 몸이 적응하면 횟수를 늘리세요.";
+  const ent = (s: string) => Array.from(s).map((ch) => (ch === " " ? " " : `&#x${ch.codePointAt(0)!.toString(16).toUpperCase()};`)).join("");
+  // 실측처럼 단어마다 span·주석으로 감싸 링크 안 HTML 을 1,000자 넘게 만든다.
+  const wrapWords = (s: string) =>
+    s
+      .split(" ")
+      .map(
+        (w) =>
+          `<!--comp--><!--if--><span data-d-component="text" data-d-inline class="${"xabc ".repeat(20)}" style="--x-color: var(--d-link-hover-color);"><!----><span data-d-streaming-word style>${ent(w)}</span></span>`,
+      )
+      .join(" ");
+  const link = (href: string, text: string) =>
+    `<!--comp--><a data-d-component="link" href="${href}" target="_blank" rel="noopener noreferrer" class="${"x1heor9g ".repeat(10)}">${wrapWords(text)}</a>`;
+  const section = (...links: string[]) => `<div class="markdown"><p>${ent("본문 문단")}</p>${links.join("<p>…</p>")}</div>`;
+
+  it("링크 안 HTML 이 1,000자를 넘어도 제목을 꺼낸다(엔티티 해제·태그 제거·공백 정리)", () => {
+    const html = section(link("https://edu.example/course?a=1&amp;b=2", "공식 홈페이지 및 교육과정"));
+    expect(html.length).toBeGreaterThan(1000);
+    const r = normalizeScrapePayload({
+      provider: "chatgpt",
+      prompt: Q,
+      payload: [{ answer_text: ANS, citations: [], links_attached: [], search_sources: null, answer_section_html: html }],
+    });
+    expect(r.citations).toEqual([
+      { url: "https://edu.example/course?a=1&b=2", domain: "edu.example", title: "공식 홈페이지 및 교육과정", description: "" },
+    ]);
+    expect(r.sources).toContain("https://edu.example/course?a=1&b=2");
+  });
+
+  it("chatgpt.com·openai.com·oaiusercontent.com·자산 경로·구글 검색·http 아닌 링크는 뺀다 · 중복은 한 번", () => {
+    const html = section(
+      link("https://chatgpt.com/?hl=ko", "언어"),
+      link("https://help.openai.com/x", "도움말"),
+      link("https://files.oaiusercontent.com/f", "파일"),
+      link("https://cdn.example/app.js", "스크립트"),
+      link("https://www.google.com/search?q=%EC%98%88%EC%8B%9C", "검색"),
+      link("mailto:a@b.example", "메일"),
+      link("javascript:void(0)", "버튼"),
+      link("https://www.studio.example/", "지어낸 스튜디오"),
+      link("https://www.studio.example/", "같은 주소 다시"),
+      link("https://sites.google.com/view/edu-example", "교육과정 확인하기"),
+    );
+    const r = normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: ANS, answer_section_html: html }] });
+    expect(r.citations.map((c) => c.url)).toEqual(["https://www.studio.example/", "https://sites.google.com/view/edu-example"]);
+    expect(r.citations[0]).toMatchObject({ domain: "studio.example", title: "지어낸 스튜디오" });
+  });
+
+  it("구조화 인용 필드와 합칠 때 URL 중복을 뺀다 · 최대 50개", () => {
+    const many = section(...Array.from({ length: 70 }, (_, i) => link(`https://site${i}.example/`, `사이트 ${i}`)));
+    const r = normalizeScrapePayload({
+      provider: "chatgpt",
+      prompt: Q,
+      payload: [{ answer_text: ANS, citations: [{ url: "https://site0.example/", title: "앞 필드" }], answer_section_html: many }],
+    });
+    expect(r.citations[0]).toMatchObject({ url: "https://site0.example/", title: "앞 필드" });
+    expect(r.citations.filter((c) => c.url === "https://site0.example/")).toHaveLength(1);
+    expect(r.citations).toHaveLength(50); // 앞 필드 1 + 답 영역 49(site0 중복 제외 · 답 영역 추출 50개 상한)
+  });
+
+  it("data-href 같은 다른 속성은 링크 주소가 아니다 (검수 1회차 결함 4a)", () => {
+    const html =
+      `<a data-href="https://tracker.example/x" class="c">${ent("가짜")}</a>` +
+      `<a data-href="https://tracker.example/y" href="https://real.example/">${ent("진짜 주소")}</a>`;
+    const r = normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: ANS, answer_section_html: html }] });
+    expect(r.citations).toEqual([{ url: "https://real.example/", domain: "real.example", title: "진짜 주소", description: "" }]);
+  });
+
+  it("다른 AI 에는 적용하지 않는다", () => {
+    const html = section(link("https://www.studio.example/", "지어낸 스튜디오"));
+    for (const provider of ["gemini", "google_ai", "perplexity", "copilot", "grok"] as const) {
+      const r = normalizeScrapePayload({ provider, prompt: Q, payload: [{ answer_text: ANS, answer_section_html: html }] });
+      expect(r.citations).toEqual([]);
+    }
+  });
+
+  it("문자열이 아니거나 비어 있으면 아무것도 꺼내지 않는다", () => {
+    for (const bad of [null, 123, ["<a href=\"https://x.example/\">x</a>"], ""]) {
+      const r = normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: ANS, answer_section_html: bad }] });
+      expect(r.citations).toEqual([]);
+    }
+  });
+
+  it("닫는 </a> 가 없으면 제목 없이 주소만 · <abbr>·<article> 은 링크가 아니다", () => {
+    const html = `<abbr href="https://abbr.example/">x</abbr><article href="https://art.example/"></article><a href='https://open.example/'>${ent("닫힘 없음")}`;
+    const r = normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: ANS, answer_section_html: html }] });
+    expect(r.citations).toEqual([{ url: "https://open.example/", domain: "open.example", title: "", description: "" }]);
+  });
+
+  const best = (fn: () => void) => {
+    fn();
+    let min = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      fn();
+      min = Math.min(min, performance.now() - t);
+    }
+    return min;
+  };
+
+  it.each([
+    ["닫힘 없는 '<a href=\"https://x.example/a\">' 20,000번", '<a href="https://x.example/a">'.repeat(20_000)],
+    ["'>' 없는 '<a ' 100,000번", "<a ".repeat(100_000)],
+    ["'<a ' 50,000번 뒤 '>' 하나", `${"<a ".repeat(50_000)}>`],
+    ["서로 다른 주소 · 닫힘 없음 5,000번", Array.from({ length: 5_000 }, (_, i) => `<a href="https://s${i}.example/">글자`).join("")],
+  ])("큰 적대 입력 — %s → 1초 미만(느린 환경 여유)", (_name, html) => {
+    expect(best(() => normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: ANS, answer_section_html: html }] }))).toBeLessThan(1000);
+  });
+
+  it("30만 자 실측 크기 답 영역 → 1초 미만(느린 환경 여유)", () => {
+    const filler = `<div>${wrapWords("필러 문장 단어 여러 개")}</div>`;
+    const html = filler.repeat(Math.ceil(300_000 / filler.length)) + section(link("https://www.studio.example/", "지어낸 스튜디오"));
+    expect(html.length).toBeGreaterThan(300_000);
+    let r: ReturnType<typeof normalizeScrapePayload> | undefined;
+    expect(best(() => {
+      r = normalizeScrapePayload({ provider: "chatgpt", prompt: Q, payload: [{ answer_text: ANS, answer_section_html: html }] });
+    })).toBeLessThan(1000);
+    expect(r?.citations.map((c) => c.title)).toEqual(["지어낸 스튜디오"]);
+  });
+});
+
 /**
  * 원시 통신 기록·화면 메뉴 글자 — 2026-09-25 운영 실측(Perplexity "성공" 3건 중 2건이 쓰레기 답).
  *   - response_raw 는 Grok 에서만 답 후보다(§ RESPONSE_RAW_GROK_ONLY).

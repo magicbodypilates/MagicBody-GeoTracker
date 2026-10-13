@@ -38,6 +38,7 @@ import type {
 } from "@/drizzle/schema";
 import {
   cancelSnapshot,
+  countryOrDefault,
   downloadSnapshotPayload,
   getSnapshotProgress,
   isKnownProvider,
@@ -924,7 +925,7 @@ async function createRoundInTx(
           provider,
           seq: qi * providers.length + pi,
           // Perplexity 는 국가를 요청하지 않는다(NULL) — § PERPLEXITY_NO_COUNTRY. 다른 AI 는 예전 그대로.
-          countryRequested: requestCountryFor(provider, sched.geolocation ?? "KR") ?? null,
+          countryRequested: requestCountryFor(provider, countryOrDefault(sched.geolocation)) ?? null,
           status: "queued",
           createdAt: now,
           updatedAt: now,
@@ -965,7 +966,7 @@ async function topUpRunningRound(
         promptText,
         provider,
         seq: seq++,
-        countryRequested: requestCountryFor(provider, sched.geolocation ?? "KR") ?? null,
+        countryRequested: requestCountryFor(provider, countryOrDefault(sched.geolocation)) ?? null,
         status: "queued",
         createdAt: now,
         updatedAt: now,

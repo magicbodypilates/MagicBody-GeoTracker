@@ -42,6 +42,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("수동 조회 라우트(/api/scrape) — 국가 기본값 KR (2026-10-14 · 검수 1회차 결함 3)", () => {
+  it.each([
+    ["국가 칸 없음", undefined],
+    ["빈 문자열", ""],
+    ["공백·소문자", " kr "],
+  ])("%s → ChatGPT·Gemini 요청에 KR 을 싣는다", async (_name, country) => {
+    const { NextRequest } = await import("next/server");
+    const { POST } = await import("@/app/api/scrape/route");
+    for (const provider of ["chatgpt", "gemini"] as const) {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValue(respond(200, [{ answer_text: "충분히 긴 테스트 답변 문장입니다. 예시 기관 소개와 수업 안내." }]));
+      const body: Record<string, unknown> = { provider, prompt: PROMPT, forceRefresh: true };
+      if (country !== undefined) body.country = country;
+      const res = await POST(new NextRequest("http://localhost/api/scrape", { method: "POST", body: JSON.stringify(body) }));
+      expect(res.status).toBe(200);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(String(init.body)).input[0].country).toBe("KR");
+    }
+  });
+});
+
 describe("submitScrape — 지금 쓰는 동기 요청(/scrape)과 같은 호출", () => {
   it("요청 형식: POST /datasets/v3/scrape + notify=false·include_errors=true·format=json + { input: [레코드] } + 시간 제한", async () => {
     fetchMock.mockResolvedValue(respond(200, [{ answer_text: "충분히 긴 테스트 답변 문장입니다. 예시 기관 소개." }]));

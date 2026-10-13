@@ -99,11 +99,31 @@ const providerBaseUrl: Record<Provider, string> = {
  *
  * 수집 경로 셋(자동 수집 엔진·예전 runTick·수동 수집 runAiScraper)이 모두 이 함수를 거친다 — 엔진은 항목에
  * 기록하는 요청 국가·시도 기록의 국가도 이 값으로 남겨, "국가를 보냈다가 실패" 로 오인한 재시도가 붙지 않게 한다.
- * 다른 AI 는 받은 값 그대로다(Google AI 는 KR 을 계속 보낸다. ChatGPT·Gemini 는 buildInputRecord 가 원래 뺀다).
+ * 다른 AI 는 받은 값 그대로다(Google AI·ChatGPT·Gemini 는 KR 을 보낸다 — § CHATGPT_GEMINI_COUNTRY).
  */
 export function requestCountryFor(provider: string, country: string | null | undefined): string | undefined {
   if (provider === "perplexity") return undefined;
-  return country ?? undefined;
+  return normalizeCountryCode(country);
+}
+
+/** 국가 기본값 — 일정·수동 조회에 국가가 없으면(빈 문자열·공백·형식 오류 포함) 이 값으로 보낸다. */
+export const DEFAULT_COUNTRY = "KR";
+
+/**
+ * 국가 값 정리 (검수 1회차 결함 3) — 앞뒤 공백을 지우고 영문 두 글자면 대문자로(" kr " → "KR"), 아니면 undefined.
+ * Bright Data 는 ISO 3166-1 alpha-2 대문자만 받는다(소문자 "kr" 은 거부된 기록이 있다).
+ */
+export function normalizeCountryCode(country: string | null | undefined): string | undefined {
+  const s = String(country ?? "").trim();
+  return /^[A-Za-z]{2}$/.test(s) ? s.toUpperCase() : undefined;
+}
+
+/**
+ * 자동 수집·수동 조회가 같이 쓰는 "값이 없으면 KR" — `??` 와 `||` 가 경로마다 달라 빈 문자열이면 한쪽은 국가 없이,
+ * 다른 쪽은 KR 로 가던 차이를 없앤다. 반환값은 정리된 국가 코드다.
+ */
+export function countryOrDefault(country: string | null | undefined): string {
+  return normalizeCountryCode(country) ?? DEFAULT_COUNTRY;
 }
 
 export function buildInputRecord(
@@ -112,20 +132,30 @@ export function buildInputRecord(
   country?: string,
 ): Record<string, unknown> {
   const url = providerBaseUrl[provider];
-  const countryValue = country ?? "";
+  // 새 호출부가 정리를 빠뜨려도 소문자·공백이 실리지 않게 여기서도 정리한다(결함 3).
+  const countryValue = normalizeCountryCode(country) ?? "";
 
-  // ChatGPT 데이터셋은 country 파라미터를 지원하지 않음 — 비어 있지 않은 값을 보내면
-  // Bright Data 가 "country is not available for this scraper" 로 400 거부.
-  // Google AI / Copilot 는 ISO 3166-1 alpha-2 대문자만 허용 (KR ✓, kr ✗).
+  // § CHATGPT_GEMINI_COUNTRY (2026-10-14) — ChatGPT·Gemini 도 국가를 싣는다.
+  //   예전엔 둘 다 국가를 버려 Bright Data 가 전 세계 임의 위치에서 질문했다(ChatGPT 가 미국 도시 기준으로
+  //   답하고, Gemini 화면에 영국 IP 위치가 찍힌 실측). 공식 입력 스키마에 둘 다 country 가 있고, KR 을 붙인
+  //   시험 수집 20건이 오류 0건으로 접수됐다. 2026-05 의 "Selected country is not available" 거부는 소문자
+  //   "kr" 시절 기록이다 — Google AI·Copilot·ChatGPT·Gemini 모두 ISO 3166-1 alpha-2 대문자로 보낸다.
+  //   ChatGPT 의 web_search 는 공식 기본값 true(실제 앱과 같은 조건 — false 면 검색 버튼을 누르지 않는다).
   switch (provider) {
-    case "chatgpt":
-      return { url, prompt, web_search: false, additional_prompt: "" };
+    case "chatgpt": {
+      const rec: Record<string, unknown> = { url, prompt, web_search: true, additional_prompt: "" };
+      if (countryValue) rec.country = countryValue;
+      return rec;
+    }
     case "perplexity":
       // 국가는 넘겨받아도 싣지 않는다(§ PERPLEXITY_NO_COUNTRY — requestCountryFor). 호출부가 이미 빼지만,
       // 새 호출부가 빠뜨려도 국가가 실리지 않게 하는 안전망이다.
       return { url, prompt, index: 1 };
-    case "gemini":
-      return { url, prompt, index: 1 };
+    case "gemini": {
+      const rec: Record<string, unknown> = { url, prompt, index: 1 };
+      if (countryValue) rec.country = countryValue;
+      return rec;
+    }
     case "google_ai": {
       const rec: Record<string, unknown> = { url, prompt };
       if (countryValue) rec.country = countryValue;
@@ -135,7 +165,7 @@ export function buildInputRecord(
     case "grok":
     default: {
       const rec: Record<string, unknown> = { url, prompt, index: 1 };
-      if (country) rec.geolocation = country;
+      if (countryValue) rec.geolocation = countryValue;
       return rec;
     }
   }
@@ -232,110 +262,112 @@ function stripAnswerHtml(value: unknown): unknown {
   return value;
 }
 
-function extractSourcesFromAnswer(answer: string) {
-  const found = new Set<string>();
+// 답 본문·답 영역 HTML 에서 뽑은 링크가 제3자 출처인지 — extractSourcesFromAnswer 와
+// ChatGPT 답 영역 링크 추출(extractAnswerSectionLinks)이 같은 기준을 쓴다(2026-10-14 모듈 수준으로 꺼냄).
+const blockedHostFragments = [
+  // AI platforms
+  "chatgpt.com",
+  "openai.com",
+  "oaiusercontent.com",
+  "perplexity.ai",
+  "pplx.ai",
+  "copilot.microsoft.com",
+  "grok.com",
+  "x.ai",
+  "gemini.google.com",
+  "bard.google.com",
+  "google.com/ai",
+  // CDN / asset hosts
+  "cloudfront.net",
+  "cdn.prod.website-files.com",
+  "cdn.jsdelivr.net",
+  "cdnjs.cloudflare.com",
+  "unpkg.com",
+  "fastly.net",
+  "akamaihd.net",
+  "cloudflare.com",
+  "amazonaws.com",
+  // Tracking / analytics / pixels
+  "connect.facebook.net",
+  "facebook.net",
+  "google-analytics.com",
+  "googletagmanager.com",
+  "doubleclick.net",
+  "googlesyndication.com",
+  "googleadservices.com",
+  "hotjar.com",
+  "segment.io",
+  "segment.com",
+  "mixpanel.com",
+  "amplitude.com",
+  "sentry.io",
+  // Namespace / spec URIs
+  "w3.org",
+  "schema.org",
+  "xmlns.com",
+];
 
-  const blockedHostFragments = [
-    // AI platforms
-    "chatgpt.com",
-    "openai.com",
-    "oaiusercontent.com",
-    "perplexity.ai",
-    "pplx.ai",
-    "copilot.microsoft.com",
-    "grok.com",
-    "x.ai",
-    "gemini.google.com",
-    "bard.google.com",
-    "google.com/ai",
-    // CDN / asset hosts
-    "cloudfront.net",
-    "cdn.prod.website-files.com",
-    "cdn.jsdelivr.net",
-    "cdnjs.cloudflare.com",
-    "unpkg.com",
-    "fastly.net",
-    "akamaihd.net",
-    "cloudflare.com",
-    "amazonaws.com",
-    // Tracking / analytics / pixels
-    "connect.facebook.net",
-    "facebook.net",
-    "google-analytics.com",
-    "googletagmanager.com",
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "hotjar.com",
-    "segment.io",
-    "segment.com",
-    "mixpanel.com",
-    "amplitude.com",
-    "sentry.io",
-    // Namespace / spec URIs
-    "w3.org",
-    "schema.org",
-    "xmlns.com",
-  ];
+const assetPathPattern = /\.(js|css|map|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|mp4|webm|mp3)(\?|$)/i;
 
-  const assetPathPattern = /\.(js|css|map|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|eot|mp4|webm|mp3)(\?|$)/i;
+const junkPathFragments = [
+  "/signals/",
+  "/pixel",
+  "/tracking",
+  "/beacon",
+  "/analytics",
+  "/__",
+  "/wp-content/uploads/",
+  "/wp-includes/",
+];
 
-  const junkPathFragments = [
-    "/signals/",
-    "/pixel",
-    "/tracking",
-    "/beacon",
-    "/analytics",
-    "/__",
-    "/wp-content/uploads/",
-    "/wp-includes/",
-  ];
+const isThirdPartyCitation = (urlValue: string) => {
+  try {
+    const parsed = new URL(urlValue);
+    const host = parsed.hostname.toLowerCase();
+    const full = `${host}${parsed.pathname}`.toLowerCase();
 
-  const isThirdPartyCitation = (urlValue: string) => {
-    try {
-      const parsed = new URL(urlValue);
-      const host = parsed.hostname.toLowerCase();
-      const full = `${host}${parsed.pathname}`.toLowerCase();
-
-      if (!(parsed.protocol === "http:" || parsed.protocol === "https:")) {
-        return false;
-      }
-
-      if (blockedHostFragments.some((entry) => host === entry || host.endsWith(`.${entry}`))) {
-        return false;
-      }
-
-      if (assetPathPattern.test(parsed.pathname)) {
-        return false;
-      }
-
-      if (junkPathFragments.some((frag) => full.includes(frag))) {
-        return false;
-      }
-
-      if (
-        parsed.pathname.includes("/_spa/") ||
-        parsed.pathname.includes("/assets/") ||
-        full.includes("static")
-      ) {
-        return false;
-      }
-
-      // Reject overly long query strings (tracking params, base64 images, etc.)
-      if (parsed.search.length > 200) {
-        return false;
-      }
-
-      // Reject data URIs or blob-like things that somehow parsed
-      if (host === "" || host === "localhost") {
-        return false;
-      }
-
-      return true;
-    } catch {
+    if (!(parsed.protocol === "http:" || parsed.protocol === "https:")) {
       return false;
     }
-  };
+
+    if (blockedHostFragments.some((entry) => host === entry || host.endsWith(`.${entry}`))) {
+      return false;
+    }
+
+    if (assetPathPattern.test(parsed.pathname)) {
+      return false;
+    }
+
+    if (junkPathFragments.some((frag) => full.includes(frag))) {
+      return false;
+    }
+
+    if (
+      parsed.pathname.includes("/_spa/") ||
+      parsed.pathname.includes("/assets/") ||
+      full.includes("static")
+    ) {
+      return false;
+    }
+
+    // Reject overly long query strings (tracking params, base64 images, etc.)
+    if (parsed.search.length > 200) {
+      return false;
+    }
+
+    // Reject data URIs or blob-like things that somehow parsed
+    if (host === "" || host === "localhost") {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+function extractSourcesFromAnswer(answer: string) {
+  const found = new Set<string>();
 
   const normalize = (urlValue: string) => {
     try {
@@ -626,7 +658,84 @@ const RAW_PAYLOAD_TEXT: Record<RawPayloadKind, string> = {
   json: "JSON 데이터 덩어리",
 };
 
-export type NonAnswerReason = "prompt_echo" | "too_few_chars" | "ui_chrome";
+/*
+ * § 짧은 답의 화면 글자·거절 문구 (2026-10-14 운영 실측)
+ *
+ * 운영 DB 에 정상 답으로 저장돼 "언급 없음"으로 집계된 실제 문장들이다.
+ *   - ChatGPT 화면 글자: 로그인 권유("Log in for … Log in Sign up for free") · 위치 버튼("… Use precise location")
+ *     · 대기 안내("This may take a while...") · 첫 화면 제안("What would make your day easier right now? …")
+ *     · 광고 카드("… Ad Sponsored options", "Top10.com Sponsored …")
+ *   - Gemini 거절: "저는 텍스트 기반 AI이기 때문에 …" · "저는 언어 모델입니다 …" · "… 프로그래밍 범위를 넘어서는 …"
+ * 오탈락 방지가 우선이라 두 갈래로 나눈다.
+ *   (1) 화면 글자는 **판정 문자열에서만 지우고** 남은 의미 문자로 판정한다 — 긴 정상 답 끝에 로그인 권유가
+ *       붙어도 본문이 남아 통과하고, 화면 글자뿐이던 답은 남는 것이 거의 없어 걸린다. 저장 본문은 그대로다.
+ *   (2) 거절 문구·광고 표시는 **짧은 답**(의미 문자 SHORT_NON_ANSWER_MAX_CHARS 이하)에만, 그리고 그 문구가 답의
+ *       **대부분일 때만** 적용한다(검수 1회차 결함 1).
+ *       - 거절: 거절 문구를 판정 문자열에서 지운 뒤 남은 의미 문자가 REFUSAL_REST_MAX_CHARS 이하일 때만 거절이다.
+ *         실측 거절 문장은 남는 것이 11～16자("그것은 … 것입니다")이고, "저는 언어 모델이지만 서울에서는 …"처럼
+ *         거절 문구 뒤에 내용이 이어지는 답은 30자 넘게 남아 통과한다.
+ *       - 광고: "Ad Sponsored options" 나 "도메인 Sponsored"(예 "Top10.com Sponsored")처럼 광고 카드 모양일 때만
+ *         광고다. 문장 속 낱말 "Sponsored posts …" 는 광고 카드가 아니다.
+ */
+export const SHORT_NON_ANSWER_MAX_CHARS = 120;
+/** 거절 문구를 지운 뒤 이 수 이하의 의미 문자만 남으면 거절이다. */
+export const REFUSAL_REST_MAX_CHARS = 20;
+// 판정 문자열(공백을 한 칸으로 줄인 것)에서 지우는 ChatGPT 화면 문구. 낱말 수가 정해진 이어붙임·길이 상한이
+// 있는 한 묶음뿐이라 되추적이 늘지 않는다.
+const CHAT_UI_CHROME_RES: readonly RegExp[] = [
+  /Log in for [^.?!]{0,160}[.?!]? ?Log in ?Sign up for free/g,
+  /Log in ?Sign up for free/g,
+  /Use precise location/g,
+  /This may take a while(?:\.{1,3}|…)?/g,
+  /What would make your day easier right now\??(?: ?(?:Explain a topic|Make a plan|Create an image|Summarize text|Get advice|Brainstorm|Help me write|Analyze images|Surprise me|Code|More))*/g,
+  /Ad ?Sponsored options/g,
+];
+// 짧은 답에서만 보는 광고 카드 표시 — "Ad Sponsored options" 또는 도메인 바로 뒤의 "Sponsored".
+const AD_CARD_RES: readonly RegExp[] = [
+  /(?<![A-Za-z])Ad ?Sponsored options(?![A-Za-z])/,
+  /(?<![\w.-])[\w-]+(?:\.[\w-]+)+ Sponsored(?![A-Za-z])/,
+];
+// 짧은 답에서만 보는 AI 거절 문구 — 자기소개("텍스트 기반 AI"·"언어 모델")와 능력 범위 표현에 한정한다.
+// 지우고 남은 양을 재므로 모두 g 플래그다. "저는"·"전" 앞에 한글이 붙으면("이전 언어 모델") 맞지 않는다(결함 2).
+const REFUSAL_RES: readonly RegExp[] = [
+  /(?<![가-힣])(?:저는|전) ?(?:텍스트 ?기반(?:의)? ?(?:AI|인공지능)|(?:대규모 ?)?언어 ?모델)/gi,
+  /(?:프로그래밍|제가 ?할 ?수 ?있는|제 ?능력) ?범위를 ?(?:넘어|벗어)/g,
+  /도와 ?드릴 ?수가? ?없/g,
+  /텍스트를? ?생성할 ?뿐/g,
+  /(?<![A-Za-z])I(?:'|’| a)m (?:just |only )?(?:a |an )?(?:text-based AI|(?:large )?language model)(?![A-Za-z])/gi,
+  /(?<![A-Za-z])(?:beyond|outside(?: of)?) my (?:programming|capabilities|abilities)(?![A-Za-z])/gi,
+  /(?<![A-Za-z])(?:I )?(?:can(?:not|'t|’t)|am unable to|(?:do not|don't|don’t) have the (?:capacity|ability) to) help with (?:that|this)(?![A-Za-z])/gi,
+];
+
+/** 거절 문구가 답의 대부분인지 — 문구를 지우고 남은 의미 문자가 REFUSAL_REST_MAX_CHARS 이하. */
+function isRefusalOnly(text: string): boolean {
+  let rest = text;
+  let matched = false;
+  for (const re of REFUSAL_RES) {
+    re.lastIndex = 0;
+    const next = rest.replace(re, " ");
+    if (next !== rest) matched = true;
+    rest = next;
+  }
+  return matched && meaningfulText(rest).length <= REFUSAL_REST_MAX_CHARS;
+}
+
+/** 판정 문자열에서 ChatGPT 화면 문구를 지운다(판정 전용). 지운 것이 있으면 removed=true. */
+function stripChatUiChrome(judgmentText: string): { text: string; removed: boolean } {
+  let text = judgmentText.replace(/\s+/g, " ");
+  let removed = false;
+  for (const re of CHAT_UI_CHROME_RES) {
+    re.lastIndex = 0;
+    if (re.test(text)) {
+      re.lastIndex = 0;
+      text = text.replace(re, " ");
+      removed = true;
+    }
+  }
+  return { text, removed };
+}
+
+export type NonAnswerReason = "prompt_echo" | "too_few_chars" | "ui_chrome" | "refusal";
 
 /** 대소문자·전각 차이를 맞추고 의미 문자만 남긴다. */
 export function meaningfulText(value: string): string {
@@ -793,8 +902,11 @@ export function answerJudgmentText(value: string): string {
  *   (a) prompt_echo  — 의미 문자만 남긴 답이 보낸 질문과 같거나, 질문을 담고 있으면서 질문을 뺀
  *                      나머지 의미 문자가 PROMPT_ECHO_EXTRA_MAX_CHARS 이하.
  *   (b) too_few_chars — 답의 의미 문자가 MIN_MEANINGFUL_ANSWER_CHARS 미만.
- *   (c) ui_chrome     — 답 앞부분이 AI 서비스 화면의 메뉴 글자(§ 화면 메뉴 글자 판정, 2026-09-25).
- * 답·질문 모두 answerJudgmentText(태그·엔티티·출처 이름표·URL·링크 목적지 제거) 뒤에 센다.
+ *   (c) ui_chrome     — 답 앞부분이 AI 서비스 화면의 메뉴 글자(§ 화면 메뉴 글자 판정, 2026-09-25), 또는
+ *                       ChatGPT 화면 문구를 지우니 남는 것이 없거나(§ 짧은 답의 화면 글자·거절 문구) 짧은 답이 광고 카드.
+ *   (d) refusal       — 짧은 답이 AI 거절 문구(§ 짧은 답의 화면 글자·거절 문구, 2026-10-14).
+ * 답·질문 모두 answerJudgmentText(태그·엔티티·출처 이름표·URL·링크 목적지 제거) 뒤에 센다. 답은 ChatGPT
+ * 화면 문구도 지운 뒤 센다(판정 전용 — 저장 본문은 그대로).
  * 질문을 인용한 뒤 내용이 길게 이어지는 답, 짧아도 내용이 있는 한 문장 답은 통과한다.
  */
 export function detectNonAnswer(
@@ -802,7 +914,8 @@ export function detectNonAnswer(
   prompt: string,
 ): { reason: NonAnswerReason; meaningfulChars: number } | null {
   const judged = answerJudgmentText(answer);
-  const a = meaningfulText(judged);
+  const chrome = stripChatUiChrome(judged);
+  const a = meaningfulText(chrome.text);
   const p = meaningfulText(answerJudgmentText(prompt));
   if (p.length > 0 && a.includes(p)) {
     // 질문이 여러 번 되돌아와도(질문+질문) 나머지만 센다.
@@ -812,7 +925,18 @@ export function detectNonAnswer(
     }
   }
   if (a.length < MIN_MEANINGFUL_ANSWER_CHARS) {
-    return { reason: "too_few_chars", meaningfulChars: a.length };
+    // 화면 문구를 지워서 모자라게 된 것이면 화면 글자다(원래부터 짧았으면 의미 문자 부족).
+    return { reason: chrome.removed ? "ui_chrome" : "too_few_chars", meaningfulChars: a.length };
+  }
+  if (a.length <= SHORT_NON_ANSWER_MAX_CHARS) {
+    if (isRefusalOnly(chrome.text)) {
+      return { reason: "refusal", meaningfulChars: a.length };
+    }
+    // 광고 표시는 지우기 전 문자열에서 본다("Ad Sponsored options" 는 위에서 지워지므로).
+    const flat = judged.replace(/\s+/g, " ");
+    if (AD_CARD_RES.some((re) => re.test(flat))) {
+      return { reason: "ui_chrome", meaningfulChars: a.length };
+    }
   }
   if (looksLikeUiChrome(judged)) {
     return { reason: "ui_chrome", meaningfulChars: a.length };
@@ -821,7 +945,8 @@ export function detectNonAnswer(
 }
 
 const NON_ANSWER_REASON_TEXT: Record<NonAnswerReason, string> = {
-  ui_chrome: "화면 메뉴 글자",
+  ui_chrome: "화면 메뉴 글자·안내 문구·광고",
+  refusal: "AI 거절 문구",
   prompt_echo: "질문 되돌림",
   too_few_chars: "의미 문자 부족",
 };
@@ -1237,7 +1362,7 @@ export type ScrapeErrorCode =
   | CrawlerErrorCode
   | "NOT_READY"
   | "PARSE_FAILURE"
-  | "EMPTY_ANSWER" // 답 필드는 있으나 실제 답이 아님(질문 되돌림 · 의미 문자 부족) — 2026-09-25 D1
+  | "EMPTY_ANSWER" // 답 필드는 있으나 실제 답이 아님(질문 되돌림 · 의미 문자 부족 · 화면 글자 · 거절 문구) — 2026-09-25 D1
   | "SNAPSHOT_FAILED"
   | "SNAPSHOT_CANCELED"
   | "SNAPSHOT_MISSING"
@@ -1591,6 +1716,94 @@ function toClassifyText(value: unknown): string {
   }
 }
 
+/*
+ * § CHATGPT_ANSWER_SECTION_LINKS (2026-10-14 — ChatGPT 출처 0개 사고)
+ *
+ * Bright Data ChatGPT 수집기는 로그아웃 모바일 웹을 수집하며 citations·links_attached 가 빈 배열,
+ * search_sources 가 null 로 온다(2026-10-09부터 ChatGPT 출처 0개 저장). 출처 링크는 답 영역 HTML
+ * (answer_section_html, 24만～30만 자) 안에 외부 링크(`<a href="https://…" target="_blank">…</a>`)로 그대로 있다.
+ * 같은 레코드의 answer_html 은 화면 전체라 언어 메뉴·지도·로그인 링크가 섞여 쓰지 않는다.
+ *
+ * 정규식 대신 한 번 훑기로 꺼낸다 — 실측 링크 안 HTML 이 1,000～2,900자(단어마다 span·주석으로 감쌈)라 짧은
+ * 상한 정규식은 제목을 놓치고, 긴 범위 게으른 정규식은 닫힘 없는 `<a` 반복에서 제곱으로 느려진다. 여는 태그의
+ * `>` 와 닫는 `</a` 위치를 기억해 같은 구간을 다시 훑지 않으므로 입력 길이에 비례한다(stripHtmlBlocks 와 같은 방식).
+ * 출처 판정은 extractSourcesFromAnswer 와 같은 isThirdPartyCitation 에, 구글 검색 결과 링크 제외만 더한다.
+ */
+const ANSWER_SECTION_MAX_LINKS = 50;
+/** 여는 태그 `<a … >` 길이 상한 — 실측 300자 안팎(긴 class 목록). 넘으면 링크로 보지 않는다. */
+const ANSWER_SECTION_OPEN_TAG_MAX_CHARS = 4_000;
+/** 링크 안 HTML 길이 상한 — 넘거나 닫는 `</a>` 가 없으면 제목 없이 주소만 남긴다. */
+const ANSWER_SECTION_INNER_MAX_CHARS = 20_000;
+const ANSWER_SECTION_TITLE_MAX_CHARS = 200;
+// 길이가 정해진 여는 태그 문자열에만 쓴다. 따옴표 안은 `[^"]*` 한 묶음이라 되추적이 없다.
+// href 바로 앞이 공백일 때만 맞는다 — `data-href=` 같은 다른 속성은 링크 주소가 아니다(검수 1회차 결함 4a).
+const HREF_ATTR_RE = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)')/i;
+
+/** 구글 검색 결과 링크(`google.com/search?q=…`)는 출처가 아니라 검색 바로가기다. */
+function isSearchResultLink(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return (host === "google.com" || host.endsWith(".google.com")) && parsed.pathname.startsWith("/search");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ChatGPT 답 영역 HTML 에서 외부 링크를 구조화 인용으로 꺼낸다(§ CHATGPT_ANSWER_SECTION_LINKS).
+ * URL 기준 중복 제거 · 최대 50개 · 제목은 링크 안 글자(태그 제거·엔티티 해제·공백 정리, 200자 이내).
+ */
+export function extractAnswerSectionLinks(html: string): StructuredCitation[] {
+  const out: StructuredCitation[] = [];
+  if (typeof html !== "string" || !html.includes("<")) return out;
+  const lower = html.replace(/[A-Z]/g, (c) => c.toLowerCase()); // ASCII 만 — 길이를 바꾸지 않는다
+  const seen = new Set<string>();
+  let lastGt = -1; // 마지막으로 찾은 `>` — 그보다 앞의 `<a` 는 같은 `>` 를 쓴다(다시 훑지 않음)
+  let lastClose = -1; // 마지막으로 찾은 `</a` 위치
+  let noCloseFrom = Infinity; // 이 위치 뒤로는 `</a` 가 없다
+  let i = 0;
+  while (out.length < ANSWER_SECTION_MAX_LINKS) {
+    const lt = lower.indexOf("<a", i);
+    if (lt < 0) break;
+    i = lt + 2;
+    // `<abbr>`·`<article>` 같은 다른 태그는 건너뛴다.
+    const after = lower.charAt(lt + 2);
+    if (!(after === ">" || after === "/" || /\s/.test(after))) continue;
+    const gt = lastGt > lt ? lastGt : lower.indexOf(">", lt + 2);
+    if (gt < 0) break; // 뒤에 `>` 가 하나도 없다 — 완성된 여는 태그가 더 없다
+    lastGt = gt;
+    if (gt - lt > ANSWER_SECTION_OPEN_TAG_MAX_CHARS) continue;
+    const href = HREF_ATTR_RE.exec(html.slice(lt, gt + 1));
+    const rawHref = href?.[1] ?? href?.[2];
+    if (!rawHref) continue;
+    const url = decodeHtmlEntities(rawHref).trim();
+    if (!isThirdPartyCitation(url) || isSearchResultLink(url) || seen.has(url)) continue;
+    let domain = "";
+    try {
+      domain = new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      continue;
+    }
+    seen.add(url);
+    i = gt + 1;
+
+    let close = -1;
+    if (gt + 1 < noCloseFrom) {
+      close = lastClose > gt ? lastClose : lower.indexOf("</a", gt + 1);
+      if (close < 0) noCloseFrom = gt + 1;
+      else lastClose = close;
+    }
+    let title = "";
+    if (close >= 0 && close - gt - 1 <= ANSWER_SECTION_INNER_MAX_CHARS) {
+      const plain = htmlToPlainText(html.slice(gt + 1, close)).replace(/\s+/g, " ").trim();
+      title = Array.from(plain).slice(0, ANSWER_SECTION_TITLE_MAX_CHARS).join("");
+    }
+    out.push({ url, domain, title, description: "" });
+  }
+  return out;
+}
+
 /**
  * 받은 결과(payload) → 정규화된 수집 결과. runAiScraper 의 "payload 를 얻은 뒤" 블록을 순서
  * 그대로 옮긴 것이다: 첫 레코드 선택 → not-ready 감지 → 크롤러 오류(답변 필드 없음 + error/
@@ -1738,6 +1951,15 @@ export function normalizeScrapePayload(args: {
         continue;
       }
       structuredCitations.push({ url, domain, title, description });
+    }
+  }
+
+  // ChatGPT 는 구조화 인용 필드가 비어 오므로 답 영역 HTML 의 외부 링크를 더한다(§ CHATGPT_ANSWER_SECTION_LINKS).
+  if (parsed === "chatgpt" && typeof rawRecord.answer_section_html === "string") {
+    for (const link of extractAnswerSectionLinks(rawRecord.answer_section_html)) {
+      if (seenUrls.has(link.url)) continue;
+      seenUrls.add(link.url);
+      structuredCitations.push(link);
     }
   }
 

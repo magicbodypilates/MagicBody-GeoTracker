@@ -26,7 +26,7 @@ import type { PgDatabase } from "drizzle-orm/pg-core";
 import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
 import { CronExpressionParser } from "cron-parser";
 import { db, schema } from "@/lib/server/db";
-import { runAiScraper, type NormalizedScrapeResult } from "@/lib/server/brightdata-scraper";
+import { countryOrDefault, runAiScraper, type NormalizedScrapeResult } from "@/lib/server/brightdata-scraper";
 import { classifySentiment } from "@/lib/server/llm-sentiment";
 import { guardSentiment } from "@/lib/server/sentiment-guard";
 import {
@@ -809,7 +809,7 @@ async function runOneProviderForPrompt(args: {
       provider: provider as "chatgpt" | "perplexity" | "copilot" | "gemini" | "google_ai" | "grok",
       prompt: prompt.text,
       // Perplexity 는 runAiScraper 가 국가를 뺀다(§ PERPLEXITY_NO_COUNTRY) — 여기 KR 은 다른 AI 용이다.
-      country: sched.geolocation ?? "KR",
+      country: countryOrDefault(sched.geolocation),
       // 자동 수집 — OpenRouter Perplexity 경로의 하루 상한을 자동 수집 몫으로 센다(수동 수집과 분리).
       purpose: "auto",
     });

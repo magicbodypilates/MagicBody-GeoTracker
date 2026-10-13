@@ -23,10 +23,10 @@ jobs:
         env:
           TAIL_LINES: ${{ inputs.tail_lines }}
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 2m
           envs: TAIL_LINES

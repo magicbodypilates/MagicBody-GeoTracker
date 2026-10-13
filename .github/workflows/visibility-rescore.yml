@@ -80,10 +80,10 @@ jobs:
       - name: SSH 실행
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 30m
           envs: JOB,MODE,MANIFEST,SHA

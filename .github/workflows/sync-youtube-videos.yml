@@ -54,10 +54,10 @@ jobs:
         # 액션 커밋 SHA 고정(보안 M-1) — @master 는 supply-chain 위험(태그·브랜치 재지정). v1.0.0 커밋 핀.
         uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           source: 'video-ids.txt'
           target: '/datadrive/apps/geo-tracker/tmp'
 
@@ -70,10 +70,10 @@ jobs:
           # 원격 명령 문자열/프로세스 목록에 노출되지 않게 한다.
           SLACK_WEBHOOK: ${{ secrets.SLACK_APPROVAL_WEBHOOK_URL }}
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 10m
           # DRY_RUN_INPUT·SLACK_WEBHOOK 을 원격 셸 env 로 전달(L-2 — script 리터럴 삽입 금지).

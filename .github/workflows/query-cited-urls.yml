@@ -21,16 +21,16 @@ jobs:
     environment:
       name: production
     steps:
-      - name: SSH to Azure VM and run query
+      - name: SSH to production server and run query
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
         env:
           URL_FILTER_INPUT: ${{ inputs.url_filter }}
           TOP_INPUT: ${{ inputs.top }}
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 5m
           envs: URL_FILTER_INPUT,TOP_INPUT

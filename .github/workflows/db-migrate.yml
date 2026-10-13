@@ -1,7 +1,7 @@
 name: Run DB migration (manual)
 
 # 수동 트리거 전용 — drizzle/migrations/ 신규 파일 추가 시 실행.
-# 실행 대상은 이미 배포된 운영 Azure VM 의 postgres 컨테이너.
+# 실행 대상은 이미 배포된 운영 서버(벌쳐 — 2026-10-06 전환) 의 postgres 컨테이너.
 # 컨테이너 내에서 `node scripts/migrate.mjs` 호출 → __drizzle_migrations 테이블 기준으로 미적용만 실행.
 
 on:
@@ -19,13 +19,13 @@ jobs:
     environment:
       name: production
     steps:
-      - name: SSH to Azure VM and run migration
+      - name: SSH to production server and run migration
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ secrets.AZURE_PROD_HOST }}
-          port: ${{ secrets.AZURE_PROD_PORT }}
-          username: ${{ secrets.AZURE_PROD_USER }}
-          key: ${{ secrets.AZURE_PROD_SSH_KEY }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 5m
           script: |

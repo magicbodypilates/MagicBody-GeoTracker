@@ -103,9 +103,11 @@ type PageStats = {
 type ClickRow = {
   clickTarget: string;
   clickKind: PageClickKind;
-  /** 한글 이름. targetKnown=false 면 코드값 원문이다. */
+  /** 한글 이름 또는 콘텐츠 제목. targetKnown=false 면 코드값 원문이거나 "강의 #번호" 형태다. */
   displayName: string;
   targetKnown: boolean;
+  /** 콘텐츠 종류의 한글 이름(강의 · 영상 후기 · 맛보기 영상 …). 콘텐츠가 아닌 줄은 null(2026-10-15). */
+  contentKind: string | null;
   clickCount: number;
   clickVisitCount: number;
   /** 0～1. null 이면 "—". */
@@ -120,6 +122,17 @@ type PostRow = {
   titleKnown: boolean;
   viewCount: number;
   visitCount: number;
+};
+
+/** 「이 화면 다음에 간 화면」 1행 — 서버가 이동 수 많은 순으로 준다(2026-10-16). */
+type NextPageRow = {
+  routeName: string;
+  displayName: string;
+  known: boolean;
+  moveCount: number;
+  visitCount: number;
+  /** 0～1. null 이면 "—". */
+  visitRate: number | null;
 };
 
 type ClickStats = {
@@ -145,6 +158,10 @@ type ClickStats = {
   posts: PostRow[];
   postsTruncated: boolean;
   postsTotalCount: number;
+  /** null = 이 화면은 「다음에 간 화면」을 재지 않는다(아무것도 그리지 않는다). 빈 배열 = 옮긴 기록 없음. */
+  nextPages: NextPageRow[] | null;
+  nextPagesTruncated: boolean;
+  nextPagesTotalCount: number;
 };
 
 /* ── 어휘 ────────────────────────────────────────────────────────────────── */
@@ -154,6 +171,14 @@ const CLICK_KIND_LABEL: Record<PageClickKind, string> = {
   external_link: "외부로 나간 링크",
   unknown: "확인 안 됨",
 };
+
+/**
+ * 상단 메뉴·푸터 클릭을 남기는 화면(2026-10-15 사장님 결정 — 거기서 어디로 이탈하는지 보려고).
+ * 이 화면의 클릭 표에는 상단 메뉴·푸터 클릭도 들어가고, 다른 화면에는 들어가지 않는다.
+ * 예외: 푸터 상담 버튼은 2026-10-16 사장님 결정으로 **모든 화면에서** 센다(화면 이동이 없어 페이지 조회로도 안 잡혀서).
+ * ⚠️ 서버 PageClickMarkerRegistry.CommonAreaRoute · 사이트 contentClickLabel.js 의 값과 같아야 한다.
+ */
+const COMMON_AREA_ROUTE = "regularClassOffline";
 
 /** 오류 코드 → 사람 말 (관심 고객 화면과 같은 어휘). */
 const ERROR_MESSAGES: Record<string, string> = {
@@ -725,7 +750,7 @@ export function PageAnalyticsTab() {
             <SummaryCard
               label="총 클릭 수"
               value={fmtInt(summary.clickCount)}
-              hint="우리가 이름 붙인 자리와 외부로 나간 링크를 누른 횟수입니다."
+              hint="콘텐츠 카드(강의·영상 후기 등)·신청·상담 버튼·외부로 나간 링크를 누른 횟수입니다. 상단 메뉴·푸터 클릭은 이번 개편 전 기록에는 모든 화면의 클릭이, 개편 뒤에는 오프라인 정규과정 화면의 클릭만 들어 있습니다. 상담 버튼은 모든 화면에서 셉니다."
             />
             <SummaryCard
               strong
@@ -1045,8 +1070,18 @@ function ClickPanel({
 
             {data.items.length === 0 ? (
               <p className="py-3 text-[11px] text-th-text-muted">
-                이 기간 동안 이 화면에서 눌린 자리가 없습니다. (이름 붙인 자리와 외부로 나간 링크만 셉니다 —
-                사이트 안에서 다른 화면으로 이동한 것은 아래 &lsquo;어디에서 어디로 갔나&rsquo;에 들어갑니다.)
+                이 기간 동안 이 화면에서 눌린 자리가 없습니다. (콘텐츠 카드·신청·상담 버튼과 외부로 나간 링크를
+                셉니다.{" "}
+                {routeName === COMMON_AREA_ROUTE
+                  ? "이 화면은 상단 메뉴·푸터 클릭도 함께 셉니다."
+                  : "상단 메뉴·푸터 클릭은 오프라인 정규과정 화면에서만 세고, 상담 버튼은 모든 화면에서 셉니다."}{" "}
+                사이트 안에서 다른 화면으로 이동한 것은 아래{" "}
+                {data.nextPages !== null ? (
+                  <>&lsquo;이 화면 다음에 간 화면&rsquo;</>
+                ) : (
+                  <>&lsquo;어디에서 어디로 갔나&rsquo;</>
+                )}
+                에 들어갑니다.)
               </p>
             ) : (
               <>
@@ -1073,13 +1108,22 @@ function ClickPanel({
                         <tr key={`${it.clickKind}-${it.clickTarget}`} className="border-b border-th-border-subtle">
                           <td className="max-w-[260px] py-1.5 pr-2" title={it.clickTarget}>
                             <span className="align-middle text-th-text">{it.displayName}</span>
-                            {/* 외부로 나간 링크는 주소가 곧 이름이라 사전 대상이 아니다 — 종류 칸이 구분한다. */}
+                            {/* 외부로 나간 링크는 주소가 곧 이름이라 사전 대상이 아니다 — 종류 칸이 구분한다.
+                                콘텐츠 줄(contentKind 있음)은 원인이 달라 다른 문구다 — 이름 사전이 아니라 제목을 못 찾은 것이다. */}
                             {!it.targetKnown && it.clickKind !== "external_link" && (
-                              <Badge
-                                tone="warn"
-                                text="이름 미등록"
-                                title="이 자리의 한글 이름이 아직 등록되지 않아 코드값으로 보입니다. 숫자는 정확합니다."
-                              />
+                              it.contentKind ? (
+                                <Badge
+                                  tone="warn"
+                                  text="제목 확인 불가"
+                                  title="이 콘텐츠의 제목을 찾지 못해 종류와 번호로 보입니다(삭제된 콘텐츠이거나 영상 후기 목록에 없는 영상일 수 있습니다). 숫자는 정확합니다."
+                                />
+                              ) : (
+                                <Badge
+                                  tone="warn"
+                                  text="이름 미등록"
+                                  title="이 자리의 한글 이름이 아직 등록되지 않아 코드값으로 보입니다. 숫자는 정확합니다."
+                                />
+                              )
                             )}
                           </td>
                           <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(it.clickCount)}</td>
@@ -1089,7 +1133,9 @@ function ClickPanel({
                           <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">
                             {fmtPct(it.clickRate)}
                           </td>
-                          <td className="py-1.5 pr-4 text-th-text-muted">{CLICK_KIND_LABEL[it.clickKind]}</td>
+                          <td className="py-1.5 pr-4 text-th-text-muted">
+                            {it.contentKind ?? CLICK_KIND_LABEL[it.clickKind]}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1109,10 +1155,126 @@ function ClickPanel({
                     없음).
                   </p>
                 )}
+                {/* 지난 기록의 외부 링크 줄은 숨기지 않는다 — 그 클릭이 상단 메뉴·푸터에서 났는지 기록에 남아 있지 않다
+                    (검수 D1 · 계획 승인 때 사장님께 고지). 오프라인 정규과정은 원래 상단 메뉴·푸터 클릭을 세므로 안내가 필요 없다. */}
+                {routeName !== COMMON_AREA_ROUTE && data.items.some((i) => i.clickKind === "external_link") && (
+                  <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+                    ⓘ 이번 개편 전 기록의 외부 링크 줄에는 상단 메뉴·푸터에서 누른 것이 섞여 있습니다. 상담 버튼은
+                    외부 링크가 아니라 &lsquo;상담·문의 버튼(카카오톡 채널)&rsquo; 줄로 모든 화면에서 셉니다.
+                  </p>
+                )}
               </>
             )}
           </div>
+
+          {/* ── 이 화면 다음에 간 화면 (2026-10-16 — 서버가 대상 화면에만 배열을 준다 · null 이면 그리지 않는다) ── */}
+          {data.nextPages !== null && (
+            <NextPagesTable
+              rows={data.nextPages}
+              truncated={data.nextPagesTruncated}
+              totalCount={data.nextPagesTotalCount}
+              visitCountIsPeriodSum={data.visitCountIsPeriodSum}
+            />
+          )}
         </>
+      )}
+    </div>
+  );
+}
+
+/* ── 이 화면 다음에 간 화면 (2026-10-16 사장님 요청 — 오프라인 정규과정을 펼쳤을 때) ──── */
+
+/**
+ * 이 화면에서 **사이트 안 다른 화면으로 옮긴 이동**을 도착 화면별로 보여준다(이동 수 많은 순 · 서버가 정렬).
+ * 사장님이 이 화면에서 손님이 어디로 이탈하는지 보려는 것이다 — 상단 메뉴 하위 항목·로고·푸터 안쪽 링크처럼
+ * 표식이 없는 이동도 여기에 들어간다.
+ * ⚠️ 호출부는 nextPages 가 null 이면 이 표를 그리지 않는다. 빈 배열이면 빈 상태 문구를 보인다.
+ * ⚠️ ×100 은 fmtPct 한 곳에서만 한다(이 화면을 본 방문 중 비율 · null 은 "—").
+ */
+function NextPagesTable({
+  rows,
+  truncated,
+  totalCount,
+  visitCountIsPeriodSum,
+}: {
+  rows: NextPageRow[];
+  truncated: boolean;
+  totalCount: number;
+  visitCountIsPeriodSum: boolean;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+        <h4 className="text-sm font-semibold text-th-text">이 화면 다음에 간 화면</h4>
+        {rows.length > 0 && <span className="text-[11px] text-th-text-muted">{rows.length}줄 · 이동 수 많은 순</span>}
+        {truncated && (
+          <span className="rounded border border-th-warning/50 bg-th-warning-soft px-1.5 py-px text-[10px] text-th-text-secondary">
+            상위 {rows.length}개만 표시 (전체 {fmtInt(totalCount)}개)
+          </span>
+        )}
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="py-3 text-[11px] text-th-text-muted">이 기간에 이 화면에서 다른 화면으로 옮긴 기록이 없습니다.</p>
+      ) : (
+        <div className="-ml-4 overflow-x-auto pl-4">
+          <table className="w-full min-w-[560px] text-xs">
+            <thead>
+              <tr className="border-b border-th-border text-left text-th-text-muted">
+                <th className="py-1.5 pr-2">간 화면</th>
+                <th className="py-1.5 pr-3 text-right">이동 수</th>
+                <th className="py-1.5 pr-3 text-right" title="그 화면으로 한 번이라도 옮긴 방문 수입니다.">
+                  이동한 방문
+                </th>
+                <th
+                  className="py-1.5 pr-4 text-right"
+                  title="이 화면을 본 방문 가운데 그 화면으로 옮긴 방문의 비율입니다. 잴 수 없으면 '—'입니다."
+                >
+                  이 화면을 본 방문 중
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.routeName} className="border-b border-th-border-subtle">
+                  <td className="max-w-[260px] py-1.5 pr-2" title={r.routeName}>
+                    <span className={`align-middle ${r.known ? "text-th-text" : "italic text-th-text-muted"}`}>
+                      {r.displayName}
+                    </span>
+                    {!r.known && (
+                      <Badge
+                        tone="warn"
+                        text="이름 미등록"
+                        title="이 화면의 한글 이름이 아직 등록되지 않아 코드값으로 보입니다. 숫자는 정확합니다."
+                      />
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(r.moveCount)}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">{fmtInt(r.visitCount)}</td>
+                  <td className="py-1.5 pr-4 text-right font-mono text-th-text-secondary">{fmtPct(r.visitRate)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="mt-2 text-[11px] leading-relaxed text-th-text-muted">
+        ⓘ 사이트 안 다른 화면으로 옮긴 것만 셉니다. 외부 링크로 나간 것은 위 클릭 표에 있고, 창을 닫고 나간 것은
+        기록되지 않습니다. 전자책 카드처럼 페이지를 새로 여는 이동과 새 탭으로 연 이동은 이 표에 들어가지
+        않습니다(전자책 카드 클릭은 위 클릭 표에 있습니다).
+      </p>
+      {rows.length > 0 && visitCountIsPeriodSum && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 기간은 날짜별 요약 기준이라 이동한 방문 수와 &lsquo;이 화면을 본 방문 중&rsquo; 비율이 날짜별
+          합계로 계산됩니다 — 여러 날 오신 분이 여러 번 세어질 수 있습니다.
+        </p>
+      )}
+      {rows.some((r) => r.visitRate === null) && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 비율이 &lsquo;—&rsquo;인 줄은 <strong className="text-th-text">0%가 아니라 잴 수 없는 것</strong>
+          입니다(이 화면을 본 방문 수가 없음).
+        </p>
       )}
     </div>
   );
@@ -1293,6 +1455,17 @@ function ReadingNotes({ stats }: { stats: PageStats }) {
           <strong className="text-th-text">조회 수는 사람 수가 아닙니다.</strong> 같은 사람이 여러 번 본 것도
           셉니다. 사람 수에 가까운 값은 <strong className="text-th-text">방문 수</strong>입니다. 방문은 브라우저
           탭 기준이라, 같은 사람이 탭을 새로 열면 다른 방문으로 셉니다.
+        </Notice>
+
+        {/* 항상 — 이번 개편(콘텐츠 클릭 추가 · 상단 메뉴·푸터 클릭 범위 축소)으로 클릭 숫자의 구성이 바뀌었다(검수 D2).
+            배포일이 정해지지 않아 날짜를 적지 않고 「이번 개편」으로 쓴다. */}
+        <Notice tone="info">
+          <strong className="text-th-text">
+            총 클릭 수와 클릭까지 간 방문 비율은 이번 개편 전후로 이어서 비교할 수 없습니다.
+          </strong>{" "}
+          이번 개편 전 기록에는 모든 화면의 상단 메뉴·푸터 클릭이 들어 있습니다. 개편 뒤에는 콘텐츠 카드 클릭이
+          새로 더해지고, 상단 메뉴·푸터 클릭은 오프라인 정규과정 화면에서 난 것만 셉니다. 상담 버튼은 모든
+          화면에서 셉니다.
         </Notice>
 
         {stats.visitCountIsPeriodSum && (

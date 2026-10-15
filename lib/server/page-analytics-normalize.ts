@@ -34,6 +34,19 @@
  *      그 화면(blog)으로 옮겨 준다.
  *   ⑤ `items[].displayName` 은 이제 한글 이름이다("메인 · Short 후기 카드").
  *      `targetKnown=false` 면 아직 이름을 등록하지 않은 자리라 코드값이 그대로 온다.
+ *   ⑥ ⭐ 2026-10-15 — **콘텐츠 단위 클릭**이 추가됐다(task magicbody-content-click-2026-10-15).
+ *      사이트가 콘텐츠 카드에 `class.<번호>`·`vreview.<번호>` 같은 번호표를 붙이고, 서버가 제목을 붙여 준다.
+ *      그 줄은 `items[].contentKind` 에 한글 종류(강의 · 전자책 · 영상 후기 · 졸업생 후기 · 글 후기 ·
+ *      맛보기 영상 · OT 영상 · 영상)가 오고, `displayName` 은 **콘텐츠 제목**이다.
+ *      제목을 못 찾으면 `targetKnown=false` 이고 displayName 이 "강의 #번호" 형태다(→ 화면은 "제목 확인 불가").
+ *      콘텐츠가 아닌 줄(자리 이름·외부 링크)은 `contentKind=null` 이다(→ 화면은 기존 종류 어휘).
+ *      또 오프라인 정규과정이 아닌 화면에서는 상단 메뉴·푸터 클릭이 목록에서 빠진다(상단 메뉴 표식은 지난 기록 포함).
+ *      예외: 푸터 상담 버튼(cta_contact)은 2026-10-16 사장님 결정으로 **모든 화면에서** 센다(지난 기록도 보인다).
+ *   ⑦ ⭐ 2026-10-16 — clicks 응답에 `nextPages`(이 화면 다음에 간 화면)가 붙는다.
+ *      **대상 화면(지금은 오프라인 정규과정)일 때만 배열**이고, 그 밖의 화면은 **null** 이다 → 화면은 null 이면 아무것도
+ *      그리지 않는다(빈 배열은 "옮긴 기록이 없다"이고 null 은 "이 화면은 재지 않는다"다 — 둘을 섞지 않는다).
+ *      한 줄 = 도착 화면(라우트 단위 · 상세·요약 같은 단위) · moveCount(이동 수) · visitCount(이동한 방문) ·
+ *      visitRate(이 화면을 본 방문 중 비율, 0～1, null 가능 → ×100 은 화면이 한 번만). 이동 수 많은 순 · 상위 30개.
  *
  *   기간은 `lookbackDays`(1～1095) **또는** `fromKst`&`toKst`("yyyy-MM-dd", 양끝 포함) 중 하나.
  *   범위 밖은 clamp 가 아니라 **400** 이다(화면이 조용히 다른 기간을 보고 있으면 안 된다).
@@ -171,6 +184,8 @@ export type PageClickRowRaw = {
   clickKind?: string | null;
   displayName?: string | null;
   targetKnown?: boolean;
+  /** 콘텐츠 번호표 줄의 한글 종류(2026-10-15). 콘텐츠가 아니면 null 이거나 칸이 없다. */
+  contentKind?: string | null;
   clickCount?: number;
   clickVisitCount?: number;
   clickRate?: number | null;
@@ -183,6 +198,16 @@ export type PagePostRowRaw = {
   titleKnown?: boolean;
   viewCount?: number;
   visitCount?: number;
+};
+
+/** 「이 화면 다음에 간 화면」 1행(2026-10-16). */
+export type PageNextPageRowRaw = {
+  routeName?: string | null;
+  displayName?: string | null;
+  known?: boolean;
+  moveCount?: number;
+  visitCount?: number;
+  visitRate?: number | null;
 };
 
 export type PageClickStatsRaw = {
@@ -207,6 +232,10 @@ export type PageClickStatsRaw = {
   posts?: PagePostRowRaw[];
   postsTruncated?: boolean;
   postsTotalCount?: number;
+  /** 대상 화면이 아니면 null(또는 칸 없음). */
+  nextPages?: PageNextPageRowRaw[] | null;
+  nextPagesTruncated?: boolean;
+  nextPagesTotalCount?: number;
 };
 
 /* ── 정규화 결과 타입 (화면이 보는 계약) ────────────────────────────────── */
@@ -290,10 +319,21 @@ export type PageViewStatsNormalized = {
 export type PageClickRowNormalized = {
   clickTarget: string;
   clickKind: PageClickKind;
-  /** 한글 이름("메인 · Short 후기 카드"). targetKnown=false 면 코드값 원문이다. */
+  /**
+   * 한글 이름("메인 · Short 후기 카드") 또는 콘텐츠 제목(contentKind 가 있을 때).
+   * targetKnown=false 면 자리 이름은 코드값 원문, 콘텐츠는 "강의 #번호" 형태다.
+   */
   displayName: string;
-  /** 누른 자리의 한글 이름을 서버가 아는가. false 면 화면이 "이름 미등록"으로 구분한다. */
+  /**
+   * 이름을 서버가 확인했는가. false 면 화면이 구분한다 —
+   * 자리 이름은 "이름 미등록", 콘텐츠(contentKind 있음)는 "제목 확인 불가".
+   */
   targetKnown: boolean;
+  /**
+   * 콘텐츠 종류의 한글 이름(강의 · 전자책 · 영상 후기 · 졸업생 후기 · 글 후기 · 맛보기 영상 · OT 영상 · 영상).
+   * 콘텐츠가 아닌 줄은 **null** — 화면은 clickKind 의 기존 종류 어휘를 쓴다(2026-10-15).
+   */
+  contentKind: string | null;
   clickCount: number;
   clickVisitCount: number;
   /** 0～1. **null 이면 "—"**(분모가 0이라 잰 적이 없다). */
@@ -309,6 +349,22 @@ export type PagePostRowNormalized = {
   titleKnown: boolean;
   viewCount: number;
   visitCount: number;
+};
+
+/** 「이 화면 다음에 간 화면」 1행 — 이동 수 많은 순으로 서버가 이미 정렬해 준다(2026-10-16). */
+export type PageNextPageRowNormalized = {
+  /** 도착 라우트 이름(서버 registry 값). 화면에는 displayName 을 쓴다. */
+  routeName: string;
+  /** 도착 화면 표시명(라우트 사전 표시명 그대로). */
+  displayName: string;
+  /** registry 에 있는 라우트인가. false 면 "미등록"으로 구분 표기. */
+  known: boolean;
+  /** 이 화면에서 그 화면으로 옮긴 횟수. */
+  moveCount: number;
+  /** 그렇게 옮긴 방문 수(rollup 이면 날짜별 합계). */
+  visitCount: number;
+  /** 0～1. **null 이면 "—"**(분모가 0이라 잰 적이 없다). */
+  visitRate: number | null;
 };
 
 export type PageClickStatsNormalized = {
@@ -337,6 +393,13 @@ export type PageClickStatsNormalized = {
   posts: PagePostRowNormalized[];
   postsTruncated: boolean;
   postsTotalCount: number;
+  /**
+   * 「이 화면 다음에 간 화면」(2026-10-16). **null 이면 이 화면은 재지 않는다 — 아무것도 그리지 않는다.**
+   * 빈 배열이면 재는 화면인데 이 기간에 옮긴 기록이 없다.
+   */
+  nextPages: PageNextPageRowNormalized[] | null;
+  nextPagesTruncated: boolean;
+  nextPagesTotalCount: number;
 };
 
 /* ── 안전 변환기 (card-click-normalize.ts 와 동일 규약) ──────────────────── */
@@ -523,10 +586,32 @@ export function normalizePageClickStats(
       displayName: label,
       // 서버 플래그가 빠져도 "이름 확인됨"으로 새지 않게(fail-closed).
       targetKnown: r.targetKnown === true,
+      // 콘텐츠 종류 — 문자열이 아니거나 비어 있으면 null(= 콘텐츠가 아닌 줄로 본다). 칸이 없던 옛 서버 응답도 null.
+      contentKind: safeText(r.contentKind) || null,
       clickCount: safeInt(r.clickCount),
       clickVisitCount: safeInt(r.clickVisitCount),
       clickRate: safeRate(r.clickRate),
     });
+  }
+
+  // 「이 화면 다음에 간 화면」 — 배열일 때만 배열, 아니면 null(대상 화면이 아님). 명시 필드만 픽한다.
+  let nextPages: PageNextPageRowNormalized[] | null = null;
+  if (Array.isArray(env.nextPages)) {
+    nextPages = [];
+    for (const r of env.nextPages as PageNextPageRowRaw[]) {
+      if (!r || typeof r !== "object") continue;
+      const nextRoute = safeText(r.routeName);
+      if (!nextRoute) continue; // 도착 화면 이름이 없는 줄은 띄울 수 없다
+      nextPages.push({
+        routeName: nextRoute,
+        displayName: safeText(r.displayName) || nextRoute,
+        // 서버 플래그가 빠져도 "확인됨"으로 새지 않게(fail-closed).
+        known: r.known === true,
+        moveCount: safeInt(r.moveCount),
+        visitCount: safeInt(r.visitCount),
+        visitRate: safeRate(r.visitRate),
+      });
+    }
   }
 
   const posts: PagePostRowNormalized[] = [];
@@ -568,5 +653,8 @@ export function normalizePageClickStats(
     posts,
     postsTruncated: env.postsTruncated === true,
     postsTotalCount: safeInt(env.postsTotalCount),
+    nextPages,
+    nextPagesTruncated: nextPages !== null && env.nextPagesTruncated === true,
+    nextPagesTotalCount: nextPages !== null ? safeInt(env.nextPagesTotalCount) : 0,
   };
 }

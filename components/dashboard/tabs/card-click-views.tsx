@@ -417,7 +417,7 @@ export function CardClickPreSignupView({
 
       <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-4">
         <h3 className="text-base font-semibold text-th-text">
-          맛보기·무료 강의·전자책을 눌렀는데 아직 가입하지 않은 분
+          무료 강의·전자책·맛보기를 눌렀는데 아직 가입하지 않은 분
         </h3>
         <p className="mt-1 text-[11px] leading-relaxed text-th-text-secondary">
           정규과정 상세페이지의 <strong className="text-th-text">맛보기 영상</strong>·
@@ -457,13 +457,7 @@ export function CardClickPreSignupView({
         <EmptyBox text="아직 카드 클릭 기록이 없습니다. 수집이 시작되면 여기에 강의별·책별로 표시됩니다." />
       ) : (
         <div className="space-y-5">
-          <ClickTable
-            kind="preview"
-            rows={snapshot.preview}
-            total={snapshot.previewTotal}
-            lookbackDays={lookbackDays}
-          />
-          {/* 무료 강의 — 맛보기 다음·전자책 앞(2026-10-16). 위치 칸과 위치별 합계 4줄이 더 붙는다. */}
+          {/* 순서: 무료 강의 → 전자책 → 맛보기 영상(사장님 지정 2026-10-16). 무료 강의는 위치 칸과 위치별 합계 4줄이 더 붙는다. */}
           <ClickTable
             kind="free"
             rows={snapshot.free}
@@ -472,6 +466,12 @@ export function CardClickPreSignupView({
             lookbackDays={lookbackDays}
           />
           <ClickTable kind="ebook" rows={snapshot.ebook} total={snapshot.ebookTotal} lookbackDays={lookbackDays} />
+          <ClickTable
+            kind="preview"
+            rows={snapshot.preview}
+            total={snapshot.previewTotal}
+            lookbackDays={lookbackDays}
+          />
         </div>
       )}
 
@@ -732,9 +732,9 @@ export function CardClickSignupView({
 
   const KIND_FILTERS: { key: KindFilter; label: string }[] = [
     { key: "", label: "전체" },
-    { key: "preview", label: KIND_LABEL.preview },
     { key: "free", label: KIND_LABEL.free },
     { key: "ebook", label: KIND_LABEL.ebook },
+    { key: "preview", label: KIND_LABEL.preview },
   ];
 
   return (
@@ -765,7 +765,7 @@ export function CardClickSignupView({
 
       <div className="rounded-lg border border-th-border bg-th-card p-4">
         <div className="mb-2 flex flex-wrap items-baseline gap-2">
-          <h3 className="text-base font-semibold text-th-text">맛보기·무료 강의·전자책을 보고 가입한 회원</h3>
+          <h3 className="text-base font-semibold text-th-text">무료 강의·전자책·맛보기를 보고 가입한 회원</h3>
           {/* 실패·로딩 중엔 "0행"이 아니라 "—" — 못 불러온 것을 "없음"으로 쓰지 않는다. */}
           <span className="text-[11px] text-th-text-muted">{list ? `${list.rows.length}줄` : "—"}</span>
           {list?.truncated && (

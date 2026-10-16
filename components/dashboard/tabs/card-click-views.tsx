@@ -1,6 +1,8 @@
 /**
- * 관심 고객 — 카드 클릭(맛보기·전자책) 하위 화면 2종 (상위 권한 전용)
+ * 관심 고객 — 카드 클릭(맛보기·전자책·무료 강의) 하위 화면 2종 (상위 권한 전용)
  *   task_id: magicbody-preview-ebook-click-2026-08-09
+ *   + 무료 강의 카드(2026-10-16) — "어디에서 어떤 강의를 눌러 가입했나". 누른 위치(정규과정 상세·메인·
+ *     무료 클래스 목록·재생목록)별로 줄을 나누고, 위치별 합계 4줄 + 무료 강의 전체 합계를 따로 보여 드린다.
  *
  *   ① CardClickPreSignupView — "가입 전 이탈"  : 눌렀는데 **아직 가입하지 않은** 사람 (요약 조회)
  *   ② CardClickSignupView    — "가입 전환"     : 그 경로로 **가입까지 간** 회원 명단 (명단 조회)
@@ -9,8 +11,9 @@
  *
  * ⭐ 지켜야 할 6가지 (여기서 틀리면 사장님이 잘못된 숫자를 보신다)
  *   1. 전환율은 서버가 **0~1 비율**로 준다 → 화면에서 ×100 을 **한 번만** 한다(fmtPct 하나로 통일).
- *   2. 합계 줄은 서버가 따로 준 값(previewTotal·ebookTotal)을 쓴다 — **항목 행을 더하지 않는다.**
+ *   2. 합계 줄은 서버가 따로 준 값(previewTotal·ebookTotal·freeTotal·freePlaceTotals)을 쓴다 — **항목 행을 더하지 않는다.**
  *      한 사람이 맛보기 3개를 누르면 세 행에 각각 1로 들어가므로 더하면 1명이 3명이 된다.
+ *      무료 강의 위치별 합계를 더해도 전체 합계가 되지 않는다(한 분이 두 위치에서 누르면 위치마다 한 번씩).
  *   3. 시각은 전부 UTC 로 온다 → 표시할 때만 Asia/Seoul 로 바꾼다(이탈자 화면과 같은 규칙).
  *   4. ⭐ 전환율·"아직 가입 안 함"의 분모는 **비회원(누른 사람 − 이미 회원)** 이다(2026-08-09).
  *      이미 회원인 분은 가입할 수 없으므로 분모에 두면 전환율이 실제보다 낮게 보인다.
@@ -36,11 +39,16 @@ const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 /** 필터 입력이 멈춘 뒤 조회까지 기다리는 시간(ms) — 이탈자 화면과 같은 값·같은 이유(연타 방지). */
 const DEBOUNCE_MS = 350;
 
-type Kind = "preview" | "ebook";
+type Kind = "preview" | "ebook" | "free";
 type KindFilter = "" | Kind;
+/** 무료 강의의 누른 위치. 맛보기·전자책 행은 "". */
+type FreePlace = "regular" | "main" | "list" | "playlist";
+type Place = FreePlace | "";
 
 type ClickRow = {
   kind: Kind;
+  /** 누른 위치 — 무료 강의만 값이 있다(같은 강의도 위치가 다르면 줄이 따로). */
+  place: Place;
   contentsId: string;
   /** 서버가 확인한 이름만. 못 찾았으면 "". */
   title: string;
@@ -65,10 +73,18 @@ type Snapshot = {
   asOfUtc: string;
   preview: ClickRow[];
   ebook: ClickRow[];
+  /** 무료 강의 (위치, 강의)별 — 위치 순서대로 정렬돼 온다. */
+  free: ClickRow[];
   previewTotal: ClickTotal;
   ebookTotal: ClickTotal;
-  /** 클릭 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음. */
+  /** 무료 강의 전체 합계(위치 무관하게 사람 한 번). */
+  freeTotal: ClickTotal;
+  /** 무료 강의 위치별 합계 — 항상 4줄(정규과정 상세·메인·목록·재생목록 순). */
+  freePlaceTotals: ClickTotal[];
+  /** 맛보기·전자책 클릭 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음. */
   firstClickEventAt: string;
+  /** 무료 강의 클릭 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음(배포 후부터 쌓인다). */
+  firstFreeClickEventAt: string;
   /** 가입 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음. */
   firstSignupEventAt: string;
   /** 조회 기간 안 가입 기록 총 건수(전환 여부 무관). 0 이면 수집 중단 가능성을 함께 안내한다. */
@@ -79,6 +95,8 @@ type SignupRow = {
   signupAt: string;
   name: string;
   kind: Kind;
+  /** 누른 위치 — 무료 강의만 값이 있다. */
+  place: Place;
   title: string;
   titleKnown: boolean;
   contentsId: string;
@@ -97,13 +115,28 @@ type SignupList = {
 const KIND_LABEL: Record<Kind, string> = {
   preview: "맛보기 영상",
   ebook: "전자책",
+  free: "무료 강의",
 };
 
 /** 항목 이름 칸 머리말 — 종류마다 부르는 말이 다르다. */
 const KIND_ITEM_HEADER: Record<Kind, string> = {
   preview: "강의명",
   ebook: "책 제목",
+  free: "강의명",
 };
+
+/** 무료 강의를 누른 위치의 표시 이름(사장님 지정 2026-10-16). 서버 어휘와 1:1. */
+const PLACE_LABEL: Record<FreePlace, string> = {
+  regular: "정규과정 상세",
+  main: "메인 화면",
+  list: "무료 클래스 목록",
+  playlist: "무료 클래스 재생목록",
+};
+
+/** 위치 표시 이름 — 무료 강의가 아니면(빈 값) "". */
+function placeLabel(place: Place): string {
+  return place ? (PLACE_LABEL[place] ?? "") : "";
+}
 
 const PROVIDER_LABEL: Record<SignupRow["provider"], string> = {
   kakao: "카카오",
@@ -233,19 +266,21 @@ function ControlBar({
 /**
  * "언제부터 쌓인 기록인가" — **날짜를 코드에 박지 않는다.**
  * 서버가 준 첫 기록 시각을 그대로 쓴다. 한 건도 없으면 그렇게 말한다(수집이 아직 시작되지 않은 상태).
+ * ⭐ 맛보기·전자책과 무료 강의는 기록이 시작된 날이 다르다(무료 강의는 2026-10-16 배포부터) —
+ *    그래서 종류 묶음(subject)마다 한 줄씩 따로 적는다. 한 날짜로 뭉뚱그리면 무료 강의가 0건인 이유를 잘못 읽는다.
  */
-function SinceNote({ firstClickEventAt }: { firstClickEventAt: string }) {
+function SinceNote({ firstClickEventAt, subject }: { firstClickEventAt: string; subject: string }) {
   return (
     <p className="text-[11px] leading-relaxed text-th-text-muted">
       {firstClickEventAt ? (
         <>
-          이 화면의 기록은{" "}
+          <strong className="text-th-text">{subject}</strong> 클릭 기록은{" "}
           <strong className="text-th-text">{fmtKst(firstClickEventAt, false)}부터</strong> 쌓인 것입니다 — 그
           이전에 카드를 누른 분은 기록이 없어 되살릴 수 없습니다.
         </>
       ) : (
         <>
-          <strong className="text-th-text">아직 클릭 기록이 한 건도 없습니다.</strong> 카드 클릭 기록은 사이트에
+          <strong className="text-th-text">{subject} 클릭 기록은 아직 한 건도 없습니다.</strong> 이 기록은 사이트에
           반영된 뒤부터 쌓입니다 — 그때까지는 0건이 정상입니다.
         </>
       )}
@@ -274,7 +309,7 @@ function SignupHealthNote({
     return (
       <p className="text-[11px] leading-relaxed text-th-text-muted">
         최근 {lookbackDays}일 동안 가입 기록이{" "}
-        <strong className="text-th-text">{signupEventsInRange}건</strong> 쌓였습니다(맛보기·전자책과 무관한
+        <strong className="text-th-text">{signupEventsInRange}건</strong> 쌓였습니다(카드 클릭과 무관한
         가입까지 모두 포함한 수입니다) — 가입 기록 수집은 정상 작동 중입니다.
         {firstSignupEventAt && <> 가입 기록은 {fmtKst(firstSignupEventAt, false)}부터 남아 있습니다.</>}
       </p>
@@ -365,8 +400,10 @@ export function CardClickPreSignupView({
     !!snapshot &&
     snapshot.preview.length === 0 &&
     snapshot.ebook.length === 0 &&
+    snapshot.free.length === 0 &&
     snapshot.previewTotal.clickedPeople === 0 &&
-    snapshot.ebookTotal.clickedPeople === 0;
+    snapshot.ebookTotal.clickedPeople === 0 &&
+    snapshot.freeTotal.clickedPeople === 0;
 
   return (
     <div className="space-y-5">
@@ -379,10 +416,13 @@ export function CardClickPreSignupView({
       />
 
       <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-4">
-        <h3 className="text-base font-semibold text-th-text">맛보기·전자책을 눌렀는데 아직 가입하지 않은 분</h3>
+        <h3 className="text-base font-semibold text-th-text">
+          맛보기·무료 강의·전자책을 눌렀는데 아직 가입하지 않은 분
+        </h3>
         <p className="mt-1 text-[11px] leading-relaxed text-th-text-secondary">
-          정규과정 상세페이지에서 <strong className="text-th-text">맛보기 영상</strong> 또는{" "}
-          <strong className="text-th-text">전자책</strong> 카드를 누른 사람 가운데, 그 뒤에 회원가입까지 가지
+          정규과정 상세페이지의 <strong className="text-th-text">맛보기 영상</strong>·
+          <strong className="text-th-text">전자책</strong> 카드와, 정규과정 상세·메인 화면·무료 클래스 목록·재생목록에
+          있는 <strong className="text-th-text">무료 강의</strong> 카드를 누른 사람 가운데, 그 뒤에 회원가입까지 가지
           않은 분이 몇 명인지 봅니다. <strong className="text-th-text">아직 가입 안 함</strong> 칸이 이 화면의
           핵심입니다 — 관심은 보였는데 아직 회원이 되지 않은 분들입니다. 누를 때 이미 회원이셨던 분은{" "}
           <strong className="text-th-text">이미 회원</strong> 칸으로 따로 빼서 전환율 계산에서 제외합니다
@@ -391,7 +431,8 @@ export function CardClickPreSignupView({
         <div className="mt-2 space-y-2">
           {snapshot ? (
             <>
-              <SinceNote firstClickEventAt={snapshot.firstClickEventAt} />
+              <SinceNote firstClickEventAt={snapshot.firstClickEventAt} subject="맛보기 영상·전자책" />
+              <SinceNote firstClickEventAt={snapshot.firstFreeClickEventAt} subject="무료 강의" />
               <SignupHealthNote
                 firstSignupEventAt={snapshot.firstSignupEventAt}
                 signupEventsInRange={snapshot.signupEventsInRange}
@@ -422,6 +463,14 @@ export function CardClickPreSignupView({
             total={snapshot.previewTotal}
             lookbackDays={lookbackDays}
           />
+          {/* 무료 강의 — 맛보기 다음·전자책 앞(2026-10-16). 위치 칸과 위치별 합계 4줄이 더 붙는다. */}
+          <ClickTable
+            kind="free"
+            rows={snapshot.free}
+            total={snapshot.freeTotal}
+            placeTotals={snapshot.freePlaceTotals}
+            lookbackDays={lookbackDays}
+          />
           <ClickTable kind="ebook" rows={snapshot.ebook} total={snapshot.ebookTotal} lookbackDays={lookbackDays} />
         </div>
       )}
@@ -434,20 +483,50 @@ export function CardClickPreSignupView({
   );
 }
 
-/** 한 종류(맛보기·전자책)의 표 1개 — 항목별 행 + 합계 행. */
+/**
+ * 합계 줄의 숫자 칸 7개(누른 사람 ~ 전환율) — 종류 전체 합계와 무료 강의 위치별 합계가 같은 칸을 쓴다.
+ * strong = 굵게(종류 전체 합계). 위치별 합계는 한 단계 옅게 보여 전체 합계와 구분한다.
+ */
+function TotalCells({ t, strong }: { t: ClickTotal; strong: boolean }) {
+  const num = strong ? "font-semibold text-th-text" : "text-th-text-secondary";
+  return (
+    <>
+      <td className={`py-1.5 text-right font-mono ${num}`}>{t.clickedPeople}</td>
+      <td className="py-1.5 text-right font-mono text-th-text-muted">{t.clickedVisits}</td>
+      <td className={`py-1.5 text-right font-mono ${num}`}>{t.alreadyMemberPeople}</td>
+      <td className={`py-1.5 text-right font-mono ${num}`}>{t.nonMemberPeople}</td>
+      <td className={`py-1.5 text-right font-mono ${num}`}>{t.signedUpPeople}</td>
+      <td className={`py-1.5 text-right font-mono ${num}`}>{t.notSignedUpPeople}</td>
+      <td className={`py-1.5 text-right font-mono ${num}`}>{fmtPct(t.signupRate)}</td>
+    </>
+  );
+}
+
+/**
+ * 한 종류(맛보기·전자책·무료 강의)의 표 1개 — 항목별 행 + 합계 행.
+ * 무료 강의(kind="free")는 맨 앞에 **위치** 칸이 붙고, 합계 자리에 위치별 합계 4줄(placeTotals) +
+ * 무료 강의 전체 합계 1줄이 나온다. 둘 다 서버가 사람을 따로 센 값이다 — 이 화면에서 더하지 않는다.
+ */
 function ClickTable({
   kind,
   rows,
   total,
+  placeTotals,
   lookbackDays,
 }: {
   kind: Kind;
   rows: ClickRow[];
   total: ClickTotal;
+  /** 무료 강의 위치별 합계(4줄). 맛보기·전자책은 주지 않는다. */
+  placeTotals?: ClickTotal[];
   lookbackDays: number;
 }) {
-  const anomaly = total.anomaly || rows.some((r) => r.anomaly);
+  const showPlace = kind === "free";
+  const places = showPlace ? (placeTotals ?? []) : [];
+  const anomaly = total.anomaly || rows.some((r) => r.anomaly) || places.some((t) => t.anomaly);
   const hasUnknown = rows.some((r) => !r.titleKnown);
+  /** 합계 줄 이름 칸이 차지하는 칸 수 — 위치 칸이 있으면 위치+강의명 두 칸을 합친다. */
+  const labelSpan = showPlace ? 2 : 1;
 
   return (
     <div className="rounded-lg border border-th-border bg-th-card p-4">
@@ -469,13 +548,25 @@ function ClickTable({
         누르면 항목마다 한 번씩 들어가므로, 더하면 실제보다 많아집니다.
       </p>
 
+      {/* 무료 강의 전용 안내 — 위치별로 줄이 갈리는 것과, 위치별 합계를 더해도 전체가 되지 않는 이유. */}
+      {showPlace && (
+        <p className="mb-3 text-[11px] leading-relaxed text-th-text-muted">
+          무료 강의는 <strong className="text-th-text">누른 위치마다 줄을 나눕니다</strong> — 같은 강의를 메인 화면과
+          무료 클래스 목록에서 각각 누르셨다면 두 줄로 나옵니다. 아래{" "}
+          <strong className="text-th-text">위치별 합계 4줄을 더해도 무료 강의 전체 합계가 되지 않을 수 있습니다</strong>{" "}
+          — 한 분이 두 위치에서 누르시면 위치마다 한 번씩 들어가기 때문입니다. 재생이 끝나 다음 강의로 자동으로
+          넘어간 것은 누른 것으로 세지 않습니다.
+        </p>
+      )}
+
       {rows.length === 0 ? (
         <EmptyBox text={`아직 ${KIND_LABEL[kind]} 클릭 기록이 없습니다.`} />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-xs">
+          <table className={`w-full ${showPlace ? "min-w-[900px]" : "min-w-[760px]"} text-xs`}>
             <thead>
               <tr className="border-b border-th-border text-left text-th-text-muted">
+                {showPlace && <th className="py-1.5">누른 위치</th>}
                 <th className="py-1.5">{KIND_ITEM_HEADER[kind]}</th>
                 <th className="py-1.5 text-right" title="회원·비회원을 모두 합친 수입니다.">
                   누른 사람
@@ -503,7 +594,10 @@ function ClickTable({
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={`${r.kind}-${r.contentsId}`} className="border-b border-th-border-subtle">
+                <tr key={`${r.kind}-${r.place}-${r.contentsId}`} className="border-b border-th-border-subtle">
+                  {showPlace && (
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-th-text-secondary">{placeLabel(r.place)}</td>
+                  )}
                   <td
                     className={`max-w-[220px] truncate py-1.5 pr-2 ${
                       r.titleKnown ? "text-th-text" : "italic text-th-text-muted"
@@ -521,17 +615,25 @@ function ClickTable({
                   <td className="py-1.5 text-right font-mono text-th-text-secondary">{fmtPct(r.signupRate)}</td>
                 </tr>
               ))}
+              {/* 무료 강의 위치별 합계 4줄 — 그 위치 안에서 사람을 한 번만 센 서버 값(항목 줄의 합이 아니다). */}
+              {places.map((t, i) => (
+                <tr
+                  key={`place-total-${t.place}`}
+                  className={i === 0 ? "border-t-2 border-th-border" : "border-b border-th-border-subtle"}
+                >
+                  <td colSpan={labelSpan} className="py-1.5 text-th-text-secondary">
+                    위치별 합계 · {placeLabel(t.place)}{" "}
+                    <span className="text-th-text-muted">(그 위치 안에서 사람 기준)</span>
+                  </td>
+                  <TotalCells t={t} strong={false} />
+                </tr>
+              ))}
               <tr className="border-t-2 border-th-border">
-                <td className="py-1.5 font-semibold text-th-text">
-                  합계 <span className="font-normal text-th-text-muted">(사람 기준 · 중복 제외)</span>
+                <td colSpan={labelSpan} className="py-1.5 font-semibold text-th-text">
+                  {showPlace ? "무료 강의 전체 합계" : "합계"}{" "}
+                  <span className="font-normal text-th-text-muted">(사람 기준 · 중복 제외)</span>
                 </td>
-                <td className="py-1.5 text-right font-mono font-semibold text-th-text">{total.clickedPeople}</td>
-                <td className="py-1.5 text-right font-mono text-th-text-muted">{total.clickedVisits}</td>
-                <td className="py-1.5 text-right font-mono font-semibold text-th-text">{total.alreadyMemberPeople}</td>
-                <td className="py-1.5 text-right font-mono font-semibold text-th-text">{total.nonMemberPeople}</td>
-                <td className="py-1.5 text-right font-mono font-semibold text-th-text">{total.signedUpPeople}</td>
-                <td className="py-1.5 text-right font-mono font-semibold text-th-text">{total.notSignedUpPeople}</td>
-                <td className="py-1.5 text-right font-mono font-semibold text-th-text">{fmtPct(total.signupRate)}</td>
+                <TotalCells t={total} strong />
               </tr>
             </tbody>
           </table>
@@ -631,6 +733,7 @@ export function CardClickSignupView({
   const KIND_FILTERS: { key: KindFilter; label: string }[] = [
     { key: "", label: "전체" },
     { key: "preview", label: KIND_LABEL.preview },
+    { key: "free", label: KIND_LABEL.free },
     { key: "ebook", label: KIND_LABEL.ebook },
   ];
 
@@ -662,7 +765,7 @@ export function CardClickSignupView({
 
       <div className="rounded-lg border border-th-border bg-th-card p-4">
         <div className="mb-2 flex flex-wrap items-baseline gap-2">
-          <h3 className="text-base font-semibold text-th-text">맛보기·전자책을 보고 가입한 회원</h3>
+          <h3 className="text-base font-semibold text-th-text">맛보기·무료 강의·전자책을 보고 가입한 회원</h3>
           {/* 실패·로딩 중엔 "0행"이 아니라 "—" — 못 불러온 것을 "없음"으로 쓰지 않는다. */}
           <span className="text-[11px] text-th-text-muted">{list ? `${list.rows.length}줄` : "—"}</span>
           {list?.truncated && (
@@ -678,7 +781,10 @@ export function CardClickSignupView({
         */}
         <p className="mb-3 text-[11px] leading-relaxed text-th-text-muted">
           <strong className="text-th-text">줄 수는 사람 수가 아닙니다.</strong> 한 분이 맛보기와 전자책을 둘 다
-          누르셨다면 두 줄로 나옵니다(경로별로 보기 위해서입니다). 표시 시각은 모두{" "}
+          누르셨다면 두 줄로 나옵니다(경로별로 보기 위해서입니다). 무료 강의는{" "}
+          <strong className="text-th-text">누른 위치까지</strong> 나눠 보여 드립니다 — 같은 강의를 메인 화면과 무료
+          클래스 목록에서 각각 누르고 가입하셨다면 위치마다 한 줄입니다. 가입 전에 여러 강의를 누르셨다면 누른
+          강의마다 한 줄씩 나오므로, 가입 직전에 누른 강의는 「누른 시각」으로 확인하실 수 있습니다. 표시 시각은 모두{" "}
           <strong className="text-th-text">한국 시간</strong>입니다.{" "}
           <strong className="text-th-text">탈퇴하신 분은 이 명단에서 빠지므로</strong>, 같은 기간을 다시
           조회하면 숫자가 줄어들 수 있습니다.
@@ -692,22 +798,32 @@ export function CardClickSignupView({
           <EmptyBox text="아직 이 경로로 가입한 회원이 없습니다. (클릭 기록·가입 기록 수집이 시작되기 전이면 0건이 정상입니다 — 수집이 살아 있는지는 '가입 전 이탈' 화면 위쪽 안내에서 확인하실 수 있습니다)" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[620px] text-xs">
+            <table className="w-full min-w-[700px] text-xs">
               <thead>
                 <tr className="border-b border-th-border text-left text-th-text-muted">
                   <th className="py-1.5">가입일시</th>
                   <th className="py-1.5">이름</th>
                   <th className="py-1.5">경로</th>
                   <th className="py-1.5">보고 온 것</th>
+                  <th className="py-1.5">누른 시각</th>
                   <th className="py-1.5">가입 방식</th>
                 </tr>
               </thead>
               <tbody>
                 {list.rows.map((r, i) => (
-                  <tr key={`${r.kind}-${r.contentsId}-${r.signupAt}-${i}`} className="border-b border-th-border-subtle">
+                  <tr
+                    key={`${r.kind}-${r.place}-${r.contentsId}-${r.signupAt}-${i}`}
+                    className="border-b border-th-border-subtle"
+                  >
                     <td className="whitespace-nowrap py-1.5 pr-2 text-th-text-secondary">{fmtKst(r.signupAt)}</td>
                     <td className="whitespace-nowrap py-1.5 pr-2 text-th-text">{r.name || "—"}</td>
-                    <td className="whitespace-nowrap py-1.5 pr-2 text-th-text-secondary">{KIND_LABEL[r.kind]}</td>
+                    {/* 경로 — 무료 강의는 누른 위치를 함께 적는다("어디에서 어떤 강의를 눌러 가입했나"). */}
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-th-text-secondary">
+                      {KIND_LABEL[r.kind]}
+                      {r.kind === "free" && r.place && (
+                        <span className="text-th-text-muted"> · {placeLabel(r.place)}</span>
+                      )}
+                    </td>
                     <td
                       className={`max-w-[220px] truncate py-1.5 pr-2 ${
                         r.titleKnown ? "text-th-text-muted" : "italic text-th-text-muted"
@@ -715,6 +831,10 @@ export function CardClickSignupView({
                       title={itemLabel(r.title, r.contentsId, r.titleKnown)}
                     >
                       {itemLabel(r.title, r.contentsId, r.titleKnown)}
+                    </td>
+                    {/* 누른 시각 — 가입 전에 여러 강의를 눌렀을 때 가입 직전에 누른 것을 가려 볼 수 있게(2026-10-16 검수 R1). */}
+                    <td className="whitespace-nowrap py-1.5 pr-2 text-th-text-secondary">
+                      {fmtKst(r.clickedAt)}
                     </td>
                     <td className="whitespace-nowrap py-1.5 text-th-text-secondary">{PROVIDER_LABEL[r.provider]}</td>
                   </tr>

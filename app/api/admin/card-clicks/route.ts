@@ -1,5 +1,5 @@
 /**
- * GET /api/admin/card-clicks — 카드 클릭(맛보기·전자책) → 가입 전환 조회 (상위 권한 전용)
+ * GET /api/admin/card-clicks — 카드 클릭(맛보기·전자책·무료 강의) → 가입 전환 조회 (상위 권한 전용)
  *   task_id: magicbody-preview-ebook-click-2026-08-09
  *
  * ⭐ 이 파일은 이탈자 조회 라우트(app/api/admin/abandoners/route.ts)와 **같은 구조·같은 인증**이다.
@@ -22,7 +22,7 @@
  *
  * 쿼리:
  *   view=snapshot &lookbackDays=1~365
- *   view=list     &lookbackDays=1~365 &kind=""|preview|ebook &limit=1~2000
+ *   view=list     &lookbackDays=1~365 &kind=""|preview|ebook|free &limit=1~2000  (kind 목록 = CARD_CLICK_KINDS)
  *
  * 실패 매핑(이탈자 라우트와 동일): zod→400 / config→500 / timeout→504 / 5xx·네트워크→502 / 파싱→502.
  */
@@ -151,7 +151,8 @@ export async function GET(req: NextRequest) {
       const raw = res.data && typeof res.data === "object" ? (res.data as CardClickSnapshotRaw) : {};
       const out = normalizeCardClickSnapshot(raw);
       console.info(
-        `[card-clicks][audit] snapshot preview=${out.preview.length} ebook=${out.ebook.length} cid=${correlationId}`,
+        `[card-clicks][audit] snapshot preview=${out.preview.length} ebook=${out.ebook.length} ` +
+          `free=${out.free.length} cid=${correlationId}`,
       );
       return withNoStore(NextResponse.json(out));
     }

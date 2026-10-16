@@ -1,6 +1,8 @@
 /**
- * card-click-normalize.ts — 카드 클릭(맛보기·전자책) → 가입 전환 정규화 순수함수 (서버 전용)
+ * card-click-normalize.ts — 카드 클릭(맛보기·전자책·무료 강의) → 가입 전환 정규화 순수함수 (서버 전용)
  *   task_id: magicbody-preview-ebook-click-2026-08-09 (화면 편성)
+ *   + 무료 강의 카드(2026-10-16) — 종류 free + 누른 위치(place: regular|main|list|playlist).
+ *     위치는 화이트리스트로 한 번 더 거르고, 어휘 밖 위치의 무료 강의 행은 버린다.
  *
  * .NET RetargetController 의 GetCardClickSnapshot / GetCardClickSignupList 응답(ReturnModels.datas)을
  * GeoTracker 프론트가 쓰는 안정적 JSON 으로 변환한다. 모든 함수는 순수(I/O·시간·전역 의존 없음).
@@ -26,9 +28,23 @@
  *   허용 목록으로 대체한 뒤 내려준다. 못 찾은 행은 titleKnown=false 로 와서 화면이 구분 표기한다.
  */
 
-/** 카드 종류 어휘 — .NET CardClickSearch.kind 와 1:1(SoT). "" = 전체(명단 필터에서만 의미). */
-export const CARD_CLICK_KINDS = ["preview", "ebook"] as const;
+/**
+ * 카드 종류 어휘 — .NET CardClickSearch.kind 와 1:1(SoT). "" = 전체(명단 필터에서만 의미).
+ * free = 무료 강의 카드(2026-10-16). 라우트의 kind 입력 검증도 이 목록에서 자동으로 만든다.
+ */
+export const CARD_CLICK_KINDS = ["preview", "ebook", "free"] as const;
 export type CardClickKind = (typeof CARD_CLICK_KINDS)[number];
+
+/**
+ * 무료 강의의 **누른 위치** 어휘 — .NET CardClickFreePlaces 와 1:1, 순서가 곧 화면 표시 순서다.
+ *   regular = 정규과정 상세 「무료 강의」 탭 · main = 메인 · list = 무료 클래스 목록 · playlist = 상세 옆 재생목록.
+ * ⭐ 위치는 서버가 **이벤트 이름에서만** 정한 값이다. 그래도 여기서 한 번 더 화이트리스트로 거른다 —
+ *    어휘 밖 위치가 오면 그 무료 강의 행은 **버린다**(모르는 위치가 표에 찍히느니 빠지는 편이 낫다).
+ */
+export const CARD_CLICK_FREE_PLACES = ["regular", "main", "list", "playlist"] as const;
+export type CardClickFreePlace = (typeof CARD_CLICK_FREE_PLACES)[number];
+/** 행의 위치 — 무료 강의만 값이 있고, 맛보기·전자책은 "". */
+export type CardClickPlace = CardClickFreePlace | "";
 
 /** 가입 방식 어휘 — .NET CardClickSignupRow.provider 와 1:1. 화이트리스트 밖은 unknown(카나리). */
 export const CARD_CLICK_PROVIDERS = ["kakao", "naver"] as const;
@@ -38,6 +54,8 @@ export type CardClickProvider = (typeof CARD_CLICK_PROVIDERS)[number] | "unknown
 
 export type CardClickItemRaw = {
   kind?: string | null;
+  /** 무료 강의만 regular|main|list|playlist, 그 밖은 "". */
+  place?: string | null;
   contentsId?: string | null;
   /** ⭐ 서버가 확인한 이름만 온다(클릭이 실어 보낸 값 아님). 못 찾았으면 null. */
   title?: string | null;
@@ -55,6 +73,8 @@ export type CardClickItemRaw = {
 
 export type CardClickTotalRaw = {
   kind?: string | null;
+  /** 무료 강의 위치별 합계만 값이 있다. 종류 전체 합계는 "". */
+  place?: string | null;
   clickedPeople?: number;
   alreadyMemberPeople?: number;
   signedUpPeople?: number;
@@ -68,7 +88,15 @@ export type CardClickSnapshotRaw = {
   ebook?: CardClickItemRaw[];
   previewTotal?: CardClickTotalRaw | null;
   ebookTotal?: CardClickTotalRaw | null;
+  /** 무료 강의 (위치, 강의)별 집계. */
+  free?: CardClickItemRaw[];
+  /** 무료 강의 전체 합계(위치 무관 · 사람 한 번). */
+  freeTotal?: CardClickTotalRaw | null;
+  /** 무료 강의 위치별 합계(서버가 4줄을 채워 보낸다 — 여기서도 4줄을 보장한다). */
+  freePlaceTotals?: CardClickTotalRaw[];
   firstClickEventAt?: string | null;
+  /** 무료 강의 클릭 기록이 처음 쌓인 시각(UTC ISO). 맛보기·전자책과 따로 잰다. */
+  firstFreeClickEventAt?: string | null;
   /** 가입 기록이 처음 쌓인 시각(UTC ISO). "" = 한 건도 없음. */
   firstSignupEventAt?: string | null;
   /** 조회 기간 안 가입 기록 총 건수(전환 여부 무관 · 원시값). */
@@ -80,6 +108,8 @@ export type CardClickSignupRowRaw = {
   signupAt?: string | null;
   name?: string | null;
   kind?: string | null;
+  /** 무료 강의만 regular|main|list|playlist, 그 밖은 "". */
+  place?: string | null;
   title?: string | null;
   titleKnown?: boolean;
   contentsId?: string | null;
@@ -104,6 +134,11 @@ export type CardClickSignupListRaw = {
  */
 export type CardClickRow = {
   kind: CardClickKind;
+  /**
+   * 누른 위치 — 무료 강의만 regular|main|list|playlist, 맛보기·전자책은 "".
+   * 같은 무료 강의도 위치가 다르면 줄이 따로다(집계 단위 = 종류·위치·항목).
+   */
+  place: CardClickPlace;
   contentsId: string;
   /** ⭐ **서버가 확인한** 강의명·책 제목. 못 찾았으면 "" → UI 가 "미상 항목 (원문ID)" 로 표기. */
   title: string;
@@ -128,9 +163,13 @@ export type CardClickRow = {
   anomaly: boolean;
 };
 
-/** 종류별 합계(실인원). 필드 의미는 위와 같다. */
+/**
+ * 종류별 합계(실인원). 필드 의미는 위와 같다.
+ * place 는 종류 전체 합계면 "", 무료 강의 위치별 합계면 그 위치다(그 위치 안에서 사람 한 번).
+ */
 export type CardClickTotalNormalized = {
   kind: CardClickKind;
+  place: CardClickPlace;
   clickedPeople: number;
   alreadyMemberPeople: number;
   nonMemberPeople: number;
@@ -147,11 +186,22 @@ export type CardClickSnapshotNormalized = {
   asOfUtc: string;
   preview: CardClickRow[];
   ebook: CardClickRow[];
+  /**
+   * 무료 강의 (위치, 강의)별 집계 — 위치 순서(CARD_CLICK_FREE_PLACES)로 정렬돼 있고,
+   * 같은 위치 안에서는 서버 순서(누른 사람 많은 순)를 그대로 둔다. 위치가 어휘 밖인 행은 빠져 있다.
+   */
+  free: CardClickRow[];
   /** ⭐ 합계는 **항상** 있다(0건이어도) — 화면이 빈 값을 만나지 않는다. */
   previewTotal: CardClickTotalNormalized;
   ebookTotal: CardClickTotalNormalized;
-  /** 클릭 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음(수집 미배포이거나 켠 직후). */
+  /** 무료 강의 전체 합계(위치 무관하게 사람 한 번). 위치별 합계를 더한 값과 다를 수 있다. */
+  freeTotal: CardClickTotalNormalized;
+  /** 무료 강의 위치별 합계 — CARD_CLICK_FREE_PLACES 순서로 **항상 4줄**(없는 위치는 0). */
+  freePlaceTotals: CardClickTotalNormalized[];
+  /** 맛보기·전자책 클릭 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음(수집 미배포이거나 켠 직후). */
   firstClickEventAt: string;
+  /** 무료 강의 클릭 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음(배포 후부터 쌓인다). */
+  firstFreeClickEventAt: string;
   /** 가입 기록이 처음 쌓인 시각(UTC ISO). "" = 아직 한 건도 없음. */
   firstSignupEventAt: string;
   /**
@@ -170,6 +220,8 @@ export type CardClickSignupRow = {
    */
   name: string;
   kind: CardClickKind;
+  /** 누른 위치 — 무료 강의만 값이 있다. 같은 회원이 같은 강의를 두 위치에서 눌렀으면 줄이 둘이다. */
+  place: CardClickPlace;
   /** ⭐ 서버가 확인한 이름만. 못 찾았으면 "". */
   title: string;
   titleKnown: boolean;
@@ -219,6 +271,20 @@ export function safeCardKind(v: unknown): CardClickKind | null {
   return (CARD_CLICK_KINDS as readonly string[]).includes(s) ? (s as CardClickKind) : null;
 }
 
+/** 무료 강의 위치 화이트리스트. 어휘 밖이면 null — 호출부가 그 무료 강의 행을 버린다. */
+export function safeFreePlace(v: unknown): CardClickFreePlace | null {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return (CARD_CLICK_FREE_PLACES as readonly string[]).includes(s) ? (s as CardClickFreePlace) : null;
+}
+
+/**
+ * 행의 위치를 정한다. 무료 강의는 화이트리스트를 통과해야 하고(실패 = null → 행 제외),
+ * 맛보기·전자책은 서버 값과 무관하게 "" 다(위치 개념이 없다 — 서버가 무엇을 보내도 표에 위치가 생기지 않게).
+ */
+function placeFor(kind: CardClickKind, v: unknown): CardClickPlace | null {
+  return kind === "free" ? safeFreePlace(v) : "";
+}
+
 /** 가입 방식 화이트리스트. 밖이면 "unknown" — 버리지 않고 드러낸다(행 자체는 유효하다). */
 function safeProvider(v: unknown): CardClickProvider {
   const s = typeof v === "string" ? v.trim().toLowerCase() : "";
@@ -247,6 +313,9 @@ function derive(clicked: number, alreadyMember: number, signedUp: number) {
 function normalizeItems(raw: unknown, kind: CardClickKind): CardClickRow[] {
   const rows: CardClickRow[] = [];
   for (const r of Array.isArray(raw) ? (raw as CardClickItemRaw[]) : []) {
+    // 무료 강의는 위치가 어휘 안이어야 한다 — 밖이면 그 행을 버린다(모르는 위치를 표에 찍지 않는다).
+    const place = placeFor(kind, r.place);
+    if (place === null) continue;
     const clickedPeople = safeInt(r.clickedPeople);
     const alreadyMemberPeople = safeInt(r.alreadyMemberPeople);
     const signedUpPeople = safeInt(r.signedUpPeople);
@@ -255,6 +324,7 @@ function normalizeItems(raw: unknown, kind: CardClickKind): CardClickRow[] {
       // ⚠️ kind 는 **어느 배열에서 왔는지**로 정한다 — 서버 필드를 그대로 믿으면 preview 배열에
       //    ebook 이 섞여 들어왔을 때 표 제목과 내용이 어긋난 채 조용히 표시된다.
       kind,
+      place,
       contentsId: safeText(r.contentsId),
       title,
       // 이름이 비어 있으면 확인 못 한 것으로 본다 — 서버 플래그가 빠져도 "확인됨"으로 새지 않게(fail-closed).
@@ -268,18 +338,45 @@ function normalizeItems(raw: unknown, kind: CardClickKind): CardClickRow[] {
   return rows;
 }
 
-function normalizeTotal(raw: CardClickTotalRaw | null | undefined, kind: CardClickKind): CardClickTotalNormalized {
+/**
+ * 무료 강의 행을 위치 순서(CARD_CLICK_FREE_PLACES)로 정렬한다.
+ * 같은 위치 안에서는 서버 순서(누른 사람 많은 순)를 그대로 둔다 — Array.prototype.sort 는 안정 정렬이다.
+ */
+function sortByPlace(rows: CardClickRow[]): CardClickRow[] {
+  const order = (p: CardClickPlace) => (CARD_CLICK_FREE_PLACES as readonly string[]).indexOf(p);
+  return rows.slice().sort((a, b) => order(a.place) - order(b.place));
+}
+
+function normalizeTotal(
+  raw: CardClickTotalRaw | null | undefined,
+  kind: CardClickKind,
+  place: CardClickPlace = "",
+): CardClickTotalNormalized {
   const t = raw ?? {};
   const clickedPeople = safeInt(t.clickedPeople);
   const alreadyMemberPeople = safeInt(t.alreadyMemberPeople);
   const signedUpPeople = safeInt(t.signedUpPeople);
   return {
     kind,
+    // ⚠️ place 는 **호출부가 정한다**(종류 전체 = "" / 위치별 = 그 위치) — 서버 값을 그대로 옮기지 않는다.
+    place,
     clickedPeople,
     signedUpPeople,
     clickedVisits: safeInt(t.clickedVisits),
     ...derive(clickedPeople, alreadyMemberPeople, signedUpPeople),
   };
+}
+
+/**
+ * 무료 강의 위치별 합계 — 어휘 순서로 **항상 4줄**을 만든다.
+ * 서버 배열에서 같은 위치의 **첫 줄**만 쓴다(중복·어휘 밖 줄은 무시). 없는 위치는 0 줄이다.
+ */
+function normalizeFreePlaceTotals(raw: unknown): CardClickTotalNormalized[] {
+  const list = Array.isArray(raw) ? (raw as CardClickTotalRaw[]) : [];
+  return CARD_CLICK_FREE_PLACES.map((place) => {
+    const hit = list.find((t) => t != null && safeFreePlace(t.place) === place);
+    return normalizeTotal(hit, "free", place);
+  });
 }
 
 /**
@@ -296,9 +393,13 @@ export function normalizeCardClickSnapshot(
     asOfUtc: safeIso(env.asOfUtc),
     preview: normalizeItems(env.preview, "preview"),
     ebook: normalizeItems(env.ebook, "ebook"),
+    free: sortByPlace(normalizeItems(env.free, "free")),
     previewTotal: normalizeTotal(env.previewTotal, "preview"),
     ebookTotal: normalizeTotal(env.ebookTotal, "ebook"),
+    freeTotal: normalizeTotal(env.freeTotal, "free"),
+    freePlaceTotals: normalizeFreePlaceTotals(env.freePlaceTotals),
     firstClickEventAt: safeIso(env.firstClickEventAt),
+    firstFreeClickEventAt: safeIso(env.firstFreeClickEventAt),
     firstSignupEventAt: safeIso(env.firstSignupEventAt),
     signupEventsInRange: safeInt(env.signupEventsInRange),
   };
@@ -322,11 +423,15 @@ export function normalizeCardClickSignupList(
   for (const r of items) {
     const kind = safeCardKind(r.kind);
     if (!kind) continue;
+    // 무료 강의는 위치가 어휘 안이어야 한다(밖이면 그 행을 버린다 — 종류 밖 행을 버리는 것과 같은 규약).
+    const place = placeFor(kind, r.place);
+    if (place === null) continue;
     const title = safeText(r.title);
     rows.push({
       signupAt: safeIso(r.signupAt),
       name: safeText(r.name),
       kind,
+      place,
       title,
       titleKnown: r.titleKnown === true && title.length > 0,
       contentsId: safeText(r.contentsId),

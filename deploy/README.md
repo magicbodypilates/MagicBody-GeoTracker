@@ -14,12 +14,12 @@ GHCR 전환으로 **레지스트리 시크릿 3개 제거**. SSH 관련 4개만 
 
 | Secret | 용도 |
 |---|---|
-| `AZURE_DEV_HOST` | dev VM 접속 주소 |
-| `AZURE_DEV_PORT` | dev VM SSH 포트 (`2222`) |
-| `AZURE_DEV_USER` | dev VM 접속 계정 |
-| `AZURE_DEV_SSH_KEY` | dev VM SSH 개인키 |
+| `VULTR_PROD_HOST` | 운영 서버(벌쳐 서울) 접속 주소 |
+| `VULTR_PROD_PORT` | 운영 서버 SSH 포트 (`2222`) |
+| `VULTR_PROD_USER` | 운영 서버 접속 계정 |
+| `VULTR_PROD_SSH_KEY` | 운영 서버 SSH 개인키 |
 
-> 기존 MagicBody-Web repo 에 설정된 동일 시크릿 4개를 `MagicBody-GeoTracker` repo 에도 그대로 복사.
+> 옛 애저 서버·개발 서버(`AZURE_*`)는 2026-10-27 삭제됐다. 개발 서버용 배포는 없다.
 > GitHub 웹 → Settings → Secrets and variables → Actions → New repository secret.
 
 ### 1-1. GHCR 관련 1회 작업 (서버에서)
@@ -33,7 +33,7 @@ GHCR 전환으로 **레지스트리 시크릿 3개 제거**. SSH 관련 4개만 
 
 2. **서버에서 docker login**
    ```bash
-   ssh <AZURE_DEV_USER>@<AZURE_DEV_HOST> -p 2222
+   ssh <VULTR_PROD_USER>@<VULTR_PROD_HOST> -p 2222
    echo "<PAT>" | docker login ghcr.io -u magicbodypilates --password-stdin
    # 성공: "Login Succeeded" 메시지
    # 인증 정보는 ~/.docker/config.json 에 저장 → 서버 재시작해도 유지
@@ -115,13 +115,12 @@ docker network ls | grep nginx-proxy-network
 
 ## 4. 최초 이미지 배포
 
-로컬에서 코드를 dev 브랜치에 push하면 GitHub Actions가 자동으로:
+main 에 push 하면 GitHub Actions(`deployment-production.yml`)가 자동으로:
 1. 도커 이미지 빌드 → GHCR push (`ghcr.io/magicbodypilates/magicbody-geo-tracker`)
-2. SSH로 서버 접속 → `docker pull` → `docker compose up -d --force-recreate mbd-geo-tracker`
+2. SSH로 운영 서버(벌쳐) 접속 → `docker pull` → `docker compose up -d --force-recreate mbd-geo-tracker`
 
 ```bash
-# GitHub 웹에서 수동 트리거도 가능:
-# Actions → "Deployment to development" → Run workflow
+# 수동 실행: gh workflow run deployment-production.yml -R magicbodypilates/MagicBody-GeoTracker --ref main
 ```
 
 ## 5. Nginx Proxy Manager 라우팅 추가
@@ -257,9 +256,9 @@ Firebase Web SDK 설정은 기본값이 Dockerfile/workflow 에 하드코딩되�
 - `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID`
 - `NEXT_PUBLIC_FIREBASE_APP_ID`
 
-## 8. 운영 배포 (추후)
+## 8. 운영 배포
 
-dev 브랜치 테스트 완료 후 운영 배포용 워크플로우는 `deployment-production.yml`를 추가로 작성해야 합니다. (운영 도메인은 추후 결정)
+`deployment-production.yml` 이 운영 서버(벌쳐)로 배포한다(§4). 개발 서버·개발 배포는 없다.
 
 ### 8-1. 운영 배포 동작 — 워커 재생성 조건 (2026-10 변경)
 

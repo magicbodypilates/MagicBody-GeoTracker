@@ -3,7 +3,7 @@
  * 계획 geotracker-pplx-openrouter-261012 v2 §8-2.
  *
  * 전역 fetch 는 가짜다 — 실제 OpenRouter 에는 한 건도 요청하지 않는다(호출마다 과금).
- * 하루 상한 저장소는 메모리 가짜다(DB 저장소는 perplexity-openrouter.int.test.ts 가 시험한다).
+ * 하루 사용 기록 저장소는 메모리 가짜다(DB 저장소는 perplexity-openrouter.int.test.ts 가 시험한다).
  * ⚠️ PUBLIC 저장소 — 질문·답·주소·키는 전부 가짜 값이다(도메인은 .test).
  */
 
@@ -17,17 +17,13 @@ import {
   __resetOpenRouterStateForTest,
   callPerplexityViaOpenRouter,
   classifyOpenRouterError,
-  dailyCapKey,
+  dailyUsageKey,
   extractReferencedCitations,
   getPerplexityBackend,
-  getPerplexityDailyCap,
-  getPerplexityManualDailyCap,
-  isPerplexityOncePerDay,
   parseOpenRouterRetryAfterMs,
   resolveOpenRouterKey,
-  shouldLimitPerplexityDaily,
   toScrapeRecord,
-  type DailyCapStore,
+  type DailyUsageStore,
   type OpenRouterCallResult,
 } from "./perplexity-openrouter";
 
@@ -43,15 +39,14 @@ const T0 = Date.parse("2031-03-01T12:00:00+09:00");
 
 type Row = { count: number; costed: number; costUsd: number };
 
-function memStore(opts: { failReserve?: boolean } = {}) {
+function memStore(opts: { failRecord?: boolean } = {}) {
   const rows = new Map<string, Row>();
-  const calls = { reserve: 0, addCost: 0 };
-  const store: DailyCapStore = {
-    async reserve(key, cap) {
-      calls.reserve++;
-      if (opts.failReserve) throw new Error("가짜 저장소 오류");
+  const calls = { record: 0, addCost: 0 };
+  const store: DailyUsageStore = {
+    async record(key) {
+      calls.record++;
+      if (opts.failRecord) throw new Error("가짜 저장소 오류");
       const r = rows.get(key) ?? { count: 0, costed: 0, costUsd: 0 };
-      if (r.count >= cap) return null;
       r.count++;
       rows.set(key, r);
       return r.count;
@@ -117,7 +112,6 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   vi.stubEnv("OPENROUTER_KEY", FAKE_SHARED);
   vi.stubEnv("PERPLEXITY_OPENROUTER_KEY", "");
-  vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "");
   __resetOpenRouterStateForTest();
   logs = [];
   vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void logs.push(a.join(" ")));
@@ -161,42 +155,6 @@ describe("설정 읽기", () => {
     ["openrouter2", "brightdata"],
   ])("PERPLEXITY_BACKEND=%j → %s", (value, expected) => {
     expect(getPerplexityBackend({ PERPLEXITY_BACKEND: value })).toBe(expected);
-  });
-
-  it.each([
-    [undefined, 30],
-    ["", 30],
-    ["0", 0],
-    ["10", 10],
-    [" 7 ", 7],
-    ["500", 500],
-    ["501", 30],
-    ["-1", 30],
-    ["3.5", 30],
-    ["abc", 30],
-  ])("PERPLEXITY_OPENROUTER_DAILY_CAP=%j → %i", (value, expected) => {
-    expect(getPerplexityDailyCap({ PERPLEXITY_OPENROUTER_DAILY_CAP: value })).toBe(expected);
-  });
-
-  it.each([
-    [undefined, true],
-    ["", true],
-    ["1", true],
-    ["no", true],
-    ["0", false],
-    ["false", false],
-    [" OFF ", false],
-    ["off", false],
-  ])("PERPLEXITY_OPENROUTER_ONCE_PER_DAY=%j → %s", (value, expected) => {
-    expect(isPerplexityOncePerDay({ PERPLEXITY_OPENROUTER_ONCE_PER_DAY: value })).toBe(expected);
-  });
-
-  it("하루 1회는 perplexity · openrouter · 켬 세 조건이 모두 맞을 때만", () => {
-    const on = { PERPLEXITY_BACKEND: "openrouter" };
-    expect(shouldLimitPerplexityDaily("perplexity", on)).toBe(true);
-    expect(shouldLimitPerplexityDaily("chatgpt", on)).toBe(false);
-    expect(shouldLimitPerplexityDaily("perplexity", {})).toBe(false);
-    expect(shouldLimitPerplexityDaily("perplexity", { ...on, PERPLEXITY_OPENROUTER_ONCE_PER_DAY: "off" })).toBe(false);
   });
 
   it("키 — 공백 정리 후 비어 있지 않은 첫 키(전용 → 공용)", () => {
@@ -261,26 +219,26 @@ describe("요청 모양 · 키 · 질문 길이", () => {
     );
   });
 
-  it("두 키가 모두 공백이면 BACKEND_BLOCKED · 요청 0 · 예약 0", async () => {
+  it("두 키가 모두 공백이면 BACKEND_BLOCKED · 요청 0 · 기록 0", async () => {
     vi.stubEnv("OPENROUTER_KEY", "   ");
     vi.stubEnv("PERPLEXITY_OPENROUTER_KEY", " ");
     const m = memStore();
     const r = await call(m);
     expect(r).toMatchObject({ ok: false, code: "BACKEND_BLOCKED" });
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(m.calls.reserve).toBe(0);
+    expect(m.calls.record).toBe(0);
     // 키가 없다고 차단기를 켜지 않는다 — 키를 넣으면 바로 나간다
     vi.stubEnv("OPENROUTER_KEY", FAKE_SHARED);
     fetchMock.mockImplementation(async () => respond(200, orBody()));
     expect((await call(m)).ok).toBe(true);
   });
 
-  it("질문 1,001자 → HTTP_4XX · 요청 0 · 예약 0 / 1,000자는 보낸다", async () => {
+  it("질문 1,001자 → HTTP_4XX · 요청 0 · 기록 0 / 1,000자는 보낸다", async () => {
     const m = memStore();
     const r = await call(m, clock(), "가".repeat(1001));
     expect(r).toMatchObject({ ok: false, code: "HTTP_4XX" });
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(m.calls.reserve).toBe(0);
+    expect(m.calls.record).toBe(0);
     fetchMock.mockImplementation(async () => respond(200, orBody()));
     expect((await call(m, clock(), "가".repeat(1000))).ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -497,18 +455,18 @@ describe("오류 분류 — HTTP 상태로 받을 때와 200 + 본문 오류로 
 });
 
 describe("차단기 — 401·402 뒤 30분 · 만료 뒤 재확인 1건", () => {
-  it.each([401, 402])("%i 뒤 다음 호출은 네트워크 없이 BACKEND_BLOCKED · 예약도 안 한다", async (status) => {
+  it.each([401, 402])("%i 뒤 다음 호출은 네트워크 없이 BACKEND_BLOCKED · 기록도 안 한다", async (status) => {
     const m = memStore();
     const c = clock();
     fetchMock.mockResolvedValueOnce(respond(status, { error: { code: status, message: "가짜" } }));
     expect(await call(m, c)).toMatchObject({ ok: false, code: "BACKEND_BLOCKED" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(m.calls.reserve).toBe(1); // 실패한 호출도 1건으로 센다
+    expect(m.calls.record).toBe(1); // 실패한 호출도 1건으로 센다
 
     c.t += PPLX_OR_BLOCK_MS - 1000;
     expect(await call(m, c)).toMatchObject({ ok: false, code: "BACKEND_BLOCKED" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(m.calls.reserve).toBe(1);
+    expect(m.calls.record).toBe(1);
   });
 
   it("30분 뒤 동시 4건 → 실제 요청은 정확히 1건(재확인) · 나머지 3건은 네트워크 없이 차단", async () => {
@@ -552,19 +510,6 @@ describe("차단기 — 401·402 뒤 30분 · 만료 뒤 재확인 1건", () => 
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("재확인 1건이 하루 상한에서 막혀도 재확인 표시는 풀린다", async () => {
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "1");
-    const m = memStore();
-    const c = clock();
-    fetchMock.mockResolvedValueOnce(respond(402, { error: { code: 402, message: "가짜" } }));
-    await call(m, c); // 1건 예약 — 상한 도달
-    c.t += PPLX_OR_BLOCK_MS + 1;
-    expect(await call(m, c)).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "5");
-    fetchMock.mockResolvedValueOnce(respond(200, orBody()));
-    expect((await call(m, c)).ok).toBe(true); // "재확인 중" 으로 굳지 않았다
-  });
-
   it("403 은 차단기를 켜지 않는다 — 그 질문만 실패하고 다음 호출은 정상 요청", async () => {
     const m = memStore();
     fetchMock.mockResolvedValueOnce(respond(403, { error: { code: 403, message: "가짜 거부" } }));
@@ -585,7 +530,7 @@ describe("429 대기 — 대기 중에는 네트워크 없이 RATE_LIMITED", () 
     const waiting = await call(m, c);
     expect(waiting).toMatchObject({ ok: false, code: "RATE_LIMITED", retryAfterMs: 6_000 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(m.calls.reserve).toBe(1);
+    expect(m.calls.record).toBe(1);
     c.t += 6_001;
     fetchMock.mockResolvedValueOnce(respond(200, orBody()));
     expect((await call(m, c)).ok).toBe(true);
@@ -624,7 +569,7 @@ describe("네트워크 오류·시간 초과·해석 실패 → SUBMIT_UNKNOWN",
     expect(b).toMatchObject({ ok: false, code: "SUBMIT_UNKNOWN" });
     if (!b.ok) expect(b.message).toContain("TimeoutError");
     expect(d).toMatchObject({ ok: false, code: "SUBMIT_UNKNOWN" });
-    expect(m.rows.get(dailyCapKey(new Date(T0)))).toMatchObject({ count: 3, costed: 0 }); // 비용 불명 3건
+    expect(m.rows.get(dailyUsageKey(new Date(T0)))).toMatchObject({ count: 3, costed: 0 }); // 비용 불명 3건
   });
 
   it("200 인데 본문이 비었거나 JSON 객체가 아니면 SUBMIT_UNKNOWN (모델 불일치로 보지 않는다)", async () => {
@@ -636,42 +581,34 @@ describe("네트워크 오류·시간 초과·해석 실패 → SUBMIT_UNKNOWN",
   });
 });
 
-describe("하루 상한 — 모든 요청은 예약 성공 뒤에만", () => {
-  it("상한 2 → 세 번째는 요청 0 · DAILY_CAP", async () => {
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "2");
+describe("하루 사용 기록 — 상한 없이 건수만 쌓는다", () => {
+  it("40건을 불러도 모두 나가고 건수가 그대로 쌓인다", async () => {
     const m = memStore();
     fetchMock.mockImplementation(async () => respond(200, orBody()));
+    for (let i = 0; i < 40; i++) expect((await call(m)).ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(40);
+    expect(m.rows.get(dailyUsageKey(new Date(T0)))).toMatchObject({ count: 40, costed: 40 });
+  });
+
+  it("기록 저장소 오류여도 요청은 나간다(기록은 호출을 막지 않는다)", async () => {
+    const m = memStore({ failRecord: true });
+    fetchMock.mockImplementation(async () => respond(200, orBody()));
     expect((await call(m)).ok).toBe(true);
-    expect((await call(m)).ok).toBe(true);
-    expect(await call(m)).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(logs.some((l) => l.includes("사용 기록 실패"))).toBe(true);
+    expect(logs.some((l) => / status=200 .* n=-$/.test(l))).toBe(true);
   });
 
-  it("상한 0 → 예약도 요청도 하지 않는다", async () => {
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "0");
-    const m = memStore();
-    expect(await call(m)).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(m.calls.reserve).toBe(0);
-  });
-
-  it("저장소 오류 → 요청하지 않는다(fail-closed)", async () => {
-    const m = memStore({ failReserve: true });
-    expect(await call(m)).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("동시 10건 · 상한 3 → 실제 요청 정확히 3건", async () => {
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "3");
+  it("동시 10건 → 실제 요청 10건 · 건수 10", async () => {
     const m = memStore();
     fetchMock.mockImplementation(async () => respond(200, orBody()));
     const results = await Promise.all(Array.from({ length: 10 }, () => call(m)));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(results.filter((r) => r.ok)).toHaveLength(3);
-    expect(results.filter((r) => !r.ok && r.code === "DAILY_CAP")).toHaveLength(7);
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    expect(results.filter((r) => r.ok)).toHaveLength(10);
+    expect(m.rows.get(dailyUsageKey(new Date(T0)))).toMatchObject({ count: 10 });
   });
 
-  it("자정 직전에 예약하고 자정 뒤 응답 → 비용은 예약한 날짜 키로", async () => {
+  it("자정 직전에 기록하고 자정 뒤 응답 → 비용은 기록한 날짜 키로", async () => {
     const m = memStore();
     const c = clock(Date.parse("2031-03-01T23:59:59.500+09:00"));
     fetchMock.mockImplementation(async () => {
@@ -691,7 +628,7 @@ describe("비용 기록", () => {
       fetchMock.mockResolvedValueOnce(respond(200, orBody({ cost })));
       await call(m);
     }
-    expect(m.rows.get(dailyCapKey(new Date(T0)))).toEqual({ count: 5, costed: 2, costUsd: 0.003 });
+    expect(m.rows.get(dailyUsageKey(new Date(T0)))).toEqual({ count: 5, costed: 2, costUsd: 0.003 });
   });
 
   it("모델 불일치는 실패지만 과금됐으므로 비용은 기록한다", async () => {
@@ -742,7 +679,7 @@ describe("키·원문 미노출 · 인증 오류 코드 미사용", () => {
     await call(m);
     const configLines = logs.filter((l) => l.includes(" config "));
     expect(configLines).toEqual([
-      "[openrouter-pplx] config backend=openrouter model=perplexity/sonar cap=30 manualCap=10 key=shared",
+      "[openrouter-pplx] config backend=openrouter model=perplexity/sonar key=shared",
     ]);
     const callLines = logs.filter((l) => l.includes(" status=200 "));
     expect(callLines).toHaveLength(2);
@@ -931,56 +868,22 @@ describe("S-3 — 계정정보가 든 주소는 인용에서 버린다", () => {
   });
 });
 
-describe("S-4 — 수동 수집은 날짜별 별도 행 · 별도 상한(기본 10)", () => {
-  it.each([
-    [undefined, 10],
-    ["", 10],
-    ["0", 0],
-    ["3", 3],
-    ["500", 500],
-    ["501", 10],
-    ["abc", 10],
-  ])("PERPLEXITY_OPENROUTER_MANUAL_DAILY_CAP=%j → %i", (value, expected) => {
-    expect(getPerplexityManualDailyCap({ PERPLEXITY_OPENROUTER_MANUAL_DAILY_CAP: value })).toBe(expected);
-  });
-
+describe("S-4 — 수동 수집은 날짜별 별도 기록 행(상한 없음)", () => {
   it("행 키 — 자동 openrouter_pplx_daily:<날짜> · 수동 openrouter_pplx_manual_daily:<날짜>", () => {
     const d = new Date("2031-03-01T23:30:00+09:00");
-    expect(dailyCapKey(d)).toBe("openrouter_pplx_daily:2031-03-01");
-    expect(dailyCapKey(d, "auto")).toBe("openrouter_pplx_daily:2031-03-01");
-    expect(dailyCapKey(d, "manual")).toBe("openrouter_pplx_manual_daily:2031-03-01");
+    expect(dailyUsageKey(d)).toBe("openrouter_pplx_daily:2031-03-01");
+    expect(dailyUsageKey(d, "auto")).toBe("openrouter_pplx_daily:2031-03-01");
+    expect(dailyUsageKey(d, "manual")).toBe("openrouter_pplx_manual_daily:2031-03-01");
   });
 
-  it("수동 10건을 다 써도 자동 수집은 그대로 나간다 — 11번째 수동만 DAILY_CAP", async () => {
+  it("수동 15건도 막히지 않고 수동·자동 기록 행이 따로 쌓인다", async () => {
     const m = memStore();
     fetchMock.mockImplementation(async () => respond(200, orBody()));
-    for (let i = 0; i < 10; i++) expect((await call(m, clock(), PROMPT, "manual")).ok).toBe(true);
-    expect(await call(m, clock(), PROMPT, "manual")).toMatchObject({ ok: false, code: "DAILY_CAP" });
+    for (let i = 0; i < 15; i++) expect((await call(m, clock(), PROMPT, "manual")).ok).toBe(true);
     expect((await call(m, clock(), PROMPT, "auto")).ok).toBe(true);
-    expect(m.rows.get("openrouter_pplx_manual_daily:2031-03-01")).toMatchObject({ count: 10 });
+    expect(m.rows.get("openrouter_pplx_manual_daily:2031-03-01")).toMatchObject({ count: 15 });
     expect(m.rows.get("openrouter_pplx_daily:2031-03-01")).toMatchObject({ count: 1 });
-    expect(fetchMock).toHaveBeenCalledTimes(11);
-  });
-
-  it("자동 상한이 차도 수동은 자기 상한으로 나간다 · 자동 상한 설정은 수동에 영향이 없다", async () => {
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "1");
-    const m = memStore();
-    fetchMock.mockImplementation(async () => respond(200, orBody()));
-    expect((await call(m)).ok).toBe(true);
-    expect(await call(m)).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    expect((await call(m, clock(), PROMPT, "manual")).ok).toBe(true);
-    vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "0");
-    expect((await call(m, clock(), PROMPT, "manual")).ok).toBe(true);
-  });
-
-  it("수동 상한 0 → 수동은 예약·요청 0 · 자동은 그대로", async () => {
-    vi.stubEnv("PERPLEXITY_OPENROUTER_MANUAL_DAILY_CAP", "0");
-    const m = memStore();
-    fetchMock.mockImplementation(async () => respond(200, orBody()));
-    expect(await call(m, clock(), PROMPT, "manual")).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(m.calls.reserve).toBe(0);
-    expect((await call(m)).ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(16);
   });
 
   it("호출 로그에 용도가 남는다(use=manual)", async () => {

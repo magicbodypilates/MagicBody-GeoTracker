@@ -17,7 +17,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { eq, like } from "drizzle-orm";
-// OpenRouter Perplexity 하루 1회 추가 테스트용(계획 geotracker-pplx-openrouter-261012 v2 §8-2 — 파일 끝 묶음)
+// OpenRouter Perplexity 수집 테스트용(계획 geotracker-pplx-openrouter-261012 v2 §8-2 — 파일 끝 묶음)
 import { vi, beforeEach } from "vitest";
 import {
   TEST_WORKSPACE_PREFIX,
@@ -209,11 +209,11 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
   });
 
   /* ----------------------------------------------------------------
-   * 같은 질문 하루 1회 · OpenRouter Perplexity — 예전 엔진(runTick)
-   * 계획 geotracker-pplx-openrouter-261012 v2 §3 · §8-2. 전역 fetch 는 가짜(OpenRouter·Bright Data 모두).
+   * OpenRouter Perplexity — 예전 엔진(runTick). 하루 상한·같은 질문 하루 1회 건너뜀은 2026-10-29 에 없앴다.
+   * 계획 geotracker-pplx-openrouter-261012 v2 §8-2. 전역 fetch 는 가짜(OpenRouter·Bright Data 모두).
    * runTick 은 실제 현재 시각으로 돈다 — "오늘(KST)" 기준 행을 현재 시각으로 만든다.
    * ---------------------------------------------------------------- */
-  describe("같은 질문 하루 1회 · OpenRouter Perplexity (예전 엔진 runTick)", () => {
+  describe("OpenRouter Perplexity — 상한 없이 매번 수집 (예전 엔진 runTick)", () => {
     const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
     const BD_URL = "https://api.brightdata.com/datasets/v3/scrape";
     let fetchCalls: string[] = [];
@@ -299,11 +299,11 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
       vi.unstubAllEnvs();
       vi.restoreAllMocks();
       (await import("./perplexity-openrouter")).__resetOpenRouterStateForTest();
-      // 이 묶음이 만든 하루 상한 행만 지운다(파일 전용 시험 DB)
+      // 이 묶음이 만든 하루 사용 기록 행만 지운다(파일 전용 시험 DB)
       await dbm.db.delete(dbm.schema.collectorState).where(like(dbm.schema.collectorState.key, "openrouter_pplx_%"));
     });
 
-    it("5 · 같은 날 다른 시간대 결과가 있으면 skippedDuplicates · OpenRouter 요청 0", async () => {
+    it("5 · 같은 날 다른 시간대 결과가 있어도 다시 묻는다 — OpenRouter 요청 1 · 건너뜀 0", async () => {
       vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
       const ws = await makeWorkspace("5");
       await addPrompt(ws.id, "가짜 하루 1회 질문 5");
@@ -312,13 +312,13 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
 
       const tick = await R.runTick();
       expect(tick.errors).toEqual([]);
-      expect(tick.skippedDuplicates).toBe(1);
-      expect(tick.executedRuns).toBe(0);
-      expect(fetchCalls).toEqual([]);
-      expect(await runsCount(ws.id, "perplexity")).toBe(1);
+      expect(tick.skippedDuplicates).toBe(0);
+      expect(tick.executedRuns).toBe(1);
+      expect(fetchCalls).toEqual([OR_URL]);
+      expect(await runsCount(ws.id, "perplexity")).toBe(2);
     });
 
-    it("6 · 전날(KST) 결과만 있으면 다시 묻는다 — OpenRouter 로 수집·저장(참조 인용) · 오늘 상한 행 count 1", async () => {
+    it("6 · 전날(KST) 결과가 있어도 OpenRouter 로 수집·저장(참조 인용) · 오늘 사용 기록 행 count 1", async () => {
       vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
       const ws = await makeWorkspace("6");
       await addPrompt(ws.id, "가짜 하루 1회 질문 6");
@@ -338,17 +338,17 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
       const [state] = await dbm.db
         .select()
         .from(dbm.schema.collectorState)
-        .where(eq(dbm.schema.collectorState.key, OR.dailyCapKey(new Date())));
+        .where(eq(dbm.schema.collectorState.key, OR.dailyUsageKey(new Date())));
       expect(state?.value).toMatchObject({ count: 1, costed: 1 });
-      // 예전 엔진은 자동 수집 몫으로 센다 — 수동 수집 행은 생기지 않는다(1회차 검수 S-4)
+      // 예전 엔진은 자동 수집 몫으로 기록한다 — 수동 수집 행은 생기지 않는다(1회차 검수 S-4)
       const [manual] = await dbm.db
         .select()
         .from(dbm.schema.collectorState)
-        .where(eq(dbm.schema.collectorState.key, OR.dailyCapKey(new Date(), "manual")));
+        .where(eq(dbm.schema.collectorState.key, OR.dailyUsageKey(new Date(), "manual")));
       expect(manual).toBeUndefined();
     });
 
-    it("7 · 설정이 brightdata 면 하루 1회 미적용 — 같은 날 결과가 있어도 Bright Data 로 수집", async () => {
+    it("7 · 설정이 brightdata 면 같은 날 결과가 있어도 Bright Data 로 수집", async () => {
       const ws = await makeWorkspace("7");
       await addPrompt(ws.id, "가짜 하루 1회 질문 7");
       await addAutoRun(ws.id, "가짜 하루 1회 질문 7", "perplexity", new Date(Math.max(Date.now() - 60_000, kstMidnightMs())));
@@ -361,9 +361,10 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
       expect(fetchCalls[0].startsWith(BD_URL)).toBe(true);
     });
 
-    it("8 · runAiScraper 가 DAILY_CAP 을 던지면 그 질문의 Perplexity 만 실패 · 같은 질문의 다른 AI 는 저장", async () => {
+    it("8 · OpenRouter 키가 없어 차단되면 그 질문의 Perplexity 만 실패 · 같은 질문의 다른 AI 는 저장", async () => {
       vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
-      vi.stubEnv("PERPLEXITY_OPENROUTER_DAILY_CAP", "0");
+      vi.stubEnv("OPENROUTER_KEY", "");
+      vi.stubEnv("PERPLEXITY_OPENROUTER_KEY", "");
       const ws = await makeWorkspace("8");
       await addPrompt(ws.id, "가짜 하루 1회 질문 8");
       await addDueSchedule(ws.id, ["perplexity", "chatgpt"]);
@@ -373,8 +374,8 @@ describe.skipIf(!CFG.enabled)("하루 집계(runDailyRollup) 통합 (로컬 DB)"
       expect(tick.executedRuns).toBe(1);
       expect(tick.providerFailures).toHaveLength(1);
       expect(tick.providerFailures[0].provider).toBe("perplexity");
-      expect(tick.providerFailures[0].reason.startsWith("[DAILY_CAP]")).toBe(true);
-      expect(fetchCalls.some((u) => u.startsWith(OR_URL))).toBe(false); // 상한에 걸리면 요청하지 않는다
+      expect(tick.providerFailures[0].reason.startsWith("[BACKEND_BLOCKED]")).toBe(true);
+      expect(fetchCalls.some((u) => u.startsWith(OR_URL))).toBe(false); // 차단되면 요청하지 않는다
       expect(await runsCount(ws.id, "chatgpt")).toBe(1);
       expect(await runsCount(ws.id, "perplexity")).toBe(0);
     });

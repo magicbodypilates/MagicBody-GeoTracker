@@ -1,5 +1,5 @@
 /**
- * perplexity-openrouter.int.test.ts — OpenRouter Perplexity 하루 호출 상한 저장소(createDbDailyCapStore)
+ * perplexity-openrouter.int.test.ts — OpenRouter Perplexity 하루 사용 기록 저장소(createDbDailyUsageStore)
  * 통합 테스트 (로컬 DB · 계획 geotracker-pplx-openrouter-261012 v2 §2-2 · §8-2).
  *
  * 실행: GEO_TEST_POSTGRES_URL=<로컬 시험 DB> GEO_REQUIRE_DB_TESTS=1 npx vitest run lib/server/perplexity-openrouter.int.test.ts
@@ -48,14 +48,14 @@ async function cleanOwnRows() {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 if (!CFG.enabled && CFG.mustFail) {
-  describe("OpenRouter 하루 상한 저장소 통합 테스트", () => {
+  describe("OpenRouter 하루 사용 기록 저장소 통합 테스트", () => {
     it("GEO_REQUIRE_DB_TESTS=1 인데 GEO_TEST_POSTGRES_URL 이 없다 — 실패", () => {
       throw new Error(CFG.reason);
     });
   });
 }
 
-describe.skipIf(!CFG.enabled)("OpenRouter 하루 상한 저장소 (로컬 DB)", () => {
+describe.skipIf(!CFG.enabled)("OpenRouter 하루 사용 기록 저장소 (로컬 DB)", () => {
   beforeAll(async () => {
     if (!CFG.enabled) return;
     await ensureTestDatabase(CFG);
@@ -77,36 +77,33 @@ describe.skipIf(!CFG.enabled)("OpenRouter 하루 상한 저장소 (로컬 DB)", 
     await g.__geotracker_pg_client?.end();
   });
 
-  it("① 동시 20건 예약 · 상한 7 → 성공 정확히 7 · 행 count=7", async () => {
-    const store = OR.createDbDailyCapStore();
-    const key = OR.dailyCapKey(new Date("2031-04-01T10:00:00+09:00"));
-    const results = await Promise.all(Array.from({ length: 20 }, () => store.reserve(key, 7)));
-    const ok = results.filter((r): r is number => r !== null);
-    expect(ok).toHaveLength(7);
-    expect([...ok].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    expect(results.filter((r) => r === null)).toHaveLength(13);
-    expect(await stateValue(key)).toMatchObject({ count: 7, costed: 0, costUsd: 0 });
+  it("① 동시 20건 기록 → 모두 기록 · 건수 1～20 · 행 count=20 (상한 없음)", async () => {
+    const store = OR.createDbDailyUsageStore();
+    const key = OR.dailyUsageKey(new Date("2031-04-01T10:00:00+09:00"));
+    const results = await Promise.all(Array.from({ length: 20 }, () => store.record(key)));
+    expect([...results].sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+    expect(await stateValue(key)).toMatchObject({ count: 20, costed: 0, costUsd: 0 });
   });
 
-  it("② 전날 23:59:59 KST 와 당일 00:00:00 KST 는 다른 키 · 늦게 실행된 전날 예약이 당일 count 를 건드리지 않는다", async () => {
-    const store = OR.createDbDailyCapStore();
-    const prevKey = OR.dailyCapKey(new Date("2031-04-01T23:59:59+09:00"));
-    const todayKey = OR.dailyCapKey(new Date("2031-04-02T00:00:00+09:00"));
+  it("② 전날 23:59:59 KST 와 당일 00:00:00 KST 는 다른 키 · 늦게 실행된 전날 기록이 당일 count 를 건드리지 않는다", async () => {
+    const store = OR.createDbDailyUsageStore();
+    const prevKey = OR.dailyUsageKey(new Date("2031-04-01T23:59:59+09:00"));
+    const todayKey = OR.dailyUsageKey(new Date("2031-04-02T00:00:00+09:00"));
     expect(prevKey).toBe("openrouter_pplx_daily:2031-04-01");
     expect(todayKey).toBe("openrouter_pplx_daily:2031-04-02");
 
-    expect(await store.reserve(todayKey, 5)).toBe(1);
-    expect(await store.reserve(todayKey, 5)).toBe(2);
-    // 자정 직전에 시작해 늦게 도착한 전날 예약 — 전날 행에만 쌓인다
-    expect(await store.reserve(prevKey, 5)).toBe(1);
+    expect(await store.record(todayKey)).toBe(1);
+    expect(await store.record(todayKey)).toBe(2);
+    // 자정 직전에 시작해 늦게 도착한 전날 기록 — 전날 행에만 쌓인다
+    expect(await store.record(prevKey)).toBe(1);
     expect(await stateValue(todayKey)).toMatchObject({ count: 2 });
     expect(await stateValue(prevKey)).toMatchObject({ count: 1 });
   });
 
   it("③ addCost 가 costed·costUsd 를 정확히 누적한다(소수 오차 없음) · count−costed = 비용 불명", async () => {
-    const store = OR.createDbDailyCapStore();
-    const key = OR.dailyCapKey(new Date("2031-04-03T09:00:00+09:00"));
-    for (let i = 0; i < 4; i++) await store.reserve(key, 30);
+    const store = OR.createDbDailyUsageStore();
+    const key = OR.dailyUsageKey(new Date("2031-04-03T09:00:00+09:00"));
+    for (let i = 0; i < 4; i++) await store.record(key);
     await store.addCost(key, 0.001);
     await store.addCost(key, 0.002);
     await store.addCost(key, 0.0035);
@@ -116,13 +113,13 @@ describe.skipIf(!CFG.enabled)("OpenRouter 하루 상한 저장소 (로컬 DB)", 
     expect(Number(v?.count) - Number(v?.costed)).toBe(1);
   });
 
-  it("④ firstAt 은 그대로 · lastAt 은 예약마다 갱신", async () => {
-    const store = OR.createDbDailyCapStore();
-    const key = OR.dailyCapKey(new Date("2031-04-04T09:00:00+09:00"));
-    await store.reserve(key, 30);
+  it("④ firstAt 은 그대로 · lastAt 은 기록마다 갱신", async () => {
+    const store = OR.createDbDailyUsageStore();
+    const key = OR.dailyUsageKey(new Date("2031-04-04T09:00:00+09:00"));
+    await store.record(key);
     const first = await stateValue(key);
     await sleep(15);
-    await store.reserve(key, 30);
+    await store.record(key);
     const second = await stateValue(key);
     expect(typeof first?.firstAt).toBe("string");
     expect(second?.firstAt).toBe(first?.firstAt);
@@ -130,21 +127,15 @@ describe.skipIf(!CFG.enabled)("OpenRouter 하루 상한 저장소 (로컬 DB)", 
     expect(Date.parse(String(second?.lastAt))).toBeGreaterThan(Date.parse(String(first?.lastAt)));
   });
 
-  it("⑤ 상한에 걸린 예약은 행을 바꾸지 않는다 · 비용 기록은 행이 없으면 아무것도 만들지 않는다", async () => {
-    const store = OR.createDbDailyCapStore();
-    const key = OR.dailyCapKey(new Date("2031-04-05T09:00:00+09:00"));
-    expect(await store.reserve(key, 1)).toBe(1);
-    const before = await stateValue(key);
-    expect(await store.reserve(key, 1)).toBeNull();
-    expect(await stateValue(key)).toEqual(before);
-
-    const missing = OR.dailyCapKey(new Date("2031-04-06T09:00:00+09:00"));
+  it("⑤ 비용 기록은 행이 없으면 아무것도 만들지 않는다", async () => {
+    const store = OR.createDbDailyUsageStore();
+    const missing = OR.dailyUsageKey(new Date("2031-04-06T09:00:00+09:00"));
     await store.addCost(missing, 0.01);
     expect(await stateValue(missing)).toBeNull();
   });
 
-  it("⑥ 실제 저장소로 호출 경로 — 예약 → (가짜) 요청 → 비용 기록이 같은 날짜 행에 남는다", async () => {
-    const key = OR.dailyCapKey(new Date("2031-04-07T12:00:00+09:00"));
+  it("⑥ 실제 저장소로 호출 경로 — 기록 → (가짜) 요청 → 비용 기록이 같은 날짜 행에 남는다", async () => {
+    const key = OR.dailyUsageKey(new Date("2031-04-07T12:00:00+09:00"));
     OR.__resetOpenRouterStateForTest();
     const fakeFetch = (async () =>
       new Response(
@@ -167,16 +158,15 @@ describe.skipIf(!CFG.enabled)("OpenRouter 하루 상한 저장소 (로컬 DB)", 
     OR.__resetOpenRouterStateForTest();
   });
 
-  it("⑦ 수동 수집은 같은 날짜의 별도 행·별도 상한 — 수동이 차도 자동 행은 그대로 (1회차 검수 S-4)", async () => {
-    const store = OR.createDbDailyCapStore();
+  it("⑦ 수동 수집은 같은 날짜의 별도 기록 행 — 수동이 쌓여도 자동 행은 그대로 (1회차 검수 S-4)", async () => {
+    const store = OR.createDbDailyUsageStore();
     const day = new Date("2031-04-08T10:00:00+09:00");
-    const autoKey = OR.dailyCapKey(day, "auto");
-    const manualKey = OR.dailyCapKey(day, "manual");
+    const autoKey = OR.dailyUsageKey(day, "auto");
+    const manualKey = OR.dailyUsageKey(day, "manual");
     expect(manualKey).toBe("openrouter_pplx_manual_daily:2031-04-08");
-    const manual = await Promise.all(Array.from({ length: 5 }, () => store.reserve(manualKey, 2)));
-    expect(manual.filter((x) => x !== null)).toHaveLength(2);
-    expect(await store.reserve(autoKey, 30)).toBe(1);
-    expect(await stateValue(manualKey)).toMatchObject({ count: 2 });
+    await Promise.all(Array.from({ length: 5 }, () => store.record(manualKey)));
+    expect(await store.record(autoKey)).toBe(1);
+    expect(await stateValue(manualKey)).toMatchObject({ count: 5 });
     expect(await stateValue(autoKey)).toMatchObject({ count: 1 });
   });
 });

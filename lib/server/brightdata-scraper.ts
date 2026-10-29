@@ -179,7 +179,7 @@ type ScrapeRequest = {
   /** true면 캐시 읽기를 건너뛰고 Bright Data 를 새로 호출한다. 수동 테스트용. 결과는 여전히 캐시에 기록된다. */
   forceRefresh?: boolean;
   /**
-   * 호출 용도 — OpenRouter Perplexity 경로의 하루 상한을 어느 몫으로 셀지(보안 점검 S-4). 기본 "manual"
+   * 호출 용도 — OpenRouter Perplexity 경로의 하루 사용 기록을 어느 몫으로 쌓을지. 기본 "manual"
    * (수동 수집 화면 /api/scrape — 그 라우트는 입력 규칙에 이 칸이 없어 사용자가 고를 수 없다). 자동 수집(예전
    * 엔진)은 "auto" 를 넘긴다. Bright Data 경로·캐시 키에는 영향이 없다.
    */
@@ -216,7 +216,7 @@ function getDatasetId(provider: Provider) {
 
 function buildCacheKey(input: ScrapeRequest, backend: PerplexityBackend) {
   // forceRefresh 는 캐시 키에서 제외 — 같은 입력은 같은 키로 저장/조회되어야 한다.
-  // 호출 용도(purpose)도 제외 — 같은 질문의 결과는 자동·수동이 같다(상한 몫만 다르다).
+  // 호출 용도(purpose)도 제외 — 같은 질문의 결과는 자동·수동이 같다(사용 기록 행만 다르다).
   // 수집 방식(backend)은 넣는다 — 방식을 바꾼 직후 20분 동안 다른 방식의 결과가 섞이지 않게.
   const { forceRefresh: _ignore, ...keyable } = input;
   delete keyable.purpose;
@@ -1373,9 +1373,9 @@ export type ScrapeErrorCode =
   | "SUBMIT_UNKNOWN"
   | "DOWNLOAD_FAILED"
   | "NETWORK"
-  // OpenRouter Perplexity 경로 전용(perplexity-openrouter.ts) — 둘 다 작업이 생기지 않았고 재시도하지 않는다.
-  | "BACKEND_BLOCKED" // 키 없음·키 거부·잔액 부족(401·402 뒤 30분 차단) — 그 경로만 막는다(전체 제출 정지 아님)
-  | "DAILY_CAP"; // 하루 호출 상한 도달·상한 확인 실패
+  // OpenRouter Perplexity 경로 전용(perplexity-openrouter.ts) — 작업이 생기지 않았고 재시도하지 않는다.
+  // (옛 기록에는 하루 상한 도달 코드 "DAILY_CAP" 이 문자열로 남아 있을 수 있다 — 2026-10-29 상한 제거. 코드 목록으로 걸러내는 곳은 없다)
+  | "BACKEND_BLOCKED"; // 키 없음·키 거부·잔액 부족(401·402 뒤 30분 차단) — 그 경로만 막는다(전체 제출 정지 아님)
 
 /** 크롤러 계열 코드인지 — 접두사 "CRAWLER_" 로 판정한다. */
 export function isCrawlerCode(code: string): code is CrawlerErrorCode {
@@ -1498,10 +1498,10 @@ export type SubmitResult =
   /** 5xx·네트워크·시간 초과 — 작업이 생겼을 수 있다(과금 여부 모름). */
   | { ok: false; code: "SUBMIT_UNKNOWN"; message: string }
   /**
-   * OpenRouter Perplexity 경로 전용 — 키 없음·키 거부·잔액 부족 차단(BACKEND_BLOCKED) 또는 하루 상한
-   * (DAILY_CAP). 네트워크 없이 즉시 온다. 엔진은 HTTP_4XX 와 같이 그 항목만 실패시킨다(DB 일시정지 없음).
+   * OpenRouter Perplexity 경로 전용 — 키 없음·키 거부·잔액 부족 차단(BACKEND_BLOCKED).
+   * 네트워크 없이 즉시 온다. 엔진은 HTTP_4XX 와 같이 그 항목만 실패시킨다(DB 일시정지 없음).
    */
-  | { ok: false; code: "BACKEND_BLOCKED" | "DAILY_CAP"; message: string };
+  | { ok: false; code: "BACKEND_BLOCKED"; message: string };
 
 /**
  * 제출 — 지금 runAiScraper 의 제출과 같은 동기 요청(`/scrape`)이다(계획 v2 §2-4).
@@ -1520,7 +1520,7 @@ export async function submitScrape(req: {
   if (backendFor(req.provider) === "openrouter") {
     // Perplexity + 설정 openrouter — Bright Data 키와 무관하다. 200 즉시 결과(kind:"payload")로 돌려준다.
     // 실패 코드는 모듈 반환값 그대로(인증 오류 코드는 오지 않는다 — 전체 제출 정지를 부르지 않게).
-    // 이 함수는 자동 수집 엔진만 부른다 — 자동 수집 몫의 하루 상한으로 센다.
+    // 이 함수는 자동 수집 엔진만 부른다 — 자동 수집 몫의 하루 사용 기록으로 쌓는다.
     const r = await callPerplexityViaOpenRouter(req.prompt, { purpose: "auto" });
     if (r.ok) return { ok: true, kind: "payload", payload: [r.record] };
     if (r.code === "RATE_LIMITED") {

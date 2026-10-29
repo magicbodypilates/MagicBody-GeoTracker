@@ -1295,7 +1295,7 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
 
   /* ----------------------------------------------------------------
    * OpenRouter Perplexity 시험 경로 (계획 geotracker-pplx-openrouter-261012 v2 §3 · §4-3 · §8-2)
-   * 가짜 submitScrape 가 OpenRouter 경로의 반환값(200 즉시 결과·BACKEND_BLOCKED·DAILY_CAP)을 흉내 낸다.
+   * 가짜 submitScrape 가 OpenRouter 경로의 반환값(200 즉시 결과·BACKEND_BLOCKED)을 흉내 낸다.
    * ---------------------------------------------------------------- */
 
   /** 자동 결과 1행을 직접 넣는다(하루 1회 시험용) */
@@ -1380,14 +1380,14 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(await stateRow("auth_pause_until")).toBeNull();
   }, 60_000);
 
-  it("v3 · DAILY_CAP 이 계속 오면 남은 Perplexity 항목이 몇 번의 통과 안에 전부 failed · 회차 완료(만료 아님)", async () => {
+  it("v3 · BACKEND_BLOCKED 가 계속 오면 남은 Perplexity 항목이 몇 번의 통과 안에 전부 failed · 회차 완료(만료 아님)", async () => {
     vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
     const ws = await makeWorkspace("v3");
     await makePrompts(ws.id, promptTexts("v3", 9)); // AI별 동시 상한 4 → 통과 3번에 나뉜다
     const s = await makeSchedule(ws.id, { providers: ["perplexity", "chatgpt"], nextRunAt: at(-60) });
     const fake = new FakeBd();
     fake.onSubmit = (req) =>
-      req.provider === "perplexity" ? { ok: false, code: "DAILY_CAP", message: "하루 상한 30회 도달(시험)" } : fake.inline(req);
+      req.provider === "perplexity" ? { ok: false, code: "BACKEND_BLOCKED", message: "키 거부 뒤 차단 중(시험)" } : fake.inline(req);
 
     const end = await runUntilIdle(ws.id, deps(fake), T0);
     expect(end.getTime() - T0.getTime()).toBeLessThan(10 * 60_000); // 5시간 만료를 기다리지 않는다
@@ -1395,24 +1395,24 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(px).toHaveLength(9);
     for (const i of px) {
       expect(i.status).toBe("failed");
-      expect(i.lastErrorCode).toBe("DAILY_CAP");
+      expect(i.lastErrorCode).toBe("BACKEND_BLOCKED");
       expect(i.paidAttempts).toBe(0);
     }
     expect(fake.submitCount((x) => x.provider === "perplexity")).toBe(9); // 항목당 한 번 — 재시도 없음
     const [r] = await roundsOf(s.id);
     expect(r.status).toBe("completed");
     expect(r.summary?.saved).toBe(9); // ChatGPT 는 영향 없음
-    expect(r.summary?.byProvider.perplexity.failedByCode).toEqual({ DAILY_CAP: 9 });
+    expect(r.summary?.byProvider.perplexity.failedByCode).toEqual({ BACKEND_BLOCKED: 9 });
     expect(await stateRow("rate_pause:perplexity")).toBeNull();
     expect(await stateRow("auth_pause_until")).toBeNull();
   }, 60_000);
 
-  it("v4 · 하루 1회 — 같은 한국 날짜 다른 시간대 자동 결과가 있으면 duplicate(그 결과를 가리킴) · 전날 결과는 다시 묻는다", async () => {
+  it("v4 · 같은 한국 날짜 다른 시간대 자동 결과가 있어도 다시 묻는다(같은 질문 하루 1회 건너뜀 없음)", async () => {
     vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
     const ws = await makeWorkspace("v4");
     const [p1, p2] = await makePrompts(ws.id, promptTexts("v4", 2));
     // T0 = 2031-05-05 12:00:30 KST. p1 은 같은 날 07:30 KST, p2 는 전날 23:00 KST 에 자동 결과가 있다.
-    const sameDayRunId = await addAutoRun(ws.id, p1.text, "perplexity", new Date("2031-05-04T22:30:00Z"), "2031-05-04T22");
+    await addAutoRun(ws.id, p1.text, "perplexity", new Date("2031-05-04T22:30:00Z"), "2031-05-04T22");
     await addAutoRun(ws.id, p2.text, "perplexity", new Date("2031-05-04T14:00:00Z"), "2031-05-04T14");
     await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60) });
     const fake = new FakeBd();
@@ -1423,22 +1423,20 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     const its = await itemsOfWorkspace(ws.id);
     const i1 = its.find((i) => i.promptText === p1.text)!;
     const i2 = its.find((i) => i.promptText === p2.text)!;
-    expect(i1.status).toBe("duplicate");
-    expect(i1.runId).toBe(sameDayRunId);
-    expect(i1.paidAttempts).toBe(0);
+    expect(i1.status).toBe("saved");
     expect(i2.status).toBe("saved");
-    expect(fake.submitCount((s) => s.prompt === p1.text)).toBe(0);
+    expect(fake.submitCount((s) => s.prompt === p1.text)).toBe(1);
     expect(fake.submitCount((s) => s.prompt === p2.text)).toBe(1);
-    expect(d.stats.duplicates).toBe(1);
+    expect(d.stats.duplicates).toBe(0);
   }, 60_000);
 
-  it("v5 · 상한으로 회차가 닫힌 직후 설정을 brightdata 로 되돌리고 새 회차 → Perplexity 항목이 바로 제출된다(남은 정지 없음)", async () => {
+  it("v5 · 차단으로 회차가 닫힌 직후 설정을 brightdata 로 되돌리고 새 회차 → Perplexity 항목이 바로 제출된다(남은 정지 없음)", async () => {
     vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
     const ws = await makeWorkspace("v5");
     await makePrompts(ws.id, promptTexts("v5", 5));
     await makeSchedule(ws.id, { providers: ["perplexity"], nextRunAt: at(-60), name: "시험 중" });
     const fake = new FakeBd();
-    fake.onSubmit = (req) => ({ ok: false, code: "DAILY_CAP", message: `하루 상한 도달(시험) ${req.provider}` });
+    fake.onSubmit = (req) => ({ ok: false, code: "BACKEND_BLOCKED", message: `키 거부 뒤 차단 중(시험) ${req.provider}` });
     const end = await runUntilIdle(ws.id, deps(fake), T0);
     expect((await itemsOfWorkspace(ws.id)).every((i) => i.status === "failed")).toBe(true);
 
@@ -1454,7 +1452,7 @@ describe.skipIf(!CFG.enabled)("collector-engine 통합 (로컬 DB · 가짜 Brig
     expect(await stateRow("auth_pause_until")).toBeNull();
   }, 60_000);
 
-  it("v6 · 설정이 brightdata(또는 없음)면 하루 1회를 적용하지 않는다 — 같은 날 다른 시간대 결과가 있어도 보낸다", async () => {
+  it("v6 · 설정이 brightdata(또는 없음)면 같은 날 다른 시간대 결과가 있어도 보낸다", async () => {
     const ws = await makeWorkspace("v6");
     const [p1] = await makePrompts(ws.id, promptTexts("v6", 1));
     await addAutoRun(ws.id, p1.text, "perplexity", new Date("2031-05-04T22:30:00Z"), "2031-05-04T22");

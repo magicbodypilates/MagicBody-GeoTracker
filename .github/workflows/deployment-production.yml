@@ -1,14 +1,10 @@
 # =============================================================================
-# 배포 목적지 주의 (2026-09-11 신설 · 2026-10-14 벌쳐 전환 반영)
-#   운영 서버는 2026-10-06 부터 **벌쳐(VULTR_PROD_HOST / _PORT / _USER / _SSH_KEY)** 다.
-#   손님 사이트·API·관리자가 모두 거기서 돈다. 그래서 main 에 올리거나 아무 선택 없이
-#   실행하면 **벌쳐(운영)** 로 간다.
-#   옛 애저 서버(AZURE_PROD_*)는 손님 트래픽이 0 이고 폐기 예정이라, 아래 workflow_dispatch 의
-#   destination 에서 azure-production 을 **명시로 고를 때만** 그쪽으로 간다.
-#   어느 쪽이든 접속 정보 칸의 값을 다른 서버 것으로 덮어쓰지 마라 — 칸 이름과 실제
-#   목적지가 어긋나 아래 두 사고가 다시 난다.
-#     2026-09-07 덮어쓰기로 운영 서버로 배포할 길이 사라졌고,
-#     2026-09-10 배포가 성공 표시를 받고도 운영이 아닌 곳으로 갔다.
+# 배포 목적지 : 운영 서버(벌쳐 서울) 하나뿐이다.
+#   접속 정보는 VULTR_PROD_HOST / _PORT / _USER / _SSH_KEY 칸을 쓴다.
+#   main 에 올리거나 손으로 실행하면 **벌쳐(운영)** 로 간다.
+#   (옛 운영 서버였던 애저는 2026-10-27 에 모두 삭제해 이 파일에서 길을 없앴다)
+#   접속 정보 칸의 값을 다른 서버 것으로 덮어쓰지 마라 - 칸 이름과 실제 목적지가
+#   어긋나 2026-09 에 배포가 운영이 아닌 곳으로 간 사고가 다시 난다.
 # =============================================================================
 name: Deployment to production
 
@@ -35,13 +31,12 @@ on:
   workflow_dispatch:
     inputs:
       destination:
-        description: "배포 목적지 - 기본값은 운영 서버(벌쳐). 폐기 예정인 옛 애저 서버로 보낼 때만 azure-production 으로 바꾼다"
+        description: "배포 목적지 - 운영 서버(벌쳐 서울)"
         type: choice
         required: false
         default: vultr-new
         options:
           - vultr-new
-          - azure-production
       dry_run:
         description: "확인만 하고 배포하지 않음 - 목적지만 로그에 찍고 종료"
         type: boolean
@@ -60,16 +55,8 @@ env:
   IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/magicbody-geo-tracker
 
 jobs:
-  # -- 배포 목적지를 먼저 밝히고 기록에 남긴다 (2026-09-11 신설 · 2026-10-14 기준 뒤집음) --
-  #   목적지 해석 규칙: 입력값이 'azure-production' 일 때만 옛 애저 서버다.
-  #   빈 값 - main push - API 호출 등 그 밖의 모든 경우는 **운영 서버(벌쳐)** 로 간다.
-  #   아무 생각 없이 눌러도 운영으로 가게 하는 것이 이 표현식의 목적이다.
-  #   (2026-10-06 운영이 벌쳐로 넘어가기 전까지는 이 기준이 애저 쪽이었다.)
-  #
-  #   오타·대소문자 변형은 여기까지 오지 못한다 - destination 이 choice 라서
-  #   깃허브가 허용 목록 밖의 값을 HTTP 422 로 거부한다(2026-10-14 실측:
-  #   'AZURE-PRODUCTION' 과 'hello-world' 둘 다 거부되어 실행 기록조차 안 생겼다).
-  #   그래서 이 표현식에 실제로 닿는 값은 'vultr-new' - 'azure-production' - 빈 값 셋뿐이다.
+  # -- 배포 목적지를 먼저 밝히고 기록에 남긴다 --
+  #   목적지는 운영 서버(벌쳐 서울) 하나다. 접속 정보 칸이 비어 있으면 배포를 중단한다(fail-closed).
   #
   #   ⚠️ production 환경(environment)에는 접속 비밀값을 넣지 마라.
   #   아래 사전 확인 작업에는 environment 가 없고 배포 작업에는 있어서, 같은 이름이
@@ -83,12 +70,12 @@ jobs:
       - name: "목적지 해석 + 접속 정보 존재 확인 (fail-closed)"
         env:
           DEST_INPUT: ${{ github.event.inputs.destination }}
-          DEST_PREFIX: ${{ github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD' }}
-          DEST_LABEL: ${{ github.event.inputs.destination == 'azure-production' && '옛 애저 서버(폐기 예정)' || '운영 서버(벌쳐 서울)' }}
-          DEST_HOST: ${{ secrets[format('{0}_HOST', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          DEST_PORT: ${{ secrets[format('{0}_PORT', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          DEST_USER: ${{ secrets[format('{0}_USER', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          DEST_KEY: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
+          DEST_PREFIX: "VULTR_PROD"
+          DEST_LABEL: "운영 서버(벌쳐 서울)"
+          DEST_HOST: ${{ secrets.VULTR_PROD_HOST }}
+          DEST_PORT: ${{ secrets.VULTR_PROD_PORT }}
+          DEST_USER: ${{ secrets.VULTR_PROD_USER }}
+          DEST_KEY: ${{ secrets.VULTR_PROD_SSH_KEY }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -eu
@@ -165,7 +152,7 @@ jobs:
         uses: appleboy/ssh-action@master
         env:
           # 배포 로그에 목적지를 남기기 위해 서버로 함께 넘긴다(아래 envs 목록에도 있어야 도달한다).
-          DEPLOY_DEST_PREFIX: ${{ github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD' }}
+          DEPLOY_DEST_PREFIX: "VULTR_PROD"
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
           # worker 는 앱과 같은 이미지를 쓰지만 지금까지 앱만 재생성해 옛 이미지(08-04)에 머물렀다.
@@ -186,10 +173,10 @@ jobs:
           #     cms-api 가 호출 자체를 막고(32자 검사) 화면은 "서버 설정 오류"를 띄운다(fail-closed).
           RETARGET_API_KEY: ${{ secrets.RETARGET_API_KEY }}
         with:
-          host: ${{ secrets[format('{0}_HOST', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          port: ${{ secrets[format('{0}_PORT', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          username: ${{ secrets[format('{0}_USER', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          key: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 20m
           envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,WORKER_SERVICE,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
@@ -247,7 +234,7 @@ jobs:
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
 
             # ── worker 서비스는 "지금 돌고 있을 때만" 재생성 대상에 넣는다 ──
-            # 꺼 둔 워커(옛 애저 서버)를 배포가 되살리지 않게 한다. compose 에 정의가 없는 경우와
+            # 꺼 둔 워커를 배포가 되살리지 않게 한다. compose 에 정의가 없는 경우와
             # 명령이 실패한 경우도 여기서 "재생성 안 함"으로 떨어진다(되살리지 않는 쪽이 안전한 쪽).
             # 서비스 이름만 확인하며(공개 저장소 로그에도 안전 — 시크릿·파일 내용 없음), 재생성하지
             # 않으면 앱만 재생성하고 로그 한 줄만 남긴 뒤 배포는 그대로 성공으로 끝난다.
@@ -309,7 +296,7 @@ jobs:
         uses: appleboy/ssh-action@master
         env:
           # 배포 로그에 목적지를 남기기 위해 서버로 함께 넘긴다(아래 envs 목록에도 있어야 도달한다).
-          DEPLOY_DEST_PREFIX: ${{ github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD' }}
+          DEPLOY_DEST_PREFIX: "VULTR_PROD"
           FILE_PATH: "/datadrive/apps/geo-tracker/docker-compose.yml"
           CONTAINER_NAME: "mbd-geo-tracker"
           # worker 는 앱과 같은 이미지를 쓰지만 지금까지 앱만 재생성해 옛 이미지(08-04)에 머물렀다.
@@ -330,10 +317,10 @@ jobs:
           #     cms-api 가 호출 자체를 막고(32자 검사) 화면은 "서버 설정 오류"를 띄운다(fail-closed).
           RETARGET_API_KEY: ${{ secrets.RETARGET_API_KEY }}
         with:
-          host: ${{ secrets[format('{0}_HOST', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          port: ${{ secrets[format('{0}_PORT', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          username: ${{ secrets[format('{0}_USER', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
-          key: ${{ secrets[format('{0}_SSH_KEY', github.event.inputs.destination == 'azure-production' && 'AZURE_PROD' || 'VULTR_PROD')] }}
+          host: ${{ secrets.VULTR_PROD_HOST }}
+          port: ${{ secrets.VULTR_PROD_PORT }}
+          username: ${{ secrets.VULTR_PROD_USER }}
+          key: ${{ secrets.VULTR_PROD_SSH_KEY }}
           timeout: 30s
           command_timeout: 20m
           envs: DEPLOY_DEST_PREFIX,FILE_PATH,CONTAINER_NAME,WORKER_SERVICE,IMAGE_REPO_LC,ENV_FILE,ADMIN_PASSWORD_HASH,SESSION_SECRET,RETARGET_API_KEY
@@ -391,7 +378,7 @@ jobs:
             docker tag ${IMAGE_REPO_LC}:${DEPLOY_TAG} ${IMAGE_REPO_LC}:latest
 
             # ── worker 서비스는 "지금 돌고 있을 때만" 재생성 대상에 넣는다 ──
-            # 꺼 둔 워커(옛 애저 서버)를 배포가 되살리지 않게 한다. compose 에 정의가 없는 경우와
+            # 꺼 둔 워커를 배포가 되살리지 않게 한다. compose 에 정의가 없는 경우와
             # 명령이 실패한 경우도 여기서 "재생성 안 함"으로 떨어진다(되살리지 않는 쪽이 안전한 쪽).
             # 서비스 이름만 확인하며(공개 저장소 로그에도 안전 — 시크릿·파일 내용 없음), 재생성하지
             # 않으면 앱만 재생성하고 로그 한 줄만 남긴 뒤 배포는 그대로 성공으로 끝난다.

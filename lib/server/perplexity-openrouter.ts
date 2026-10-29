@@ -12,21 +12,21 @@
  * 비용을 묶는 장치 (설정으로 풀 수 없다):
  *   - 모델을 코드에 `perplexity/sonar` 로 고정하고, 응답 모델도 정확히 같은지 확인한다
  *   - 출력 4,096토큰 · 질문 1,000자 상한
- *   - 하루 호출 상한 — 자동 수집(기본 30)과 수동 수집 화면(기본 10)을 따로 센다(수동이 자동 몫을 먹지 않게).
- *     한국 날짜·용도별 collector_state 행에 원자 예약. **모든 HTTP 호출은 예약 성공 직후
- *     이 모듈 안 한 곳(fetch)에서만 나간다** → 새 엔진 재시도·불명 재제출·저장 실패 재수집·수동 수집까지 전부
- *     상한에 묶인다. 실패한 호출도 1건으로 센다.
+ *
+ * 하루 호출 횟수 상한은 두지 않는다(2026-10-29 사장님 지시 — 비용은 사장님이 직접 조절한다).
+ * 대신 하루 사용 기록(건수·비용)은 남긴다 — 한국 날짜·용도(자동/수동)별 collector_state 행에
+ * 호출 직전 건수를 올리고 응답의 비용을 더한다. 기록 실패는 호출을 막지 않는다.
  *
  * 오류 처리 원칙:
  *   - 예외를 던지지 않고 값으로 돌려준다.
  *   - ⛔ 인증 오류 코드(Bright Data 키 거부용)는 절대 돌려주지 않는다 — 새 엔진에서 그 코드는 모든 AI 제출을
- *     10분 멈춘다. 반환 코드는 아래 OpenRouterCallResult 의 5종뿐이다(테스트가 소스에 그 문자열이 없음을 고정).
+ *     10분 멈춘다. 반환 코드는 아래 OpenRouterCallResult 의 4종뿐이다(테스트가 소스에 그 문자열이 없음을 고정).
  *     키 거부·잔액 부족(401·402)은 BACKEND_BLOCKED 로 돌려주고, 이 모듈의 메모리 차단기(30분)로만 막는다.
- *   - 상한·차단은 DB 일시정지를 쓰지 않는다 — 네트워크 없이 즉시 실패를 돌려줘 남은 항목이 바로 실패로
+ *   - 차단은 DB 일시정지를 쓰지 않는다 — 네트워크 없이 즉시 실패를 돌려줘 남은 항목이 바로 실패로
  *     닫히고, 설정을 되돌린 뒤 남는 정지가 없다.
  *
  * 의존 규칙: brightdata-scraper 는 import 하지 않는다(순환 방지 — 그래서 Retry-After 해석·키 가림도 작은 로컬
- * 함수로 둔다). DB 는 예약·비용 기록 때만 지연 import 한다(단위 테스트가 DB 없이 돈다).
+ * 함수로 둔다). DB 는 사용·비용 기록 때만 지연 import 한다(단위 테스트가 DB 없이 돈다).
  *
  * 로그·반환 문구에는 질문·답 원문·요청 헤더·키 값을 넣지 않는다.
  */
@@ -46,10 +46,6 @@ export const PPLX_OR_TIMEOUT_MS = 60_000;
 export const PPLX_OR_BLOCK_MS = 30 * 60_000;
 export const PPLX_OR_RATE_WAIT_DEFAULT_MS = 30_000;
 export const PPLX_OR_RATE_WAIT_MAX_MS = 120_000;
-export const PPLX_OR_DEFAULT_DAILY_CAP = 30;
-/** 수동 수집(/api/scrape) 하루 상한 기본값 — 자동 수집 상한과 따로 센다(수동이 자동 몫을 먹지 않게). */
-export const PPLX_OR_DEFAULT_MANUAL_DAILY_CAP = 10;
-export const PPLX_OR_MAX_DAILY_CAP = 500;
 /**
  * 외부 응답 크기 상한 (보안 점검 S-2) — 인용 제목·주소·답은 OpenRouter 응답(웹페이지 제목 등 외부 입력)에서
  * 와서 runs 에 저장·화면에 표시된다.
@@ -88,36 +84,8 @@ export function getPerplexityBackend(env: Env = process.env): PerplexityBackend 
   return (env.PERPLEXITY_BACKEND ?? "").trim().toLowerCase() === "openrouter" ? "openrouter" : "brightdata";
 }
 
-function readCap(raw: string | undefined, fallback: number): number {
-  const v = (raw ?? "").trim();
-  if (!/^\d+$/.test(v)) return fallback;
-  const n = Number(v);
-  return n >= 0 && n <= PPLX_OR_MAX_DAILY_CAP ? n : fallback;
-}
-
-/** 자동 수집 하루 상한 — 정수 0～500 이면 그 값, 아니면 30. 0 이면 호출하지 않는다. */
-export function getPerplexityDailyCap(env: Env = process.env): number {
-  return readCap(env.PERPLEXITY_OPENROUTER_DAILY_CAP, PPLX_OR_DEFAULT_DAILY_CAP);
-}
-
-/** 수동 수집(/api/scrape) 하루 상한 — 정수 0～500 이면 그 값, 아니면 10. 0 이면 수동 수집은 호출하지 않는다. */
-export function getPerplexityManualDailyCap(env: Env = process.env): number {
-  return readCap(env.PERPLEXITY_OPENROUTER_MANUAL_DAILY_CAP, PPLX_OR_DEFAULT_MANUAL_DAILY_CAP);
-}
-
-/** 호출 용도 — 자동 수집(두 엔진)과 수동 수집(/api/scrape)은 하루 상한 행·상한 값을 따로 쓴다. */
+/** 호출 용도 — 자동 수집(두 엔진)과 수동 수집(/api/scrape)은 하루 사용 기록 행을 따로 쓴다. */
 export type OpenRouterPurpose = "auto" | "manual";
-
-/** 기본 켬. `0`·`false`·`off` 일 때만 끈다. */
-export function isPerplexityOncePerDay(env: Env = process.env): boolean {
-  const v = (env.PERPLEXITY_OPENROUTER_ONCE_PER_DAY ?? "").trim().toLowerCase();
-  return !(v === "0" || v === "false" || v === "off");
-}
-
-/** 같은 질문 하루 1회(성공 결과 기준 무료 건너뜀)를 적용할지 — Perplexity · OpenRouter · 하루 1회 켬. */
-export function shouldLimitPerplexityDaily(provider: string, env: Env = process.env): boolean {
-  return provider === "perplexity" && getPerplexityBackend(env) === "openrouter" && isPerplexityOncePerDay(env);
-}
 
 export type OpenRouterKeyInfo = { key: string; source: "dedicated" | "shared" };
 
@@ -401,20 +369,20 @@ export function toScrapeRecord(json: unknown): ToRecordResult {
 }
 
 /* ============================================================
- * 하루 호출 상한 — 한국 날짜별 collector_state 행 (§2-2)
+ * 하루 사용 기록 — 한국 날짜별 collector_state 행 (상한 없음 · 건수·비용만 쌓는다)
  * ============================================================ */
 
-export type DailyCapStore = {
-  /** 예약 성공이면 예약 뒤 count, 상한에 걸리면 null. */
-  reserve(key: string, cap: number): Promise<number | null>;
+export type DailyUsageStore = {
+  /** 호출 1건을 기록하고 기록 뒤 건수(count)를 돌려준다. 상한은 없다. */
+  record(key: string): Promise<number>;
   addCost(key: string, costUsd: number): Promise<void>;
 };
 
 /**
- * 예약 행 키 — 날짜마다 새 행이라 초기화 분기가 없다. 자동 수집 `openrouter_pplx_daily:<KST 날짜>` ·
- * 수동 수집 `openrouter_pplx_manual_daily:<KST 날짜>` (보안 점검 S-4 — 수동이 자동 몫을 소진하지 않게 분리).
+ * 사용 기록 행 키 — 날짜마다 새 행이라 초기화 분기가 없다. 자동 수집 `openrouter_pplx_daily:<KST 날짜>` ·
+ * 수동 수집 `openrouter_pplx_manual_daily:<KST 날짜>` (옛 기록과 같은 키 — 이어서 쌓인다).
  */
-export function dailyCapKey(now: Date, purpose: OpenRouterPurpose = "auto"): string {
+export function dailyUsageKey(now: Date, purpose: OpenRouterPurpose = "auto"): string {
   return `${purpose === "manual" ? MANUAL_DAILY_KEY_PREFIX : DAILY_KEY_PREFIX}${kstDateString(now)}`;
 }
 
@@ -423,9 +391,9 @@ export function dailyCapKey(now: Date, purpose: OpenRouterPurpose = "auto"): str
  * 값: { count, costed, costUsd, firstAt, lastAt }. count − costed = 비용 불명 호출 수.
  * SQL 은 drizzle sql 템플릿 매개변수로만 넣는다.
  */
-export function createDbDailyCapStore(): DailyCapStore {
+export function createDbDailyUsageStore(): DailyUsageStore {
   return {
-    async reserve(key, cap) {
+    async record(key) {
       const [{ db }, { sql }] = await Promise.all([import("@/lib/server/db"), import("drizzle-orm")]);
       const rows = (await db.execute(sql`
         INSERT INTO collector_state (key, value, updated_at)
@@ -436,11 +404,9 @@ export function createDbDailyCapStore(): DailyCapStore {
                       || jsonb_build_object('count', (collector_state.value->>'count')::int + 1,
                                             'lastAt', now()),
               updated_at = now()
-          WHERE (collector_state.value->>'count')::int < ${cap}::int
         RETURNING (value->>'count')::int AS count
       `)) as unknown as { count: number | string }[];
-      const first = rows[0];
-      return first ? Number(first.count) : null;
+      return Number(rows[0]?.count ?? 0);
     },
     async addCost(key, costUsd) {
       const [{ db }, { sql }] = await Promise.all([import("@/lib/server/db"), import("drizzle-orm")]);
@@ -471,8 +437,8 @@ type OpenRouterState = {
   /** 이 시각까지 429 대기 */
   rateUntil: number;
   configLogged: boolean;
-  /** 테스트 전용 — 상한 저장소 대체 */
-  storeOverride: DailyCapStore | null;
+  /** 테스트 전용 — 사용 기록 저장소 대체 */
+  storeOverride: DailyUsageStore | null;
 };
 
 const globalForOr = globalThis as unknown as { __pplxOpenRouterState?: OpenRouterState };
@@ -485,8 +451,8 @@ function orState(): OpenRouterState {
   return (globalForOr.__pplxOpenRouterState ??= freshState());
 }
 
-/** 테스트 전용 — 메모리 상태 초기화. store 를 주면 기본 상한 저장소(DB) 대신 그것을 쓴다. */
-export function __resetOpenRouterStateForTest(opts: { store?: DailyCapStore } = {}): void {
+/** 테스트 전용 — 메모리 상태 초기화. store 를 주면 기본 사용 기록 저장소(DB) 대신 그것을 쓴다. */
+export function __resetOpenRouterStateForTest(opts: { store?: DailyUsageStore } = {}): void {
   globalForOr.__pplxOpenRouterState = { ...freshState(), storeOverride: opts.store ?? null };
 }
 
@@ -497,12 +463,12 @@ export function __resetOpenRouterStateForTest(opts: { store?: DailyCapStore } = 
 export type OpenRouterCallResult =
   | { ok: true; record: ScrapeRecord }
   | { ok: false; code: "RATE_LIMITED"; retryAfterMs: number | null; message: string }
-  | { ok: false; code: "HTTP_4XX" | "BACKEND_BLOCKED" | "DAILY_CAP" | "SUBMIT_UNKNOWN"; message: string };
+  | { ok: false; code: "HTTP_4XX" | "BACKEND_BLOCKED" | "SUBMIT_UNKNOWN"; message: string };
 
 export type OpenRouterDeps = {
   fetch?: typeof fetch;
   now?: () => number;
-  store?: DailyCapStore;
+  store?: DailyUsageStore;
   env?: Env;
 };
 
@@ -519,23 +485,22 @@ function logConfigOnce(st: OpenRouterState, env: Env, key: OpenRouterKeyInfo | n
   st.configLogged = true;
   console.log(
     `${LOG_TAG} config backend=${getPerplexityBackend(env)} model=${PPLX_OR_MODEL} ` +
-      `cap=${getPerplexityDailyCap(env)} manualCap=${getPerplexityManualDailyCap(env)} key=${key?.source ?? "missing"}`,
+      `key=${key?.source ?? "missing"}`,
   );
 }
 
 /**
  * Perplexity 질문 1건을 OpenRouter(perplexity/sonar)로 묻는다. 예외를 던지지 않는다.
- *   1. 질문 > 1,000자 → HTTP_4XX (예약 없음)
- *   2. 키 없음 → BACKEND_BLOCKED (예약 없음 · 차단기 안 켬)
- *   3. 429 대기·차단기 → 네트워크 없이 즉시 반환 (예약 없음). 차단 만료 뒤엔 재확인 1건만 통과.
+ *   1. 질문 > 1,000자 → HTTP_4XX (기록 없음)
+ *   2. 키 없음 → BACKEND_BLOCKED (기록 없음 · 차단기 안 켬)
+ *   3. 429 대기·차단기 → 네트워크 없이 즉시 반환 (기록 없음). 차단 만료 뒤엔 재확인 1건만 통과.
  *      재확인은 **정상 응답(2xx · JSON 객체 · 본문 error 없음)일 때만** 차단을 푼다 — 키·잔액이 살아 있다는
  *      증거가 그것뿐이다. 네트워크 오류·시간 초과·5xx·408·429·그 밖 4xx·코드 불명·해석 실패로 끝나면 차단을
- *      다시 30분 건다(검수 F1). 상한 예약에서 막혀 요청이 나가지 않았으면 그대로 둔다(다음 호출이 다시 재확인)
- *   4. 하루 상한 예약 → 실패·저장소 오류 모두 DAILY_CAP (호출하지 않는다 — fail-closed).
- *      자동·수동은 날짜별 행과 상한을 따로 쓴다(자동 30 · 수동 10 기본 — 보안 점검 S-4)
- *   5. HTTP 호출 — 이 모듈의 fetch 는 이 한 곳뿐이고 예약 성공 직후에만 실행된다
+ *      다시 30분 건다(검수 F1).
+ *   4. 하루 사용 기록 — 건수를 올린다(상한 없음). 자동·수동은 날짜별 행을 따로 쓴다. 기록이 실패해도 호출은 한다
+ *   5. HTTP 호출 — 이 모듈의 fetch 는 이 한 곳뿐이다
  *   6. 분류 → 검증·변환 → 인용
- *   7. 비용 기록(예약한 날짜 키로) · 로그 1줄
+ *   7. 비용 기록(기록한 날짜 키로) · 로그 1줄
  */
 export async function callPerplexityViaOpenRouter(
   prompt: string,
@@ -546,7 +511,6 @@ export async function callPerplexityViaOpenRouter(
   const env = deps.env ?? process.env;
   const nowMs = deps.now ?? Date.now;
   const st = orState();
-  const cap = purpose === "manual" ? getPerplexityManualDailyCap(env) : getPerplexityDailyCap(env);
   const keyInfo = resolveOpenRouterKey(env);
   logConfigOnce(st, env, keyInfo);
 
@@ -584,17 +548,15 @@ export async function callPerplexityViaOpenRouter(
   }
 
   try {
-    // 4. 하루 상한 예약
-    if (cap <= 0) return early("DAILY_CAP", `${purpose === "manual" ? "수동 수집 " : ""}하루 상한 0 — 호출하지 않음`);
-    const dayKey = dailyCapKey(new Date(startedAt), purpose);
-    const store = deps.store ?? st.storeOverride ?? createDbDailyCapStore();
-    let count: number | null;
+    // 4. 하루 사용 기록 — 건수만 올린다(상한 없음). 기록이 실패해도 호출은 막지 않는다.
+    const dayKey = dailyUsageKey(new Date(startedAt), purpose);
+    const store = deps.store ?? st.storeOverride ?? createDbDailyUsageStore();
+    let count: number | string = "-";
     try {
-      count = await store.reserve(dayKey, cap);
+      count = await store.record(dayKey);
     } catch (err) {
-      return early("DAILY_CAP", `하루 상한 확인 실패 — 호출하지 않음 (${err instanceof Error ? err.name : "오류"})`);
+      console.warn(`${LOG_TAG} 사용 기록 실패 day=${day} (${err instanceof Error ? err.name : "오류"})`);
     }
-    if (count == null) return early("DAILY_CAP", `${purpose === "manual" ? "수동 수집 " : ""}하루 상한 ${cap}회 도달`);
     const logInfo = { day, count, purpose, env };
     /** 재확인이 정상 응답 없이 끝났다 — 키·잔액이 살아났다는 증거가 없으니 차단을 다시 건다(검수 F1). */
     const rearmIfProbe = () => {
@@ -648,7 +610,7 @@ export async function callPerplexityViaOpenRouter(
       }
     }
 
-    // 7-a. 비용 기록 — usage.cost 가 있으면 결과와 무관하게 예약한 날짜 키로 기록한다. 실패해도 수집은 계속
+    // 7-a. 비용 기록 — usage.cost 가 있으면 결과와 무관하게 기록한 날짜 키로 더한다. 실패해도 수집은 계속
     const cost = parsed ? readUsageCost(json) : null;
     if (cost !== null) {
       try {
@@ -690,7 +652,7 @@ export async function callPerplexityViaOpenRouter(
     outcome = conv.ok ? { ok: true, record: conv.record } : { ok: false, code: conv.code, message: conv.message };
     return finish(outcome, { ...logInfo, status, ms, cost });
   } finally {
-    // 재확인은 어떤 경우든(상한 예약에서 막혀도) 끝에 풀어 둔다.
+    // 재확인은 어떤 경우든 끝에 풀어 둔다.
     if (probe) st.probing = false;
   }
 }
@@ -702,7 +664,7 @@ function finish(
     status: number | string;
     ms: number;
     day: string;
-    count: number;
+    count: number | string;
     cost: number | null;
     purpose: OpenRouterPurpose;
     env: Env;

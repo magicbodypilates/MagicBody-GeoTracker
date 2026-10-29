@@ -54,7 +54,6 @@ import {
   buildAutoRunValues,
   buildScoringContext,
   findAutoRunId,
-  findSameKstDayAutoRunId,
   insertAutoRun,
   loadScoringSnapshot,
   recordDriftAfterInsert,
@@ -97,7 +96,6 @@ import {
   type CollectorErrorCode,
 } from "@/lib/server/collector-policy";
 import { computeRoundTiming, formatIntervalSlot, kstDateString } from "@/lib/server/collector-schedule";
-import { shouldLimitPerplexityDaily } from "@/lib/server/perplexity-openrouter";
 
 /* ============================================================
  * 공개 타입
@@ -1313,11 +1311,7 @@ async function submitForProvider(pass: PassCtx, stats: DispatchStats, p: Provide
     seen.add(comboKey);
 
     // ① 같은 시간대·질문·AI 결과가 이미 있으면 보내지 않는다(무료) — 그 결과를 가리킨다.
-    //    Perplexity · OpenRouter 시험 중에는 같은 한국 날짜의 다른 시간대 자동 결과도 같은 결과로 본다
-    //    (같은 질문 하루 1회 — 계획 geotracker-pplx-openrouter-261012 v2 §3). Bright Data 경로·다른 AI 는 그대로.
-    const existingRunId =
-      (await findAutoRunId(c)) ??
-      (shouldLimitPerplexityDaily(p, process.env) ? await findSameKstDayAutoRunId(c, now) : null);
+    const existingRunId = await findAutoRunId(c);
     if (existingRunId) {
       const dup = await db
         .update(items)
@@ -1483,9 +1477,9 @@ async function submitOne(pass: PassCtx, stats: DispatchStats, item: CollectionIt
     return;
   }
 
-  if (res.code === "HTTP_4XX" || res.code === "BACKEND_BLOCKED" || res.code === "DAILY_CAP") {
+  if (res.code === "HTTP_4XX" || res.code === "BACKEND_BLOCKED") {
     // 입력 거절 — 작업이 생기지 않았다. 다시 보내도 같다.
-    // OpenRouter Perplexity 경로의 차단(BACKEND_BLOCKED)·하루 상한(DAILY_CAP)도 여기로 합류한다: 그 항목만
+    // OpenRouter Perplexity 경로의 차단(BACKEND_BLOCKED)도 여기로 합류한다: 그 항목만
     // 실패시키고 DB 일시정지·유료 재시도는 없다 → 남은 항목은 다음 통과에서 네트워크 없이 즉시 실패해 회차가
     // 닫히고, 설정을 되돌리면 남는 정지가 없다(계획 geotracker-pplx-openrouter-261012 v2 §4-3).
     const out = await failItem(pass, item, res.code, message, "submitting");

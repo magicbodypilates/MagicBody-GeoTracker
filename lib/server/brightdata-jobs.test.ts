@@ -17,7 +17,7 @@ import {
 } from "./brightdata-scraper";
 // OpenRouter Perplexity 경로 추가 테스트용(계획 geotracker-pplx-openrouter-261012 v2 §8-2 — 파일 끝 묶음)
 import { ScrapeFailure, clearScrapeCache, redactErrorText, runAiScraper } from "./brightdata-scraper";
-import { __resetOpenRouterStateForTest, type DailyCapStore } from "./perplexity-openrouter";
+import { __resetOpenRouterStateForTest, type DailyUsageStore } from "./perplexity-openrouter";
 
 /** 테스트 전용 가짜 키 — 오류 문구에 새어 나가지 않는지 확인하는 표식으로도 쓴다. */
 const FAKE_KEY = "fake-test-key-0123456789abcdefghijklmnopqrstuvwxyz";
@@ -357,14 +357,12 @@ describe("OpenRouter Perplexity 경로 — 설정 PERPLEXITY_BACKEND=openrouter"
   const orErr = (status: number) => ({ error: { code: status, message: "가짜 오류" } });
   const BD_PAYLOAD = [{ answer_text: "충분히 긴 테스트 답변 문장입니다. 예시 기관 소개 — Bright Data 경로." }];
 
-  let capLeft = 100;
-  const store: DailyCapStore = {
-    reserve: async () => (capLeft-- > 0 ? 1 : null),
+  const store: DailyUsageStore = {
+    record: async () => 1,
     addCost: async () => {},
   };
 
   beforeEach(() => {
-    capLeft = 100;
     __resetOpenRouterStateForTest({ store });
     clearScrapeCache();
     vi.stubEnv("OPENROUTER_KEY", OR_KEY);
@@ -414,7 +412,7 @@ describe("OpenRouter Perplexity 경로 — 설정 PERPLEXITY_BACKEND=openrouter"
     expect(r).toMatchObject({ ok: true, kind: "payload" });
   });
 
-  it("실패 코드는 모듈 값 그대로 — 401→BACKEND_BLOCKED · 429→RATE_LIMITED · 상한→DAILY_CAP · 인증 오류 코드 없음", async () => {
+  it("실패 코드는 모듈 값 그대로 — 401→BACKEND_BLOCKED · 429→RATE_LIMITED · 인증 오류 코드 없음", async () => {
     vi.stubEnv("PERPLEXITY_BACKEND", "openrouter");
     fetchMock.mockImplementationOnce(async () => respond(401, orErr(401)));
     expect(await submitScrape({ provider: "perplexity", prompt: PROMPT })).toMatchObject({ ok: false, code: "BACKEND_BLOCKED" });
@@ -426,12 +424,6 @@ describe("OpenRouter Perplexity 경로 — 설정 PERPLEXITY_BACKEND=openrouter"
       code: "RATE_LIMITED",
       retryAfterMs: 20_000,
     });
-
-    __resetOpenRouterStateForTest({ store });
-    capLeft = 0;
-    const calls = fetchMock.mock.calls.length;
-    expect(await submitScrape({ provider: "perplexity", prompt: PROMPT })).toMatchObject({ ok: false, code: "DAILY_CAP" });
-    expect(fetchMock.mock.calls.length).toBe(calls); // 상한에 걸리면 요청하지 않는다
   });
 
   it("실패 문구에 OpenRouter 키가 남지 않는다", async () => {
@@ -503,18 +495,18 @@ describe("OpenRouter Perplexity 경로 — 설정 PERPLEXITY_BACKEND=openrouter"
 /* ------------------------------------------------------------------
  * 1회차 검수 반영 — S-4(수동·자동 하루 상한 분리) · S-1(키 모양 조각 가림)
  * ------------------------------------------------------------------ */
-describe("OpenRouter Perplexity — 수동 수집과 자동 수집은 하루 상한 행을 따로 쓴다 (S-4)", () => {
+describe("OpenRouter Perplexity — 수동 수집과 자동 수집은 하루 사용 기록 행을 따로 쓴다 (S-4)", () => {
   const OR_KEY = "or-jobs-fake-key-0002";
   const orOk = () =>
     respond(200, {
       model: "perplexity/sonar",
       provider: "Perplexity",
-      choices: [{ finish_reason: "stop", message: { content: "가짜 답변 문장입니다 — 용도별 상한 시험용으로 충분히 깁니다.", annotations: [] } }],
+      choices: [{ finish_reason: "stop", message: { content: "가짜 답변 문장입니다 — 용도별 기록 시험용으로 충분히 깁니다.", annotations: [] } }],
       usage: { cost: 0.001 },
     });
   let reservedKeys: string[] = [];
-  const recordingStore: DailyCapStore = {
-    reserve: async (key) => {
+  const recordingStore: DailyUsageStore = {
+    record: async (key) => {
       reservedKeys.push(key);
       return reservedKeys.length;
     },

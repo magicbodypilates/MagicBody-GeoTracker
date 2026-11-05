@@ -23,6 +23,7 @@ import type {
   ArchiveView,
   BrandConfig,
   Competitor,
+  PromptSet,
   ScrapeRun,
   TaggedPrompt,
   AuditHistoryEntry,
@@ -65,8 +66,17 @@ type ServerPrompt = {
   text: string;
   tags: string[];
   active: boolean;
+  /** 질문이 속한 세트 — 0011 이후 항상 있다. 옛 서버·0011 전 옛 코드가 넣은 질문이면 없음(=기존 세트) */
+  setId?: string | null;
   createdAt: string;
 };
+
+/** 서버 질문 → 화면 질문(번호·세트 포함). 켜진 질문만 화면 목록에 오른다. */
+function taggedFromServer(p: ServerPrompt): TaggedPrompt {
+  const t: TaggedPrompt = { id: p.id, text: p.text, tags: p.tags ?? [] };
+  if (p.setId) t.setId = p.setId;
+  return t;
+}
 
 type ServerCompetitor = {
   id: string;
@@ -330,9 +340,10 @@ export async function loadFromServer(
   runsWindowDays: number = DEFAULT_RUNS_WINDOW_DAYS,
 ): Promise<Partial<AppState>> {
   // allSettled 로 변경 — 일부 API 실패해도 나머지 데이터는 복구
-  const [wsSet, promptsSet, competitorsSet, runsSet, auditsSet] = await Promise.allSettled([
+  const [wsSet, promptsSet, setsSet, competitorsSet, runsSet, auditsSet] = await Promise.allSettled([
     j<{ workspaces: ServerWorkspace[] }>(`${BP}/api/workspaces`),
     j<{ prompts: ServerPrompt[] }>(`${BP}/api/workspaces/${wsId}/prompts`),
+    fetchPromptSets(wsId),
     j<{ competitors: ServerCompetitor[] }>(`${BP}/api/workspaces/${wsId}/competitors`),
     fetchRunsWindow(wsId, runsWindowDays).then((runs) => ({ runs })),
     j<{ audits: ServerAudit[] }>(`${BP}/api/workspaces/${wsId}/audits`),
@@ -345,6 +356,7 @@ export async function loadFromServer(
   };
   log("workspaces", wsSet);
   log("prompts", promptsSet);
+  log("prompt-sets", setsSet);
   log("competitors", competitorsSet);
   log("runs", runsSet);
   log("audits", auditsSet);
@@ -352,9 +364,11 @@ export async function loadFromServer(
   const partial: Partial<AppState> = {};
 
   if (promptsSet.status === "fulfilled") {
-    partial.customPrompts = promptsSet.value.prompts
-      .filter((p) => p.active)
-      .map((p) => ({ text: p.text, tags: p.tags ?? [] }));
+    partial.customPrompts = promptsSet.value.prompts.filter((p) => p.active).map(taggedFromServer);
+  }
+  // 세트 목록을 못 읽으면 promptSets 를 비워 둔다 — 화면이 세트 막대를 숨기고 예전 화면 그대로 쓴다.
+  if (setsSet.status === "fulfilled") {
+    partial.promptSets = setsSet.value;
   }
   if (competitorsSet.status === "fulfilled") {
     partial.competitors = competitorsSet.value.competitors.map((c) => ({
@@ -435,14 +449,75 @@ export async function upsertBrand(wsId: string, brand: BrandConfig): Promise<voi
 export async function addPromptIfNew(
   wsId: string,
   prompt: TaggedPrompt,
-): Promise<ServerPrompt & { restoredRuns: number }> {
-  const res = await j<{ prompt: ServerPrompt; restoredRuns?: number }>(`${BP}/api/workspaces/${wsId}/prompts`, {
+  setId?: string,
+): Promise<ServerPrompt & { restoredRuns: number; alreadyInSet: { id: string; name: string } | null }> {
+  // 세트: 인자 → 항목이 가진 세트 → 없으면 보내지 않는다(서버가 기존 세트로).
+  const target = setId ?? prompt.setId;
+  const res = await j<{
+    prompt: ServerPrompt;
+    restoredRuns?: number;
+    alreadyInSet?: { id: string; name: string };
+  }>(`${BP}/api/workspaces/${wsId}/prompts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: prompt.text, tags: prompt.tags ?? [] }),
+    body: JSON.stringify(
+      target ? { text: prompt.text, tags: prompt.tags ?? [], setId: target } : { text: prompt.text, tags: prompt.tags ?? [] },
+    ),
   });
   // 보관함에 있던 이 문구의 응답을 서버가 함께 되돌렸으면 그 건수(응답 보관 §S8). 옛 서버면 0.
-  return { ...res.prompt, restoredRuns: res.restoredRuns ?? 0 };
+  // alreadyInSet: 같은 문장이 이미 다른 세트에 켜져 있어 그 세트에 그대로 둔 경우(세트 계획 §4).
+  return { ...res.prompt, restoredRuns: res.restoredRuns ?? 0, alreadyInSet: res.alreadyInSet ?? null };
+}
+
+/* ==========================================================
+ * 질문 세트 (계획 prompt-sets-plan-v2 §4)
+ * ========================================================== */
+
+/** 세트 목록 — 기존 세트 먼저, 그다음 만든 순서. */
+export async function fetchPromptSets(wsId: string): Promise<PromptSet[]> {
+  const { sets } = await j<{ sets: PromptSet[] }>(`${BP}/api/workspaces/${wsId}/prompt-sets`);
+  return sets;
+}
+
+/** 질문 목록(켜진 것)만 다시 받기 — 세트를 옮기거나 지운 뒤 화면을 서버와 맞출 때. */
+export async function fetchActivePrompts(wsId: string): Promise<TaggedPrompt[]> {
+  const { prompts } = await j<{ prompts: ServerPrompt[] }>(`${BP}/api/workspaces/${wsId}/prompts`);
+  return prompts.filter((p) => p.active).map(taggedFromServer);
+}
+
+export async function createPromptSet(wsId: string, name: string): Promise<PromptSet> {
+  const { set } = await j<{ set: PromptSet }>(`${BP}/api/workspaces/${wsId}/prompt-sets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return set;
+}
+
+export async function renamePromptSet(setId: string, name: string): Promise<void> {
+  await j(`${BP}/api/prompt-sets/${setId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** 세트 지우기 — 켜진 질문이 있으면 서버가 거절한다(안내 문구가 오류 메시지로 온다). */
+export async function deletePromptSet(setId: string): Promise<void> {
+  await j(`${BP}/api/prompt-sets/${setId}`, { method: "DELETE" });
+}
+
+/** 질문 옮기기 — 응답·일정은 그대로. 옮겨진 수와 못 찾은 번호를 돌려준다. */
+export async function movePromptsToSet(
+  wsId: string,
+  promptIds: string[],
+  setId: string,
+): Promise<{ moved: number; notFound: string[] }> {
+  return j<{ moved: number; notFound: string[] }>(`${BP}/api/workspaces/${wsId}/prompts/move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ promptIds, setId }),
+  });
 }
 
 /** 텍스트로 찾아 제거. API 는 ID 기반이므로 먼저 목록 조회 후 매칭. */

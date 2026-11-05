@@ -228,6 +228,23 @@ export type Competitor = {
 export type TaggedPrompt = {
   text: string;
   tags: string[];
+  /** 서버 질문 번호 — 낙관 추가 직후(서버 응답 전)·데모에는 없다. 옮기기 체크박스는 이 값이 있을 때만 쓴다. */
+  id?: string;
+  /**
+   * 질문이 속한 세트 번호(계획 prompt-sets-plan-v2 D8). 낙관 추가 항목은 **만들 때부터** 고른 세트를 갖는다 —
+   * 허브 저장이 실패한 항목을 자동화 탭이 다시 보낼 때도 같은 세트로 가게 하기 위해서다. 없으면 기존 세트로 본다.
+   */
+  setId?: string;
+};
+
+/** 질문 세트 — GET /api/workspaces/:id/prompt-sets 한 행. 기존 세트(isDefault)는 워크스페이스마다 하나. */
+export type PromptSet = {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  createdAt: string;
+  /** 서버가 센 켜진 질문 수 — 화면 숫자는 질문 목록으로 다시 센다(낙관 추가 반영) */
+  activePromptCount: number;
 };
 
 export type AppState = {
@@ -237,6 +254,8 @@ export type AppState = {
   activeProviders: Provider[];
   prompt: string;
   customPrompts: TaggedPrompt[];
+  /** 질문 세트 — 없으면(데모·세트 목록 실패) 세트 화면을 숨기고 예전 화면 그대로 쓴다 */
+  promptSets?: PromptSet[];
   personas: string;
   fanoutPrompts: string[];
   niche: string;

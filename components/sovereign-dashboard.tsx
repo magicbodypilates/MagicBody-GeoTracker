@@ -22,7 +22,28 @@ import {
   archiveAllUntracked as serverArchiveAllUntracked,
   restorePromptResponses,
   purgePromptResponses,
+  fetchPromptSets,
+  fetchActivePrompts,
+  createPromptSet,
+  renamePromptSet,
+  deletePromptSet,
+  movePromptsToSet,
 } from "@/lib/client/server-store";
+import {
+  ALL_SETS,
+  addOptimisticPrompt,
+  applyMove,
+  applySavedPrompt,
+  buildSetIdByPrompt,
+  createWorkspaceGuard,
+  hubSetStorageKey,
+  mergeServerPrompts,
+  normalizeHubSetId,
+  readStored,
+  resolveAddTargetSetId,
+  setNameOf,
+  writeStored,
+} from "@/lib/client/prompt-sets";
 import { createRequestGeneration } from "@/lib/client/request-generation";
 import {
   FULL_REFRESH_INTERVAL_MS,
@@ -561,6 +582,21 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** 활성 서버 워크스페이스 ID — ensureWorkspace 로 설정 */
   const [serverWsId, setServerWsId] = useState<string | null>(null);
+  /**
+   * 허브에서 보고 있는 세트(계획 prompt-sets-plan-v2 D9) — 워크스페이스별로 브라우저에 기억한다.
+   * 니치 탐색기 「추적에 추가」가 이 세트로 넣는다(「전체」 보기면 기존 세트).
+   */
+  const [hubSetPick, setHubSetPick] = useState<{ ws: string; id: string } | null>(null);
+  /**
+   * 세트·질문 재조회의 워크스페이스 표(결함 대장 P3) — 워크스페이스를 바꾼 뒤 늦게 도착한 이전 워크스페이스
+   * 응답이 지금 화면을 덮어쓰지 않게 한다. 지금 워크스페이스는 아래 effect 가 serverWsId 로 맞춘다.
+   */
+  const wsGuardRef = useRef(createWorkspaceGuard());
+  /** 지금 화면의 질문 목록 — 늦게 부르는 콜백(자동화 탭 동기화 완료)이 출발 시점 목록을 읽는다(N1) */
+  const customPromptsRef = useRef<AppState["customPrompts"]>([]);
+  useEffect(() => {
+    wsGuardRef.current.setCurrent(serverWsId);
+  }, [serverWsId]);
 
   /**
    * runs 조회 윈도우(일) — AI 응답 탭·가시성 분석 탭의 기간 선택(7/30/90)과 연동.
@@ -604,6 +640,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   useEffect(() => {
     if (demoMode || !activeWsId) return;
     setLoaded(false);
+    // 워크스페이스를 바꾸는 중 — 이전 워크스페이스로 출발한 세트·질문 재조회는 버린다(P3)
+    wsGuardRef.current.setCurrent(null);
     let cancelled = false;
 
     (async () => {
@@ -639,6 +677,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
           loadedWindowRef.current = runsWindowDays;
         }
         setState(merged);
+        setHubSetPick({ ws: wsId, id: readStored(hubSetStorageKey(wsId)) ?? "" });
         setLoaded(true);
       } catch (err) {
         console.error("[dashboard] 서버 로드 실패 — 기본값으로 시작:", err);
@@ -1024,6 +1063,23 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** 질문 목록(켜진 질문)의 문구 — AI 응답 탭의 「질문 목록에 없음」 표시·질문 필터 기준(응답 보관 §5-1). */
   const trackedPromptTexts = useMemo(() => state.customPrompts.map((p) => p.text), [state.customPrompts]);
+  useEffect(() => {
+    customPromptsRef.current = state.customPrompts;
+  }, [state.customPrompts]);
+  /** 허브 보기 — 기억한 세트가 지워졌으면 기존 세트, 세트 정보가 없으면 「전체」 */
+  const hubSetId = useMemo(
+    () =>
+      normalizeHubSetId(
+        hubSetPick && hubSetPick.ws === serverWsId ? hubSetPick.id : null,
+        state.promptSets ?? [],
+      ),
+    [hubSetPick, serverWsId, state.promptSets],
+  );
+  /** AI 응답 탭 세트별 보기 — 문장 → 질문이 지금 속한 세트(사용자 확정). 세트 정보가 없으면 없음 */
+  const setIdByPrompt = useMemo(
+    () => (state.promptSets && state.promptSets.length > 0 ? buildSetIdByPrompt(state.customPrompts, state.promptSets) : undefined),
+    [state.customPrompts, state.promptSets],
+  );
 
   /** Compute score deltas: 일반 검색 응답 한정 (brand prompt 는 점수 의미가 달라 비교 부적절) */
   const runDeltas: RunDelta[] = useMemo(() => {
@@ -1580,11 +1636,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     setBusy(false);
   }
 
-  /** Batch run all custom prompts across all active providers — fully parallel */
-  async function batchRunAllPrompts() {
+  /**
+   * Batch run custom prompts across all active providers — fully parallel.
+   * scopeTexts 를 주면 그 질문만(허브 「이 세트 실행」 — 계획 prompt-sets-plan-v2 §5-1), 없으면 전부.
+   */
+  async function batchRunAllPrompts(scopeTexts?: string[]) {
     // 프롬프트를 그대로 사용 — {brand} 치환 제거 (브랜드 편향 방지)
     // 브랜드 관련 질문이 필요하면 사용자가 직접 프롬프트에 브랜드명을 써야 함
-    const prompts = state.customPrompts.map((p) => p.text);
+    const prompts = scopeTexts ?? state.customPrompts.map((p) => p.text);
     if (prompts.length === 0) {
       setMessage("실행할 추적 프롬프트가 없습니다. 먼저 프롬프트를 추가하세요.");
       return;
@@ -1677,26 +1736,37 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     setMessage(`페르소나 ${personas.length}개 기준으로 분화 프롬프트가 생성되었습니다.`);
   }
 
-  async function addCustomPrompt(value: string) {
+  /**
+   * 질문 추가 — setIdArg 는 허브의 「넣을 세트」. 없으면(니치 탐색기 「추적에 추가」) 허브에서 보고 있던
+   * 세트, 「전체」 보기면 기존 세트(계획 prompt-sets-plan-v2 D9). 세트 정보가 없으면 서버가 기존 세트로 넣는다.
+   */
+  async function addCustomPrompt(value: string, setIdArg?: string) {
     const cleaned = value.trim();
     if (!cleaned) return;
     if (!loaded || !serverWsId) {
       setMessage("로드 중입니다. 잠시 후 다시 시도해주세요.");
       return;
     }
+    const sets = state.promptSets ?? [];
+    const targetSetId = setIdArg ?? (sets.length > 0 ? resolveAddTargetSetId(hubSetId, sets) : undefined);
+    const targetName = setNameOf(targetSetId, sets);
     // UI 낙관 업데이트 — 목록 상한 없음(과거 50개 cap 이 활성 프롬프트가 실제로 50개를
     // 넘어가는 워크스페이스에서 새 프롬프트가 화면에 보이지 않는 원인 중 하나였다).
-    setState((prev) => {
-      if (prev.customPrompts.some((p) => p.text === cleaned)) return prev;
-      return { ...prev, customPrompts: [{ text: cleaned, tags: [] }, ...prev.customPrompts] };
-    });
+    // 낙관 항목은 만들 때부터 고른 세트를 갖는다(D8) — 저장이 실패해도 자동화 탭이 같은 세트로 다시 보낸다.
+    setState((prev) => ({ ...prev, customPrompts: addOptimisticPrompt(prev.customPrompts, cleaned, targetSetId) }));
     // 서버 동기 (실패 시 UI 롤백은 하지 않고 경고만 — 낙관 업데이트 유지)
     // 보관함에 있던 이 질문의 응답을 서버가 함께 되돌렸으면(restoredRuns > 0) 안내를 바꾸고 목록·통계·
     // 보관함을 다시 읽는다(응답 보관 §S9). 응답 목록이 바뀌는 동작이라 재조회 세대 흐름으로 감싼다.
     const wsId = serverWsId;
-    withRunsMutation(() => addPromptIfNew(wsId, { text: cleaned, tags: [] }))
+    withRunsMutation(() => addPromptIfNew(wsId, { text: cleaned, tags: [] }, targetSetId))
       .then((saved) => {
-        if (saved.restoredRuns > 0) {
+        // 번호를 채우고, 이미 다른 세트에 켜져 있던 문장이면 그 세트로 맞춘다
+        setState((prev) => ({ ...prev, customPrompts: applySavedPrompt(prev.customPrompts, saved) }));
+        if (saved.alreadyInSet) {
+          setMessage(
+            `이미 ‘${saved.alreadyInSet.name}’ 세트에 있는 질문입니다. 옮기려면 선택 후 이동을 쓰세요.`,
+          );
+        } else if (saved.restoredRuns > 0) {
           setMessage(readdRestoredMessage(saved.restoredRuns));
           void reloadRunsNow();
           bumpStatsRefresh();
@@ -1709,7 +1779,114 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         // 보여준다. 없으면 기존 일반 문구로 폴백(server-store.ts j() 참고).
         setMessage(e instanceof Error && e.message ? e.message : "⚠️ 서버 저장 실패 — 새로고침 시 사라질 수 있습니다");
       });
-    setMessage("추적 프롬프트가 추가되었습니다.");
+    setMessage(targetName ? `‘${targetName}’에 추가했습니다.` : "추적 프롬프트가 추가되었습니다.");
+  }
+
+  /* ── 질문 세트 (계획 prompt-sets-plan-v2 §5-1) ── */
+
+  /** 세트 목록만 다시 받기 — 실패하면 화면은 그대로 둔다 */
+  async function reloadPromptSets(wsId: string) {
+    const token = wsGuardRef.current.capture(wsId);
+    try {
+      const sets = await fetchPromptSets(wsId);
+      if (!wsGuardRef.current.accept(token)) return; // 그 사이 워크스페이스가 바뀌었다(P3)
+      setState((prev) => ({ ...prev, promptSets: sets }));
+    } catch (e) {
+      console.error("[dashboard] 세트 목록 재조회 실패:", e);
+    }
+  }
+
+  /** 질문·세트를 서버와 맞춘다 — 자동화 탭이 질문을 다시 저장한 뒤(P2). 저장 안 된 낙관 항목은 남긴다. */
+  async function reloadPromptsAndSets(wsId: string) {
+    const token = wsGuardRef.current.capture(wsId);
+    // 출발 때 화면에 있던 번호 — 그 뒤에 생긴 항목은 늦게 온 결과가 지우지 않게(N1)
+    const idsAtStart = new Set(customPromptsRef.current.flatMap((p) => (p.id ? [p.id] : [])));
+    try {
+      const [fresh, sets] = await Promise.all([fetchActivePrompts(wsId), fetchPromptSets(wsId)]);
+      if (!wsGuardRef.current.accept(token)) return;
+      setState((prev) => ({
+        ...prev,
+        customPrompts: mergeServerPrompts(prev.customPrompts, fresh, idsAtStart),
+        promptSets: sets,
+      }));
+    } catch (e) {
+      console.error("[dashboard] 질문·세트 재조회 실패:", e);
+    }
+  }
+
+  function changeHubSet(setId: string) {
+    if (!serverWsId) return;
+    setHubSetPick({ ws: serverWsId, id: setId });
+    writeStored(hubSetStorageKey(serverWsId), setId);
+  }
+
+  async function createSet(name: string): Promise<boolean> {
+    if (demoMode || !serverWsId) return false;
+    const wsId = serverWsId;
+    try {
+      const created = await createPromptSet(wsId, name);
+      await reloadPromptSets(wsId);
+      changeHubSet(created.id);
+      setMessage(`‘${created.name}’ 세트를 만들었습니다.`);
+      return true;
+    } catch (e) {
+      setMessage(e instanceof Error && e.message ? e.message : "세트를 만들지 못했습니다.");
+      return false;
+    }
+  }
+
+  async function renameSet(setId: string, name: string): Promise<boolean> {
+    if (demoMode || !serverWsId) return false;
+    try {
+      await renamePromptSet(setId, name);
+      await reloadPromptSets(serverWsId);
+      setMessage(`세트 이름을 ‘${name.trim()}’(으)로 바꿨습니다.`);
+      return true;
+    } catch (e) {
+      setMessage(e instanceof Error && e.message ? e.message : "이름을 바꾸지 못했습니다.");
+      return false;
+    }
+  }
+
+  async function deleteSet(setId: string): Promise<void> {
+    if (demoMode || !serverWsId) return;
+    const wsId = serverWsId;
+    const name = setNameOf(setId, state.promptSets) ?? "세트";
+    try {
+      await deletePromptSet(setId);
+      await reloadPromptSets(wsId);
+      // 지운 세트를 보고 있었으므로 기존 세트 보기로 돌아간다
+      changeHubSet(state.promptSets?.find((s) => s.isDefault)?.id ?? ALL_SETS);
+      setMessage(`‘${name}’ 세트를 지웠습니다.`);
+    } catch (e) {
+      setMessage(e instanceof Error && e.message ? e.message : "세트를 지우지 못했습니다.");
+    }
+  }
+
+  /** 질문 옮기기 — 응답·일정은 그대로. 옮긴 질문의 과거 답변은 새 세트에서 보인다. */
+  async function movePrompts(promptIds: string[], setId: string): Promise<boolean> {
+    if (demoMode || !serverWsId) return false;
+    const wsId = serverWsId;
+    const name = setNameOf(setId, state.promptSets) ?? "세트";
+    try {
+      const res = await movePromptsToSet(wsId, promptIds, setId);
+      const notFound = new Set(res.notFound);
+      setState((prev) => ({
+        ...prev,
+        customPrompts: applyMove(prev.customPrompts, promptIds.filter((id) => !notFound.has(id)), setId),
+      }));
+      // 다른 관리자가 그 사이 지운 질문 등이 있으면 서버 목록으로 맞춘다
+      if (res.notFound.length > 0) await reloadPromptsAndSets(wsId);
+      else void reloadPromptSets(wsId);
+      setMessage(
+        `질문 ${res.moved}개를 ‘${name}’ 세트로 옮겼습니다.` +
+          (res.notFound.length > 0 ? ` (${res.notFound.length}개는 찾지 못해 건너뛰었습니다)` : ""),
+      );
+      return true;
+    } catch (e) {
+      setMessage(e instanceof Error && e.message ? e.message : "질문을 옮기지 못했습니다.");
+      return false;
+    }
   }
 
   async function removeCustomPrompt(value: string, deleteResponses?: boolean) {
@@ -1732,13 +1909,21 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }
 
-  async function clearAllPrompts() {
+  /**
+   * 질문 일괄 제거 — scopeTexts 를 주면 그 질문만(허브 「이 세트 질문 전체 제거」), 없으면 전부.
+   * scopeName 은 확인 문구에 넣을 세트 이름.
+   */
+  async function clearAllPrompts(scopeTexts?: string[], scopeName?: string) {
     if (demoMode) { setMessage("데모 모드 — 데이터를 변경할 수 없습니다"); return; }
-    if (state.customPrompts.length === 0) { setMessage("삭제할 프롬프트가 없습니다."); return; }
-    if (!window.confirm(`저장된 프롬프트 ${state.customPrompts.length}개를 전부 삭제합니다.\n수집된 응답 이력은 유지됩니다. 계속하시겠습니까?`)) return;
+    const texts = scopeTexts ?? state.customPrompts.map((p) => p.text);
+    if (texts.length === 0) { setMessage("삭제할 프롬프트가 없습니다."); return; }
+    const confirmText = scopeName
+      ? `‘${scopeName}’ 세트의 질문 ${texts.length}개를 전부 제거합니다.\n수집된 응답 이력은 유지됩니다. 계속하시겠습니까?`
+      : `저장된 프롬프트 ${texts.length}개를 전부 삭제합니다.\n수집된 응답 이력은 유지됩니다. 계속하시겠습니까?`;
+    if (!window.confirm(confirmText)) return;
 
-    const texts = state.customPrompts.map((p) => p.text);
-    setState((prev) => ({ ...prev, customPrompts: [] }));
+    const removeSet = new Set(texts);
+    setState((prev) => ({ ...prev, customPrompts: prev.customPrompts.filter((p) => !removeSet.has(p.text)) }));
     if (serverWsId) {
       // 서버 prompts 레코드도 이름 기반으로 순차 삭제 (개수가 적어 병렬 필요 없음)
       for (const t of texts) {
@@ -1747,7 +1932,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         );
       }
     }
-    setMessage(`프롬프트 ${texts.length}개 전체 삭제 완료`);
+    setMessage(scopeName ? `‘${scopeName}’ 세트 질문 ${texts.length}개 제거 완료` : `프롬프트 ${texts.length}개 전체 삭제 완료`);
   }
 
   async function updatePromptTags(text: string, tags: string[]) {
@@ -2287,6 +2472,9 @@ ${exampleJson}
         prompts: defaultState.customPrompts,
       });
       setServerWsId(newId);
+      // 새 워크스페이스의 기존 세트를 다시 읽는다(아래 setState(defaultState) 가 세트 목록을 비우므로 그 뒤에 도착한다)
+      wsGuardRef.current.setCurrent(newId); // 새 워크스페이스로 바로 맞춰 아래 재조회가 버려지지 않게
+      void reloadPromptSets(newId);
       // brand 초기화 플래그 리셋 — 새 워크스페이스 로드 후 첫 PATCH skip
       brandInitializedRef.current = false;
     } catch (e) {
@@ -2486,12 +2674,20 @@ ${exampleJson}
           // "제거 + 데이터 삭제" 는 응답 데이터 일괄 삭제 권한 — admin 전용.
           // 일반관리자는 "제거" 만 사용 가능 (prompt 만 제거, runs 유지).
           canCascadeDelete={auth.kind === "admin"}
+          // 세트 — 데모·세트 목록 실패 시 promptSets 가 없어 허브가 예전 화면 그대로 그린다
+          promptSets={demoMode ? undefined : state.promptSets}
+          viewSetId={hubSetId}
+          onViewSetChange={changeHubSet}
+          onCreateSet={demoMode ? undefined : createSet}
+          onRenameSet={demoMode ? undefined : renameSet}
+          onDeleteSet={demoMode ? undefined : deleteSet}
+          onMovePrompts={demoMode ? undefined : movePrompts}
           onAddCustomPrompt={addCustomPrompt}
           onRemoveCustomPrompt={removeCustomPrompt}
           onUpdatePromptTags={updatePromptTags}
           onRunPrompt={callScrape}
-          onBatchRunAll={batchRunAllPrompts}
-          onClearAll={clearAllPrompts}
+          onBatchRun={(texts) => void batchRunAllPrompts(texts)}
+          onClearScope={(texts, name) => void clearAllPrompts(texts, name)}
         />
       );
     }
@@ -2520,7 +2716,7 @@ ${exampleJson}
           busy={busy}
           onNicheChange={(value) => setState((prev) => ({ ...prev, niche: value }))}
           onGenerateQueries={runNicheExplorer}
-          onAddToTracking={addCustomPrompt}
+          onAddToTracking={(q) => void addCustomPrompt(q)}
         />
       );
     }
@@ -2531,6 +2727,9 @@ ${exampleJson}
           brand={state.brand}
           competitors={state.competitors}
           customPrompts={state.customPrompts}
+          onPromptsSynced={
+            demoMode || !serverWsId ? undefined : () => void reloadPromptsAndSets(serverWsId)
+          }
         />
       );
     }
@@ -2565,6 +2764,8 @@ ${exampleJson}
           windowDays={runsWindowDays}
           onWindowDaysChange={setRunsWindowDays}
           trackedPrompts={trackedPromptTexts}
+          promptSets={demoMode ? undefined : state.promptSets}
+          setIdByPrompt={demoMode ? undefined : setIdByPrompt}
           workspaceId={demoMode ? undefined : serverWsId ?? undefined}
           onArchivePrompts={archivePrompts}
           onArchiveAllUntracked={archiveAllUntrackedPrompts}

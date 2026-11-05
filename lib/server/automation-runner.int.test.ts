@@ -24,6 +24,7 @@ import {
   assertOnlyTestData,
   ensureTestDatabase,
   migrateTestDatabase,
+  insertTestPrompt,
   readIntDbConfig,
 } from "./test-support/int-db";
 
@@ -53,8 +54,7 @@ async function makeWorkspace(label: string) {
 }
 
 async function addPrompt(wsId: string, text: string, active = true) {
-  const [p] = await dbm.db.insert(dbm.schema.prompts).values({ workspaceId: wsId, text, active }).returning();
-  return p;
+  return insertTestPrompt(dbm.db, wsId, { text, active });
 }
 
 async function addRun(

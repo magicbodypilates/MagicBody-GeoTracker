@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ArchiveActionResult, ArchiveCounts, ScrapeRun } from "@/components/dashboard/types";
+import type { ArchiveActionResult, ArchiveCounts, PromptSet, ScrapeRun } from "@/components/dashboard/types";
 import { VISIBLE_PROVIDERS, PROVIDER_LABELS, type Provider } from "@/components/dashboard/types";
 import type { RunDelta } from "@/components/dashboard/types";
 import { splitAnswerSections } from "@/components/dashboard/answer-utils";
@@ -10,6 +10,20 @@ import { ResponseArchivePanel } from "@/components/dashboard/response-archive-pa
 import { toKstDateKey } from "@/lib/client/date-kst";
 import { fetchResponseArchive } from "@/lib/client/server-store";
 import { buildArchiveConfirm, buildPurgeConfirm, splitTrackedGroups } from "@/lib/client/response-archive-utils";
+import {
+  SCOPE_ALL,
+  SCOPE_TRACKED,
+  SCOPE_UNTRACKED,
+  UNSORTED_KEY,
+  UNSORTED_LABEL,
+  filterByScope,
+  groupBySet,
+  normalizeScope,
+  readStored,
+  responsesScopeStorageKey,
+  scopeForSet,
+  writeStored,
+} from "@/lib/client/prompt-sets";
 
 type ArchiveAction = (texts: string[]) => Promise<ArchiveActionResult | null>;
 
@@ -27,6 +41,12 @@ type ReputationSourcesTabProps = {
   /* ── 응답 보관함 (계획 geotracker-response-archive-260924 §5-1) ── */
   /** 질문 목록(켜진 질문)의 문구 — 있을 때만 「질문 목록에 없음」 표시·질문 필터를 그린다 */
   trackedPrompts?: string[];
+  /**
+   * 질문 세트(계획 prompt-sets-plan-v2 §5-3) — 둘 다 있을 때만 「질문 범위」에 세트별 항목을 그린다.
+   * setIdByPrompt: 켜진 질문 문장 → 그 질문이 **지금** 속한 세트(옮긴 질문의 과거 답변은 지금 세트에서 보인다).
+   */
+  promptSets?: PromptSet[];
+  setIdByPrompt?: ReadonlyMap<string, string>;
   /** 서버 워크스페이스 — 없으면(데모) 보관함 탭을 그리지 않는다 */
   workspaceId?: string;
   onArchivePrompts?: ArchiveAction;
@@ -39,7 +59,6 @@ type ReputationSourcesTabProps = {
 };
 
 type ResponseTab = "auto-info" | "auto-branded" | "manual" | "archive";
-type TrackedFilter = "all" | "tracked" | "untracked";
 
 function normalizeAnswerForDisplay(answer: string): string {
   let text = answer;
@@ -567,6 +586,8 @@ export function ReputationSourcesTab({
   windowDays,
   onWindowDaysChange,
   trackedPrompts,
+  promptSets,
+  setIdByPrompt,
   workspaceId,
   onArchivePrompts,
   onArchiveAllUntracked,
@@ -580,8 +601,9 @@ export function ReputationSourcesTab({
   // 하위 탭: 일반 검색 자동 / brand 명 검색 자동 / 수동 응답 / 보관함
   const [responseTab, setResponseTab] = useState<ResponseTab>("auto-info");
   const [sortField, setSortField] = useState<"date" | "score">("date");
-  // 질문 필터 — 질문 목록에 있는 질문만 / 없는 질문만 (trackedPrompts 가 있을 때만 쓴다)
-  const [trackedFilter, setTrackedFilter] = useState<TrackedFilter>("all");
+  // 질문 범위 — 모든 질문 / 목록에 있는 질문 전체 / 세트별 / 목록에 없는 질문만 (trackedPrompts 가 있을 때만 쓴다)
+  // 고른 값은 워크스페이스별로 브라우저에 기억한다(scopePick 이 없으면 저장된 값). 지워진 세트면 「모든 질문」.
+  const [scopePick, setScopePick] = useState<{ ws: string | undefined; scope: string } | null>(null);
   // 보관함 숫자(보관한 질문 수) — 탭 막대 「보관함 (N)」
   const [archivedQuestions, setArchivedQuestions] = useState<number | null>(null);
   // 요청 중인 질문 — 그 질문의 동작 버튼을 잠근다
@@ -589,6 +611,33 @@ export function ReputationSourcesTab({
 
   const archiveEnabled = !!workspaceId && !!onArchivePrompts && !!onRestorePrompts && !!onArchiveAllUntracked;
   const trackedSet = useMemo(() => (trackedPrompts ? new Set(trackedPrompts) : null), [trackedPrompts]);
+  // 세트별 항목 — 세트 정보가 있을 때만. 문장 → 세트 지도가 없으면(데모) 목록 기준 지도를 만든다.
+  const setsOn = !!promptSets && promptSets.length > 0 && !!setIdByPrompt;
+  const scopeMap = useMemo<ReadonlyMap<string, string>>(
+    () => setIdByPrompt ?? new Map((trackedPrompts ?? []).map((t) => [t, UNSORTED_KEY])),
+    [setIdByPrompt, trackedPrompts],
+  );
+  const setOptions = useMemo(() => {
+    if (!setsOn || !promptSets) return [] as { key: string; label: string; count: number }[];
+    const items = Array.from(scopeMap.entries()).map(([text, setId]) => ({ text, setId }));
+    return groupBySet(items, promptSets).map((g) => ({
+      key: g.key,
+      label: g.key === UNSORTED_KEY ? UNSORTED_LABEL : g.label,
+      count: g.items.length,
+    }));
+  }, [setsOn, promptSets, scopeMap]);
+  const storedScope = useMemo(
+    () => (workspaceId ? readStored(responsesScopeStorageKey(workspaceId)) : null),
+    [workspaceId],
+  );
+  const scope = normalizeScope(
+    scopePick && scopePick.ws === workspaceId ? scopePick.scope : storedScope,
+    setOptions.map((o) => o.key),
+  );
+  function changeScope(next: string) {
+    setScopePick({ ws: workspaceId, scope: next });
+    if (workspaceId) writeStored(responsesScopeStorageKey(workspaceId), next);
+  }
   const activeTab: ResponseTab = responseTab === "archive" && !archiveEnabled ? "auto-info" : responseTab;
 
   // 보관함 숫자 — 워크스페이스·보관 동작이 바뀔 때 counts 만 읽는다(패널이 열려 있으면 패널이 알려 준다)
@@ -625,12 +674,16 @@ export function ReputationSourcesTab({
     }
     if (filterProvider !== "all") list = list.filter((r) => r.provider === filterProvider);
     if (filterSentiment !== "all") list = list.filter((r) => r.sentiment === filterSentiment);
-    if (trackedPrompts && trackedFilter !== "all") {
-      const split = splitTrackedGroups(list, trackedPrompts);
-      list = trackedFilter === "tracked" ? split.tracked : split.untracked;
+    if (trackedPrompts && scope !== SCOPE_ALL) {
+      if (scope.startsWith("set:")) {
+        list = filterByScope(list, scope, scopeMap);
+      } else {
+        const split = splitTrackedGroups(list, trackedPrompts);
+        list = scope === SCOPE_TRACKED ? split.tracked : split.untracked;
+      }
     }
     return list;
-  }, [runs, filterProvider, filterSentiment, activeTab, brandTerms, trackedPrompts, trackedFilter]);
+  }, [runs, filterProvider, filterSentiment, activeTab, brandTerms, trackedPrompts, scope, scopeMap]);
 
   async function runPromptAction(prompt: string, fn: () => Promise<unknown>) {
     setBusyPrompts((b) => new Set(b).add(prompt));
@@ -899,17 +952,22 @@ export function ReputationSourcesTab({
           <option value="score">정렬: 점수순</option>
         </select>
 
-        {/* 질문 필터 — 질문 목록에 있는 질문·없는 질문 */}
+        {/* 질문 범위 — 모든 질문 · 목록에 있는 질문 전체 · 세트별 · 목록에 없는 질문만 */}
         {trackedPrompts && (
           <select
-            value={trackedFilter}
-            onChange={(e) => setTrackedFilter(e.target.value as TrackedFilter)}
-            className="bd-input rounded-lg px-2.5 py-1.5 text-xs"
-            aria-label="질문 목록 필터"
+            value={scope}
+            onChange={(e) => changeScope(e.target.value)}
+            className="bd-input max-w-full rounded-lg px-2.5 py-1.5 text-xs"
+            aria-label="질문 범위"
           >
-            <option value="all">모든 질문</option>
-            <option value="tracked">목록에 있는 질문만</option>
-            <option value="untracked">목록에 없는 질문만</option>
+            <option value={SCOPE_ALL}>모든 질문</option>
+            <option value={SCOPE_TRACKED}>{setsOn ? "목록에 있는 질문 전체" : "목록에 있는 질문만"}</option>
+            {setOptions.map((o) => (
+              <option key={o.key} value={scopeForSet(o.key)}>
+                {o.label} (질문 {o.count})
+              </option>
+            ))}
+            <option value={SCOPE_UNTRACKED}>목록에 없는 질문만</option>
           </select>
         )}
 

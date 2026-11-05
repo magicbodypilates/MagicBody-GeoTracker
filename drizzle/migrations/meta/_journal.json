@@ -71,6 +71,20 @@
       "when": 1790266522184,
       "tag": "0009_archive-runs",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793905259741,
+      "tag": "0010_prompt-sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793905286675,
+      "tag": "0011_prompt-sets-not-null",
+      "breakpoints": true
     }
   ]
 }

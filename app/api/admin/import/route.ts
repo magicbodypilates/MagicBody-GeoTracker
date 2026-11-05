@@ -16,6 +16,7 @@
  *   4. appState.runs[] 일괄 삽입 (수동 이관은 isAuto 플래그 그대로 유지)
  *   5. appState.auditHistory[] 일괄 삽입
  *   6. 트랜잭션으로 원자성 보장
+ *   7. 기본 질문 세트(「기존 세트」)를 만들고 가져온 질문을 모두 그 세트에 넣는다(계획 prompt-sets-plan-v2 §4)
  *
  * 주의:
  *   - 이관은 "추가" 만 함. 기존 서버 데이터는 건드리지 않음.
@@ -26,6 +27,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { sql } from "drizzle-orm";
+import { ensureDefaultSet } from "@/lib/server/prompt-sets";
 
 export const dynamic = "force-dynamic";
 
@@ -71,6 +73,8 @@ export async function POST(req: NextRequest) {
           brandConfig: appState.brand,
         })
         .returning();
+      // 1-b) 기본 질문 세트 — 가져온 질문의 도착지
+      const defaultSet = await ensureDefaultSet(tx, workspace.id);
 
       // 2) 경쟁사
       const competitorRows = (appState.competitors as Array<{
@@ -104,6 +108,7 @@ export async function POST(req: NextRequest) {
           workspaceId: workspace.id,
           text: p.text,
           tags: p.tags,
+          setId: defaultSet.id,
         }));
       if (promptRows.length > 0) {
         await tx

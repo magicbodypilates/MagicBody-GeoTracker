@@ -111,6 +111,33 @@ export const competitors = pgTable(
 );
 
 /* ============================================================
+ * prompt_sets — 질문 세트 (워크스페이스 별, 계획 prompt-sets-plan-v2 §3-1)
+ *
+ * 질문 하나는 세트 하나에만 속한다(prompts.set_id). 워크스페이스마다 고정 기본 세트
+ * 「기존 세트」(is_default=true) 하나 — 이름만 바꿀 수 있고 지울 수 없으며, 다른 세트를
+ * 기본으로 바꾸는 기능은 없다. 세트를 지정하지 않은 서버 경로(가져오기·첫 동기화 등)의
+ * 도착지다. 응답(runs)은 질문 문장으로만 이어지므로 세트 이동이 응답에 닿지 않는다.
+ * ============================================================ */
+export const promptSets = pgTable(
+  "prompt_sets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    isDefault: boolean("is_default").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    workspaceNameUnique: uniqueIndex("uq_prompt_sets_workspace_name").on(t.workspaceId, t.name),
+    workspaceDefaultUnique: uniqueIndex("uq_prompt_sets_workspace_default")
+      .on(t.workspaceId)
+      .where(sql`is_default`),
+  }),
+);
+
+/* ============================================================
  * prompts — 추적 프롬프트 라이브러리
  * ============================================================ */
 export const prompts = pgTable(
@@ -123,6 +150,13 @@ export const prompts = pgTable(
     text: text("text").notNull(),
     tags: text("tags").array().notNull().default([]),
     active: boolean("active").notNull().default(true),
+    /**
+     * 질문이 속한 세트 — 삭제 동작은 지정하지 않는다(NO ACTION · 계획 D4). 세트를 지워도 질문이
+     * 함께 지워지는 연쇄는 없고, 세트 삭제 경로가 질문을 먼저 옮기거나 거절한다.
+     */
+    setId: uuid("set_id")
+      .notNull()
+      .references(() => promptSets.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -565,6 +599,8 @@ export type Workspace = InferSelectModel<typeof workspaces>;
 export type NewWorkspace = InferInsertModel<typeof workspaces>;
 export type Competitor = InferSelectModel<typeof competitors>;
 export type NewCompetitor = InferInsertModel<typeof competitors>;
+export type PromptSetRow = InferSelectModel<typeof promptSets>;
+export type NewPromptSetRow = InferInsertModel<typeof promptSets>;
 export type Prompt = InferSelectModel<typeof prompts>;
 export type NewPrompt = InferInsertModel<typeof prompts>;
 export type Schedule = InferSelectModel<typeof schedules>;

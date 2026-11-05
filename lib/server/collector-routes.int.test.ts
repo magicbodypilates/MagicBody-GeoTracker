@@ -17,6 +17,7 @@ import {
   assertOnlyTestData,
   ensureTestDatabase,
   migrateTestDatabase,
+  insertTestPrompt,
   readIntDbConfig,
 } from "./test-support/int-db";
 import { formatIntervalSlot } from "./collector-schedule";
@@ -61,11 +62,8 @@ async function makeWorkspace(label: string) {
 async function makePrompts(wsId: string, texts: string[]) {
   const out: { id: string; text: string }[] = [];
   for (let i = 0; i < texts.length; i++) {
-    const [p] = await dbm.db
-      .insert(dbm.schema.prompts)
-      .values({ workspaceId: wsId, text: texts[i], createdAt: new Date(Date.UTC(2030, 0, 1, 0, 0, i)) })
-      .returning({ id: dbm.schema.prompts.id, text: dbm.schema.prompts.text });
-    out.push(p);
+    const p = await insertTestPrompt(dbm.db, wsId, { text: texts[i], createdAt: new Date(Date.UTC(2030, 0, 1, 0, 0, i)) });
+    out.push({ id: p.id, text: p.text });
   }
   return out;
 }

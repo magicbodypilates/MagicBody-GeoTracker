@@ -19,6 +19,7 @@ import {
   assertOnlyTestData,
   ensureTestDatabase,
   migrateTestDatabase,
+  insertTestPrompt,
   readIntDbConfig,
 } from "./test-support/int-db";
 
@@ -56,8 +57,7 @@ async function makeWorkspace(label: string) {
 }
 
 async function addPrompt(wsId: string, text: string, active = true) {
-  const [p] = await dbm.db.insert(dbm.schema.prompts).values({ workspaceId: wsId, text, active }).returning();
-  return p;
+  return insertTestPrompt(dbm.db, wsId, { text, active });
 }
 
 const BASE_TS = Date.UTC(2026, 3, 1, 0, 0, 0); // 2026-04-01 — 과거(통계 구간 검사가 미래를 거절한다)

@@ -8,13 +8,24 @@
  *   보이는 문제가 있었다 — ON CONFLICT DO UPDATE 로 해결(아래 POST 주석 참고).
  *   보관함에 그 문구의 응답이 있으면 같은 트랜잭션에서 되돌리고 응답에 restoredRuns(건수)를 싣는다
  *   (계획 geotracker-response-archive-260924 §S8).
+ *   세트(계획 prompt-sets-plan-v2 §4): 본문 setId 가 있으면 이 워크스페이스의 세트인지 확인하고(아니면 400
+ *   invalid_set), 없으면 기본 세트(없으면 같은 트랜잭션에서 만든다)에 넣는다. 같은 문장이 이미 있을 때 —
+ *   켜진 질문은 지금 세트를 유지하고 응답에 alreadyInSet{id,name} 을 싣는다(「안 보인다」 방지 안내용),
+ *   꺼진 질문은 다시 켜면서 요청한 세트로 옮긴다. 세트가 방금 지워졌으면(외래 키 위반) 409 set_gone.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
+import {
+  PromptSetError,
+  SET_HINTS,
+  UuidSchema,
+  isPromptSetFkViolation,
+  resolveTargetSet,
+} from "@/lib/server/prompt-sets";
 import {
   applyPromptLockTimeout,
   isLockTimeoutError,
@@ -28,6 +39,8 @@ const CreatePromptSchema = z.object({
   text: z.string().min(1).max(2000),
   tags: z.array(z.string()).default([]),
   active: z.boolean().default(true),
+  /** 넣을 세트 — 없으면 기본 세트. 형식이 틀리면 DB 를 타기 전에 400. */
+  setId: UuidSchema.optional(),
 });
 
 export async function GET(
@@ -78,9 +91,11 @@ export async function POST(
     // ON CONFLICT DO UPDATE — select-then-insert 방식의 경합(TOCTOU) 없이 "없으면 생성,
     // 있으면 재활성화"를 한 쿼리로 처리한다. 태그는 기존 값을 유지(재추가 요청의 tags 로
     // 덮어쓰지 않음) — active 만 되돌린다.
-    const { prompt, restoredRuns } = await db.transaction(async (tx) => {
+    // 세트: 켜진 질문이 이미 있으면 세트를 바꾸지 않는다(CASE 의 "prompts" 는 기존 행, excluded 는 요청 행).
+    const { prompt, restoredRuns, alreadyInSet } = await db.transaction(async (tx) => {
       await applyPromptLockTimeout(tx);
       await lockResponseArchive(tx, id);
+      const target = await resolveTargetSet(tx, id, parsed.setId);
       const [saved] = await tx
         .insert(schema.prompts)
         .values({
@@ -88,19 +103,43 @@ export async function POST(
           text: parsed.text,
           tags: parsed.tags,
           active: true,
+          setId: target.id,
         })
         .onConflictDoUpdate({
           target: [schema.prompts.workspaceId, schema.prompts.text],
-          set: { active: true },
+          set: {
+            active: true,
+            setId: sql`case when "prompts"."active" then "prompts"."set_id" else excluded."set_id" end`,
+          },
         })
         .returning();
+      // 켜진 채로 다른 세트에 있던 문장 — 세트는 그대로 두고 어디에 있는지 알려 준다.
+      let inOther: { id: string; name: string } | null = null;
+      if (saved.setId !== target.id) {
+        const [other] = await tx
+          .select({ id: schema.promptSets.id, name: schema.promptSets.name })
+          .from(schema.promptSets)
+          .where(eq(schema.promptSets.id, saved.setId))
+          .limit(1);
+        inOther = other ?? null;
+      }
       const restored = await restoreByTexts(tx, id, [parsed.text]);
-      return { prompt: saved, restoredRuns: restored.affectedRuns };
+      return { prompt: saved, restoredRuns: restored.affectedRuns, alreadyInSet: inOther };
     });
-    return NextResponse.json({ prompt, restoredRuns }, { status: 201 });
+    return NextResponse.json(
+      alreadyInSet ? { prompt, restoredRuns, alreadyInSet } : { prompt, restoredRuns },
+      { status: 201 },
+    );
   } catch (err) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "invalid_input", issues: err.issues }, { status: 400 });
+    }
+    if (err instanceof PromptSetError) {
+      return NextResponse.json({ error: err.code, hint: err.hint, ...err.extra }, { status: err.status });
+    }
+    // 세트를 확인한 뒤 넣기 전에 그 세트가 지워졌다(외래 키 위반) — 반대 뜻의 일반 실패 대신 안내.
+    if (isPromptSetFkViolation(err)) {
+      return NextResponse.json({ error: "set_gone", hint: SET_HINTS.setGone }, { status: 409 });
     }
     // 워크스페이스 잠금 대기 한도(applyPromptLockTimeout) 초과 — 다른 정리 작업(보관·영구 삭제 등)이
     // 오래 잠금을 쥔 드문 상황. 재시도하면 대개 풀린다(결함 대장 RV1) — 500 이 아니라 그 뜻이 드러나는

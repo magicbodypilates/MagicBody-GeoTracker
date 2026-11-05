@@ -15,6 +15,8 @@ import { resolve } from "node:path";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { prompts, type NewPrompt, type Prompt } from "@/drizzle/schema";
+import { ensureDefaultSet, type SetDb } from "@/lib/server/prompt-sets";
 
 export const TEST_WORKSPACE_PREFIX = "TEST-collector-";
 
@@ -87,4 +89,22 @@ export async function assertOnlyTestData(url: string): Promise<void> {
   } finally {
     await sql.end();
   }
+}
+
+/**
+ * 시험 질문 넣기 — 워크스페이스의 기본 세트를 보장하고 그 세트 번호(set_id)를 채워 넣는다
+ * (계획 prompt-sets-plan-v2 §6). 마이그레이션 0011 이후 질문의 세트 칸은 필수라, 시험 픽스처가
+ * 질문을 직접 넣을 때는 이 도우미를 쓴다. values 에 setId 를 주면 그 세트에 넣는다.
+ */
+export async function insertTestPrompt(
+  db: SetDb,
+  workspaceId: string,
+  values: Omit<NewPrompt, "workspaceId" | "setId"> & { setId?: string },
+): Promise<Prompt> {
+  const setId = values.setId ?? (await db.transaction((tx) => ensureDefaultSet(tx, workspaceId))).id;
+  const [row] = await db
+    .insert(prompts)
+    .values({ ...values, workspaceId, setId })
+    .returning();
+  return row;
 }

@@ -3,6 +3,7 @@
  *
  * GET  — kind="user" 는 is_production=true WS 만, kind="admin" 은 전체 반환
  * POST — 최고관리자 전용 (신규 WS 는 기본 is_production=false 로 생성)
+ *        같은 트랜잭션에서 기본 질문 세트(「기존 세트」)를 만든다(계획 prompt-sets-plan-v2 §4).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -10,6 +11,7 @@ import { z } from "zod";
 import { db, schema } from "@/lib/server/db";
 import { asc, eq } from "drizzle-orm";
 import { getSession, requireAdmin } from "@/lib/server/auth-guard";
+import { ensureDefaultSet } from "@/lib/server/prompt-sets";
 
 // API route — 항상 동적 처리 (build time 에 DB 접속 시도 방지)
 export const dynamic = "force-dynamic";
@@ -59,22 +61,26 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const parsed = CreateWorkspaceSchema.parse(body);
-    const [created] = await db
-      .insert(schema.workspaces)
-      .values({
-        name: parsed.name,
-        // 최고관리자가 생성하는 신규 WS 는 기본 테스트용 (is_production=false)
-        isProduction: false,
-        brandConfig: parsed.brandConfig ?? {
-          brandName: "",
-          brandAliases: "",
-          websites: [],
-          industry: "",
-          keywords: "",
-          description: "",
-        },
-      })
-      .returning();
+    const created = await db.transaction(async (tx) => {
+      const [ws] = await tx
+        .insert(schema.workspaces)
+        .values({
+          name: parsed.name,
+          // 최고관리자가 생성하는 신규 WS 는 기본 테스트용 (is_production=false)
+          isProduction: false,
+          brandConfig: parsed.brandConfig ?? {
+            brandName: "",
+            brandAliases: "",
+            websites: [],
+            industry: "",
+            keywords: "",
+            description: "",
+          },
+        })
+        .returning();
+      await ensureDefaultSet(tx, ws.id);
+      return ws;
+    });
     return NextResponse.json({ workspace: created }, { status: 201 });
   } catch (err) {
     if (err instanceof z.ZodError) {

@@ -22,11 +22,18 @@ type PromptRow = {
   text: string;
   tags: string[];
   active: boolean;
+  setId: string;
   createdAt: Date;
 };
 
+/** 세트 번호(유효한 UUID v4 모양) — 기본 세트와 다른 세트 하나. */
+const SET_DEFAULT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const SET_OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
 const H = vi.hoisted(() => {
   const store: { prompts: PromptRow[] } = { prompts: [] };
+  /** alreadyInSet 조회가 돌려줄 세트 — 테스트가 정한다. */
+  let lastLookedUpSet: { id: string; name: string } | null = null;
   let seq = 1;
   /** 호출 순서 기록 — 보관 잠금 → 추가(upsert) → 보관 응답 되돌리기(응답 보관 §S8). */
   const order: string[] = [];
@@ -59,7 +66,12 @@ const H = vi.hoisted(() => {
               new Error('duplicate key value violates unique constraint "uq_prompts_workspace_text"'),
             );
           }
-          Object.assign(existing, conflictSet);
+          // 세트 칸은 라우트가 SQL CASE 로 보낸다 — 실제 postgres 와 같은 뜻으로 흉내 낸다:
+          // 켜진 기존 행은 세트를 유지하고, 꺼진 행은 요청한 세트로 옮긴다.
+          const plain = { ...(conflictSet as Record<string, unknown>) };
+          delete plain.setId;
+          const nextSetId = existing.active ? existing.setId : (vals!.setId as string);
+          Object.assign(existing, plain, { setId: nextSetId });
           return Promise.resolve([{ ...existing }]);
         }
         const row: PromptRow = {
@@ -68,6 +80,7 @@ const H = vi.hoisted(() => {
           text: vals!.text!,
           tags: vals!.tags ?? [],
           active: vals!.active ?? true,
+          setId: vals!.setId as string,
           createdAt: new Date(),
         };
         store.prompts.push(row);
@@ -80,11 +93,13 @@ const H = vi.hoisted(() => {
   const db = {
     insert: (_table: unknown) => insertBuilder(),
     // GET 목록 조회 — select().from().where().orderBy(). F1(오류 시 원문 노출) 재현용으로 실패를 주입할 수 있다.
+    // 다른 세트 이름 조회(alreadyInSet) — select().from().where().limit(). 돌려줄 세트는 setLookup 으로 정한다.
     select: (_proj?: unknown) => ({
       from: (_table: unknown) => ({
         where: (_pred: unknown) => ({
           orderBy: (_o: unknown) =>
             selectFailWith ? Promise.reject(selectFailWith) : Promise.resolve([...store.prompts]),
+          limit: (_n: number) => Promise.resolve(lastLookedUpSet ? [lastLookedUpSet] : []),
         }),
       }),
     }),
@@ -97,6 +112,10 @@ const H = vi.hoisted(() => {
       workspaceId: { __col: true, name: "workspaceId" },
       text: { __col: true, name: "text" },
     },
+    promptSets: {
+      id: { __col: true, name: "id" },
+      name: { __col: true, name: "name" },
+    },
   };
 
   return {
@@ -104,6 +123,15 @@ const H = vi.hoisted(() => {
     db,
     schema,
     order,
+    setLookup: (v: { id: string; name: string } | null) => {
+      lastLookedUpSet = v;
+    },
+    // 넣을 세트 고르기 — setId 가 오면 그 세트, 없으면 기본 세트. 「다른 워크스페이스 세트」는 테스트가 실패를 주입한다.
+    resolveTargetSet: vi.fn(async (_tx: unknown, _ws: string, setId?: string | null) => ({
+      id: setId ?? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: setId ? "새 세트" : "기존 세트",
+      isDefault: !setId,
+    })),
     setRestoredRuns: (n: number) => {
       restoredRunsNext = n;
     },
@@ -127,6 +155,7 @@ const H = vi.hoisted(() => {
       order.length = 0;
       restoredRunsNext = 0;
       selectFailWith = null;
+      lastLookedUpSet = null;
     },
   };
 });
@@ -143,6 +172,12 @@ vi.mock("@/lib/server/run-archive", async (orig) => {
     restoreByTexts: H.restoreByTexts,
     applyPromptLockTimeout: H.applyPromptLockTimeout,
   };
+});
+
+// 세트 고르기만 가짜로 — 오류 판별(isPromptSetFkViolation)·PromptSetError 는 실제 구현을 쓴다.
+vi.mock("@/lib/server/prompt-sets", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, resolveTargetSet: H.resolveTargetSet };
 });
 
 vi.mock("@/lib/server/auth-guard", () => ({
@@ -167,6 +202,7 @@ function post(body: unknown) {
 
 beforeEach(() => {
   H.reset();
+  H.resolveTargetSet.mockClear();
   H.lockResponseArchive.mockClear();
   H.restoreByTexts.mockClear();
   H.applyPromptLockTimeout.mockClear();
@@ -192,6 +228,7 @@ describe("POST /api/workspaces/:id/prompts — 추가 = 없으면 생성, 있으
       text: "이미 있음",
       tags: ["old-tag"],
       active: false,
+      setId: SET_DEFAULT,
       createdAt: new Date("2026-01-01T00:00:00Z"),
     });
 
@@ -213,6 +250,7 @@ describe("POST /api/workspaces/:id/prompts — 추가 = 없으면 생성, 있으
       text: "이미 켜짐",
       tags: [],
       active: true,
+      setId: SET_DEFAULT,
       createdAt: new Date("2026-01-01T00:00:00Z"),
     });
 
@@ -231,6 +269,7 @@ describe("POST /api/workspaces/:id/prompts — 추가 = 없으면 생성, 있으
       text: "공통 문구",
       tags: [],
       active: false,
+      setId: SET_DEFAULT,
       createdAt: new Date(),
     });
 
@@ -358,6 +397,7 @@ describe("GET /api/workspaces/:id/prompts — 목록 조회", () => {
       text: "조회용 질문",
       tags: [],
       active: true,
+      setId: SET_DEFAULT,
       createdAt: new Date(),
     });
     const res = await get();
@@ -381,5 +421,88 @@ describe("GET /api/workspaces/:id/prompts — 목록 조회", () => {
     const body = await res.json();
     expect(JSON.stringify(body)).not.toMatch(/Failed query|select .* from|does not exist|params:/i);
     expect(body).toEqual({ error: "prompts_list_failed" });
+  });
+});
+
+describe("POST /api/workspaces/:id/prompts — 세트 (계획 prompt-sets-plan-v2 §4)", () => {
+  it("setId 없이 추가 → 기본 세트로 들어간다", async () => {
+    const res = await post({ text: "기본 세트 질문" });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.prompt.setId).toBe(SET_DEFAULT);
+    expect(body.alreadyInSet).toBeUndefined();
+    expect(H.resolveTargetSet).toHaveBeenCalledWith(expect.anything(), WS, undefined);
+  });
+
+  it("setId 를 주면 그 세트로 들어간다", async () => {
+    const res = await post({ text: "새 세트 질문", setId: SET_OTHER });
+    expect(res.status).toBe(201);
+    expect((await res.json()).prompt.setId).toBe(SET_OTHER);
+    expect(H.resolveTargetSet).toHaveBeenCalledWith(expect.anything(), WS, SET_OTHER);
+  });
+
+  it("다른 세트에 켜진 같은 문장 → 세트를 바꾸지 않고 alreadyInSet 으로 알린다", async () => {
+    H.store.prompts.push({
+      id: "on-1", workspaceId: WS, text: "이미 기존 세트", tags: [], active: true, setId: SET_DEFAULT, createdAt: new Date(),
+    });
+    H.setLookup({ id: SET_DEFAULT, name: "기존 세트" });
+    const res = await post({ text: "이미 기존 세트", setId: SET_OTHER });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.prompt.setId).toBe(SET_DEFAULT);
+    expect(body.alreadyInSet).toEqual({ id: SET_DEFAULT, name: "기존 세트" });
+    expect(H.store.prompts[0].setId).toBe(SET_DEFAULT);
+  });
+
+  it("꺼진 같은 문장 → 다시 켜지고 요청한 세트로 옮겨진다", async () => {
+    H.store.prompts.push({
+      id: "off-1", workspaceId: WS, text: "꺼진 문장", tags: [], active: false, setId: SET_DEFAULT, createdAt: new Date(),
+    });
+    const res = await post({ text: "꺼진 문장", setId: SET_OTHER });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.prompt.active).toBe(true);
+    expect(body.prompt.setId).toBe(SET_OTHER);
+    expect(body.alreadyInSet).toBeUndefined();
+  });
+
+  it("세트 번호 형식이 틀리면 DB 를 타기 전에 400", async () => {
+    const res = await post({ text: "형식 틀림", setId: "not-a-uuid" });
+    expect(res.status).toBe(400);
+    expect(H.resolveTargetSet).not.toHaveBeenCalled();
+    expect(H.store.prompts).toHaveLength(0);
+  });
+
+  it("다른 워크스페이스 세트 → 400 invalid_set + 쉬운 안내", async () => {
+    const { PromptSetError, SET_HINTS } = await import("@/lib/server/prompt-sets");
+    H.resolveTargetSet.mockRejectedValueOnce(new PromptSetError(400, "invalid_set", SET_HINTS.invalidSet));
+    const res = await post({ text: "남의 세트", setId: SET_OTHER });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_set", hint: SET_HINTS.invalidSet });
+  });
+
+  it("세트가 방금 지워졌다(외래 키 위반) → 409 set_gone, SQL 원문 없음", async () => {
+    const original = H.db.insert;
+    H.db.insert = (() => ({
+      values: () => ({
+        onConflictDoUpdate: () => ({
+          returning: () =>
+            Promise.reject(
+              Object.assign(new Error('Failed query: insert into "prompts" ...'), {
+                cause: { code: "23503", constraint_name: "prompts_set_id_prompt_sets_id_fk" },
+              }),
+            ),
+        }),
+      }),
+    })) as unknown as typeof H.db.insert;
+    try {
+      const res = await post({ text: "지워진 세트로", setId: SET_OTHER });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toBe("set_gone");
+      expect(JSON.stringify(body)).not.toMatch(/Failed query|prompts_set_id/);
+    } finally {
+      H.db.insert = original;
+    }
   });
 });

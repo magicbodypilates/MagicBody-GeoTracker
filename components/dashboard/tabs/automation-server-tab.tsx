@@ -16,6 +16,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type {
   BrandConfig,
   Competitor,
+  PromptSet,
   TaggedPrompt,
   Provider,
 } from "@/components/dashboard/types";
@@ -23,6 +24,8 @@ import { PROVIDER_LABELS, VISIBLE_PROVIDERS } from "@/components/dashboard/types
 
 import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
 import { filterToActivePromptIds } from "@/lib/client/schedule-prompt-select";
+import { buildSyncPayloads, hasUnsyncedLocalIds, runPromptSync, type SyncPost } from "@/lib/client/prompt-sets";
+import { PromptSetPicker } from "@/components/dashboard/prompt-set-picker";
 import {
   formatRoundLine,
   pickRoundForSchedule,
@@ -61,7 +64,14 @@ type ServerPrompt = {
   text: string;
   tags: string[];
   active: boolean;
+  /** 질문이 속한 세트 — 없으면 기존 세트로 묶는다 */
+  setId?: string | null;
 };
+
+/** 선택 없이 저장할 때 확인 문구 — 세트가 생기면 「선택 없음」이 앞으로 추가될 모든 세트 질문까지 돌린다(계획 D7). */
+const EMPTY_SELECTION_CONFIRM =
+  "실행할 프롬프트를 고르지 않았습니다.\n선택하지 않으면 모든 세트의 질문(앞으로 추가될 질문 포함)을 실행합니다. 이대로 저장할까요?";
+const EMPTY_SELECTION_NOTE = "선택하지 않으면 모든 세트의 질문(앞으로 추가될 질문 포함)을 실행합니다.";
 
 /** 12시간 기본. UI 에서 1/6/12/24 선택 */
 const INTERVAL_PRESETS: { label: string; cron: string; hours: number }[] = [
@@ -75,12 +85,18 @@ type AutomationServerTabProps = {
   brand: BrandConfig;
   competitors: Competitor[];
   customPrompts: TaggedPrompt[];
+  /**
+   * 동기화가 질문을 하나라도 새로 저장했을 때 — 부모가 질문·세트 목록을 서버와 맞춘다(결함 대장 P2).
+   * 그래야 허브의 낙관 항목이 번호를 받아 옮기기 체크박스가 풀린다.
+   */
+  onPromptsSynced?: () => void;
 };
 
 export function AutomationServerTab({
   brand,
   competitors,
   customPrompts,
+  onPromptsSynced,
 }: AutomationServerTabProps) {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [initState, setInitState] = useState<"loading" | "ready" | "error">("loading");
@@ -89,6 +105,8 @@ export function AutomationServerTab({
   const [schedules, setSchedules] = useState<ServerSchedule[]>([]);
   const [recentRuns, setRecentRuns] = useState<ServerRun[]>([]);
   const [serverPrompts, setServerPrompts] = useState<ServerPrompt[]>([]);
+  // 질문 세트 — 질문 고르기를 세트별로 묶는다. 못 읽으면 없음(묶음 하나로 예전처럼 그린다)
+  const [promptSets, setPromptSets] = useState<PromptSet[] | undefined>(undefined);
   // reloadPrompts() 가 최소 한 번 성공적으로 끝났는지 — 동기화 effect 가 serverPrompts
   // 아직 빈 배열인 최초 렌더 타이밍에 도는 것을 막는 데 쓴다(아래 동기화 effect 참고).
   const [promptsLoaded, setPromptsLoaded] = useState(false);
@@ -246,9 +264,15 @@ export function AutomationServerTab({
 
   const reloadPrompts = useCallback(async () => {
     if (!workspaceId) return;
-    const res = await fetch(`${BP}/api/workspaces/${workspaceId}/prompts`, {
-      credentials: "include",
-    });
+    // 세트 목록도 함께 읽는다 — 실패해도 질문 목록은 그대로 쓴다
+    const [res, setsRes] = await Promise.all([
+      fetch(`${BP}/api/workspaces/${workspaceId}/prompts`, { credentials: "include" }),
+      fetch(`${BP}/api/workspaces/${workspaceId}/prompt-sets`, { credentials: "include" }).catch(() => null),
+    ]);
+    if (setsRes && setsRes.ok) {
+      const setsData = (await setsRes.json().catch(() => null)) as { sets?: PromptSet[] } | null;
+      if (setsData && Array.isArray(setsData.sets)) setPromptSets(setsData.sets);
+    }
     if (!res.ok) return;
     const data = (await res.json()) as { prompts: ServerPrompt[] };
     setServerPrompts(data.prompts);
@@ -306,16 +330,29 @@ export function AutomationServerTab({
     let cancelled = false;
     const sync = async () => {
       const existingTexts = new Set(serverPrompts.map((p) => p.text));
-      for (const p of customPrompts) {
-        if (!p.text?.trim() || cancelled) continue;
-        if (existingTexts.has(p.text)) continue;
-        await fetch(`${BP}/api/workspaces/${workspaceId}/prompts`, {
+      // 그 항목의 세트 번호를 함께 보낸다(계획 D8) — 허브 저장이 실패한 질문도 사용자가 고른 세트로 간다.
+      const post: SyncPost = async (body) => {
+        const res = await fetch(`${BP}/api/workspaces/${workspaceId}/prompts`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ text: p.text, tags: p.tags ?? [] }),
+          body: JSON.stringify(body),
         }).catch(() => null);
-      }
+        if (!res) return { ok: false };
+        if (res.ok) return { ok: true };
+        const errBody = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        return { ok: false, code: typeof errBody?.error === "string" ? errBody.error : undefined };
+      };
+      // 화면에 번호 없이 남은 항목이 서버엔 이미 있으면(이전 동기화가 저장했지만 화면이 못 받은 경우) 바로 맞춘다
+      if (hasUnsyncedLocalIds(customPrompts, existingTexts)) onPromptsSynced?.();
+      // 재시도는 오류 코드로 정한다(P1). 저장이 성공하면 탭을 떠났어도 부모에 알린다(P2-잔여).
+      await runPromptSync({
+        payloads: buildSyncPayloads(customPrompts, existingTexts),
+        post,
+        isCancelled: () => cancelled,
+        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        onSaved: onPromptsSynced,
+      });
       for (const c of competitors) {
         if (!c.name?.trim() || cancelled) continue;
         await fetch(`${BP}/api/workspaces/${workspaceId}/competitors`, {
@@ -334,6 +371,7 @@ export function AutomationServerTab({
 
   async function addSchedule() {
     if (!workspaceId || busy || !newName.trim() || newProviders.length === 0) return;
+    if (newPromptIds.size === 0 && !window.confirm(EMPTY_SELECTION_CONFIRM)) return;
     setBusy(true);
     setMessage("");
     try {
@@ -391,6 +429,7 @@ export function AutomationServerTab({
 
   async function saveEdit(id: string) {
     if (editBusy || !editName.trim() || editProviders.length === 0) return;
+    if (editPromptIds.size === 0 && !window.confirm(EMPTY_SELECTION_CONFIRM)) return;
     setEditBusy(true);
     setMessage("");
     try {
@@ -507,7 +546,8 @@ export function AutomationServerTab({
     return { total, mentioned, avgVisibility };
   }, [recentRuns]);
 
-  const promptCount = serverPrompts.filter((p) => p.active).length;
+  const activePrompts = useMemo(() => serverPrompts.filter((p) => p.active), [serverPrompts]);
+  const promptCount = activePrompts.length;
 
   if (initState === "loading") {
     return (
@@ -737,73 +777,19 @@ export function AutomationServerTab({
                           </div>
 
                           <div>
-                            <div className="mb-1 flex items-center justify-between">
-                              <label className="block text-xs uppercase tracking-wider text-th-text-muted">
-                                실행할 프롬프트
-                              </label>
-                              <div className="flex items-center gap-2 text-xs">
-                                <span className="text-th-text-muted">
-                                  {editPromptIds.size === 0
-                                    ? `전체 ${serverPrompts.filter((p) => p.active).length}개 (선택 0)`
-                                    : `선택 ${editPromptIds.size}/${serverPrompts.filter((p) => p.active).length}`}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setEditPromptIds(
-                                      new Set(serverPrompts.filter((p) => p.active).map((p) => p.id)),
-                                    )
-                                  }
-                                  className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
-                                >
-                                  전체 선택
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setEditPromptIds(new Set())}
-                                  className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
-                                >
-                                  전체 해제
-                                </button>
-                              </div>
-                            </div>
-                            {serverPrompts.filter((p) => p.active).length === 0 ? (
-                              <p className="rounded border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-muted">
-                                활성 프롬프트가 없습니다. Prompt Hub 에서 프롬프트를 먼저 추가하세요.
-                              </p>
-                            ) : (
-                              <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-th-border bg-th-card-alt p-2">
-                                {serverPrompts
-                                  .filter((p) => p.active)
-                                  .map((p) => {
-                                    const checked = editPromptIds.has(p.id);
-                                    return (
-                                      <label
-                                        key={p.id}
-                                        className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-th-card-hover"
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={checked}
-                                          onChange={() => {
-                                            setEditPromptIds((prev) => {
-                                              const next = new Set(prev);
-                                              if (next.has(p.id)) next.delete(p.id);
-                                              else next.add(p.id);
-                                              return next;
-                                            });
-                                          }}
-                                          className="mt-0.5 shrink-0"
-                                        />
-                                        <span className="line-clamp-2 text-th-text">{p.text}</span>
-                                      </label>
-                                    );
-                                  })}
-                              </div>
-                            )}
+                            <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">
+                              실행할 프롬프트
+                            </label>
+                            {/* 세트별 묶음 — 저장된 선택을 그대로 체크해 연다(저장하지 않으면 바뀌지 않는다) */}
+                            <PromptSetPicker
+                              prompts={activePrompts}
+                              promptSets={promptSets}
+                              selected={editPromptIds}
+                              onChange={setEditPromptIds}
+                            />
                             <p className="mt-2 text-xs text-th-text-muted">
                               {editPromptIds.size === 0
-                                ? "빈 선택 상태로 저장하면 활성 프롬프트 전체를 실행합니다."
+                                ? EMPTY_SELECTION_NOTE
                                 : `선택한 ${editPromptIds.size}개 프롬프트만 실행합니다.`}
                             </p>
                           </div>
@@ -899,76 +885,22 @@ export function AutomationServerTab({
           </div>
         </div>
 
-        {/* 실행 대상 프롬프트 선택 — 체크 안 하면 활성 프롬프트 전체 실행 */}
+        {/* 실행 대상 프롬프트 선택 — 세트별 묶음. 체크 안 하면 켜진 질문 전체(모든 세트) 실행 */}
         <div className="mt-3">
-          <div className="mb-1 flex items-center justify-between">
-            <label className="block text-xs uppercase tracking-wider text-th-text-muted">
-              실행할 프롬프트
-            </label>
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-th-text-muted">
-                {newPromptIds.size === 0
-                  ? `전체 ${serverPrompts.filter((p) => p.active).length}개 (선택 0)`
-                  : `선택 ${newPromptIds.size}/${serverPrompts.filter((p) => p.active).length}`}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  const allActive = serverPrompts.filter((p) => p.active).map((p) => p.id);
-                  setNewPromptIds(new Set(allActive));
-                }}
-                className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
-              >
-                전체 선택
-              </button>
-              <button
-                type="button"
-                onClick={() => setNewPromptIds(new Set())}
-                className="rounded border border-th-border px-2 py-0.5 text-th-text-secondary hover:bg-th-card-hover"
-              >
-                전체 해제
-              </button>
-            </div>
-          </div>
-          {serverPrompts.filter((p) => p.active).length === 0 ? (
-            <p className="rounded border border-th-border bg-th-card-alt px-3 py-2 text-xs text-th-text-muted">
-              활성 프롬프트가 없습니다. Prompt Hub 에서 프롬프트를 먼저 추가하세요.
-            </p>
-          ) : (
-            <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-th-border bg-th-card-alt p-2">
-              {serverPrompts
-                .filter((p) => p.active)
-                .map((p) => {
-                  const checked = newPromptIds.has(p.id);
-                  return (
-                    <label
-                      key={p.id}
-                      className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-th-card-hover"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => {
-                          setNewPromptIds((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(p.id)) next.delete(p.id);
-                            else next.add(p.id);
-                            return next;
-                          });
-                        }}
-                        className="mt-0.5 shrink-0"
-                      />
-                      <span className="line-clamp-2 text-th-text">{p.text}</span>
-                    </label>
-                  );
-                })}
-            </div>
-          )}
+          <label className="mb-1 block text-xs uppercase tracking-wider text-th-text-muted">
+            실행할 프롬프트
+          </label>
+          <PromptSetPicker
+            prompts={activePrompts}
+            promptSets={promptSets}
+            selected={newPromptIds}
+            onChange={setNewPromptIds}
+          />
         </div>
 
         <p className="mt-3 text-xs text-th-text-muted">
           {newPromptIds.size === 0
-            ? `활성 프롬프트 ${promptCount}개 전체를 선택한 프로바이더에서 각각 실행합니다.`
+            ? `${EMPTY_SELECTION_NOTE} (지금 ${promptCount}개)`
             : `선택한 ${newPromptIds.size}개 프롬프트만 선택한 프로바이더에서 실행합니다.`}
         </p>
 

@@ -59,6 +59,12 @@ const CLASSIFICATION: Record<string, Rule> = {
     why: "인용 후보 행 캐시 — 목록과 같은 통계 헬퍼 조건(보관 제외 포함)으로 읽는다",
     needs: [STATS_HELPER],
   },
+  // 2026-11-06 — 질문별 AI 답변 보기: 후보는 통계 헬퍼 조건, 찾은 응답 본문 조회도 보관 제외
+  "lib/server/citation-url-answers-handler.ts": {
+    kind: "exclude",
+    why: "질문별 AI 답변 목록 — 후보 행(통계 헬퍼)·응답 본문(보관 제외) 둘 다 보관 응답을 뺀다",
+    needs: [STATS_HELPER, NOT_ARCHIVED(1)],
+  },
   "lib/server/citation-first-seen-loaders.ts": {
     kind: "exclude",
     why: "최초 인용 캐시 로더 — 내 사이트·언급은 통계 헬퍼, 전체 출처는 자체 조건",

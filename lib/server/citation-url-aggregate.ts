@@ -369,6 +369,12 @@ function normPrompt(p: string | null | undefined): string {
   return t ? t : EMPTY_PROMPT_LABEL;
 }
 
+/**
+ * 질문 문구 정규화 — 질문 드릴다운·답변 목록이 **같은 규칙**으로 질문을 맞춰 보게 재노출한다
+ * (2026-11-06 — 질문별 AI 답변 보기). 로직은 normPrompt 하나다.
+ */
+export const normalizePromptText = normPrompt;
+
 /** title 정규화 (null/공백 → 빈 문자열. UI 가 URL 로 fallback) */
 function normTitle(t: string | null | undefined): string {
   return (t ?? "").trim();

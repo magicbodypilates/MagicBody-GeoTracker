@@ -77,7 +77,8 @@ type ServerCompetitor = {
   createdAt: string;
 };
 
-type ServerRun = {
+/** 응답 목록 API(/runs)·질문별 답변 API 가 돌려주는 응답 한 건 */
+export type ServerRun = {
   id: string;
   workspaceId: string;
   scheduleId: string | null;
@@ -391,7 +392,8 @@ export async function loadFromServer(
   return partial;
 }
 
-function scrapeRunFromServer(r: ServerRun): ScrapeRun {
+/** 서버 응답 한 건 → 화면용 ScrapeRun (AI 응답 탭·질문별 답변 보기가 같은 변환을 쓴다) */
+export function scrapeRunFromServer(r: ServerRun): ScrapeRun {
   return {
     id: r.id,
     provider: r.provider as ScrapeRun["provider"],

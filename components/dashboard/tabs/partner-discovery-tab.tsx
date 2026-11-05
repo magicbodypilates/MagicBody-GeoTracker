@@ -71,6 +71,9 @@ type PartnerDiscoveryTabProps = {
   localRuns?: SourceRunLike[];
   /** 처음 필터 — 없으면 기본값(서버: 최근 30일 / 데모: 전체). 화면 회귀 테스트가 기간을 지정할 때 쓴다 */
   initialFilter?: CitationFilter;
+  /** 질문별 AI 답변 카드의 브랜드·경쟁사 강조 (AI 응답 탭과 같은 용어) */
+  brandTerms?: string[];
+  competitorTerms?: string[];
 };
 
 function extractDomain(url: string): string {
@@ -115,6 +118,8 @@ export function PartnerDiscoveryTab({
   dataVersion,
   localRuns,
   initialFilter,
+  brandTerms,
+  competitorTerms,
 }: PartnerDiscoveryTabProps) {
   const [filter, setFilter] = useState<CitationFilter>(
     () =>
@@ -323,10 +328,25 @@ export function PartnerDiscoveryTab({
       <CitationFilterBar value={filter} onChange={setFilter} />
 
       {/* ── 내 사이트 인용 URL 전수 섹션 (서버 lazy fetch · 기본 접힘) ── */}
-      {workspaceId && <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" filter={filter} />}
+      {workspaceId && (
+        <BrandCitationUrls
+          workspaceId={workspaceId}
+          responseTab="auto-info"
+          filter={filter}
+          brandTerms={brandTerms}
+          competitorTerms={competitorTerms}
+        />
+      )}
       {/* ── 브랜드 언급 출처(제3자) 전수 섹션 — 내 사이트 인용과 별개 독립 항목 ── */}
       {workspaceId && (
-        <BrandCitationUrls workspaceId={workspaceId} responseTab="auto-info" mode="mention" filter={filter} />
+        <BrandCitationUrls
+          workspaceId={workspaceId}
+          responseTab="auto-info"
+          mode="mention"
+          filter={filter}
+          brandTerms={brandTerms}
+          competitorTerms={competitorTerms}
+        />
       )}
 
       {sourcesError && (

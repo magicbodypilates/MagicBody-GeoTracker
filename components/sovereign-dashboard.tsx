@@ -2596,6 +2596,8 @@ ${exampleJson}
           workspaceId={serverWsId ?? undefined}
           dataVersion={runsVersion}
           localRuns={demoMode ? state.runs : undefined}
+          brandTerms={getBrandTerms()}
+          competitorTerms={getCompetitorTerms()}
         />
       );
     }

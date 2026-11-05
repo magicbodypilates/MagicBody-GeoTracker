@@ -4,8 +4,11 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  DEFAULT_ANSWER_PERIOD,
   DEFAULT_CITATION_FILTER,
+  citationAnswerParams,
   citationFilterParams,
+  describeCitationAnswerPeriod,
   describeCitationFilter,
   isNewFlagAvailable,
   resolveCitationRange,
@@ -43,5 +46,30 @@ describe("citation-filters", () => {
   it("shiftDateKey 는 월·연 경계를 넘는다", () => {
     expect(shiftDateKey("2026-03-01", -1)).toBe("2026-02-28");
     expect(shiftDateKey("2026-12-31", 1)).toBe("2027-01-01");
+  });
+});
+
+describe("질문별 AI 답변 — 답변 기간 (2026-11-06)", () => {
+  it("기본은 최근 7일(오늘 포함) — 탭 상단 기간과 별개", () => {
+    expect(DEFAULT_ANSWER_PERIOD).toEqual({ preset: "7", custom: null });
+    expect(citationAnswerParams(DEFAULT_ANSWER_PERIOD, undefined, TODAY)).toEqual({ from: "2026-10-30", to: TODAY });
+  });
+  it("AI 모델은 탭 상단 값을 따른다", () => {
+    expect(citationAnswerParams({ preset: "30", custom: null }, "gemini", TODAY)).toEqual({
+      from: "2026-10-07",
+      to: TODAY,
+      provider: "gemini",
+    });
+  });
+  it("전체는 날짜를 보내지 않는다 · 직접 선택은 그 구간", () => {
+    expect(citationAnswerParams({ preset: "all", custom: null }, undefined, TODAY)).toEqual({});
+    expect(
+      citationAnswerParams({ preset: "custom", custom: { from: "2026-09-01", to: "2026-09-10" } }, "chatgpt", TODAY),
+    ).toEqual({ from: "2026-09-01", to: "2026-09-10", provider: "chatgpt" });
+  });
+  it("설명 문구", () => {
+    expect(describeCitationAnswerPeriod(DEFAULT_ANSWER_PERIOD, undefined, TODAY)).toBe(
+      "최근 7일(2026-10-30 ~ 2026-11-05) · 전체 AI 모델",
+    );
   });
 });

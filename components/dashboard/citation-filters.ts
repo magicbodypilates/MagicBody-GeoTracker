@@ -98,6 +98,42 @@ export function describeCitationFilter(filter: CitationFilter, todayKst: string)
   return `${periodText} · ${modelText}`;
 }
 
+/* ── 질문별 AI 답변 보기 — 답변 기간 (2026-11-06) ───────────────────────────────────────────────
+ * 답변 목록의 기간은 탭 상단 기간과 **별개**다(기본 최근 7일). AI 모델은 탭 상단을 그대로 따른다.
+ * 기간 규칙(KST 날짜 · 오늘 포함 최근 N일 · 직접 선택)은 위 resolveCitationRange 를 그대로 쓴다.
+ */
+export type CitationAnswerPeriod = { preset: CitationPeriodPreset; custom: CitationDateRange | null };
+
+/** 답변 목록을 처음 열었을 때 — 최근 7일 */
+export const DEFAULT_ANSWER_PERIOD: CitationAnswerPeriod = { preset: "7", custom: null };
+
+function answerFilter(period: CitationAnswerPeriod, tabProvider: string | undefined): CitationFilter {
+  return {
+    preset: period.preset,
+    custom: period.custom,
+    provider: (tabProvider ?? "all") as CitationFilter["provider"],
+    newOnly: false,
+  };
+}
+
+/** 답변 목록 서버 쿼리 — 답변 기간(from/to, 전체면 없음) + 탭 상단 AI 모델 */
+export function citationAnswerParams(
+  period: CitationAnswerPeriod,
+  tabProvider: string | undefined,
+  todayKst: string,
+): Record<string, string> {
+  return citationFilterParams(answerFilter(period, tabProvider), todayKst);
+}
+
+/** 답변 기간 설명 — 예: "최근 7일(2026-10-31 ~ 2026-11-06) · 전체 AI 모델" */
+export function describeCitationAnswerPeriod(
+  period: CitationAnswerPeriod,
+  tabProvider: string | undefined,
+  todayKst: string,
+): string {
+  return describeCitationFilter(answerFilter(period, tabProvider), todayKst);
+}
+
 /** 요청을 구분하는 짧은 문자열 — 필터가 바뀌면 목록 행 상태(펼침·추가 질문)를 새로 시작하게 key 로 쓴다 */
 export function citationFilterKey(filter: CitationFilter, todayKst: string): string {
   return JSON.stringify(citationFilterParams(filter, todayKst, { includeNewOnly: true }));

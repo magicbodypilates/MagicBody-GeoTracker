@@ -9,6 +9,7 @@ import {
   type CitationFilter,
 } from "@/components/dashboard/citation-filters";
 import { sectionDisplay, sectionRequestKey, type SectionMeta } from "@/components/dashboard/brand-citation-section-state";
+import { PromptAnswers } from "@/components/dashboard/citation-prompt-answers";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -29,6 +30,7 @@ const PROVIDER_COLORS: Record<Provider, string> = {
  * 전수 노출. 기간·AI 모델·신규만 보기 조건은 탭 상단 CitationFilterBar 가 정해 filter prop 으로 내려준다
  * (2026-11-05 — 이전엔 기간 선택과 무관한 전체 기간 누적이었다).
  * URL별로 인용한 질문(프롬프트) 드릴다운. 기본 접힘 + "더 보기" 페이지네이션.
+ * 질문 줄을 누르면 그 질문에서 이 URL 을 인용한 AI 답변 목록이 펼쳐진다(2026-11-06 — citation-prompt-answers.tsx).
  *
  * 공유 컴포넌트 — 여러 탭(인용 출처/PartnerDiscoveryTab 등)에서 재사용.
  * /stats/citations/urls · urls/prompts API 를 lazy fetch (펼칠 때만).
@@ -124,6 +126,9 @@ type PromptsResponse = {
   nextCursor: string | null;
 };
 
+/** 강조 용어 기본값 — 매 렌더 새 배열을 만들지 않게 */
+const EMPTY_TERMS: string[] = [];
+
 /** provider 문자열 → 알려진 Provider 뱃지 or 회색 fallback (unknown 안전) */
 function ProviderChip({ provider }: { provider: string }) {
   const known = (VISIBLE_PROVIDERS as string[]).includes(provider)
@@ -150,6 +155,8 @@ function BrandUrlRow({
   filterParams,
   pathSeg,
   showTitle,
+  brandTerms,
+  competitorTerms,
 }: {
   item: BrandCitationUrlItem;
   workspaceId: string;
@@ -161,8 +168,21 @@ function BrandUrlRow({
   pathSeg: "urls" | "brand-mentions";
   /** 대표 제목(헤드라인) 노출 여부 */
   showTitle: boolean;
+  /** 답변 카드의 브랜드·경쟁사 강조용 */
+  brandTerms: string[];
+  competitorTerms: string[];
 }) {
   const [open, setOpen] = useState(false);
+  /** 답변 목록을 펼친 질문(promptText) — 여러 개를 동시에 펼칠 수 있다 */
+  const [openPrompts, setOpenPrompts] = useState<Set<string>>(() => new Set());
+  const togglePrompt = useCallback((text: string) => {
+    setOpenPrompts((prev) => {
+      const next = new Set(prev);
+      if (next.has(text)) next.delete(text);
+      else next.add(text);
+      return next;
+    });
+  }, []);
   const [extraPrompts, setExtraPrompts] = useState<UrlPromptRef[]>([]);
   const [promptCursor, setPromptCursor] = useState<string | null>(null);
   const [promptCount, setPromptCount] = useState<number | null>(null);
@@ -279,23 +299,54 @@ function BrandUrlRow({
           {allPrompts.length === 0 ? (
             <div className="text-xs italic text-th-text-muted">질문 정보가 없습니다.</div>
           ) : (
-            allPrompts.map((p, i) => (
-              <div
-                key={`${p.promptText}-${i}`}
-                className="rounded-md border border-th-border bg-th-card-alt px-2.5 py-1.5"
-              >
-                <div className="text-xs text-th-text">{p.promptText}</div>
-                <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                  <span className="text-[10px] font-semibold text-th-text-secondary">
-                    {p.count}회
-                  </span>
-                  {p.providers.map((pv) => (
-                    <ProviderChip key={pv} provider={pv} />
-                  ))}
-                  <span className="text-[10px] text-th-text-muted">{toKstDateKey(p.lastSeen)}</span>
+            allPrompts.map((p, i) => {
+              const promptOpen = openPrompts.has(p.promptText);
+              return (
+                <div
+                  key={`${p.promptText}-${i}`}
+                  className="rounded-md border border-th-border bg-th-card-alt px-2.5 py-1.5"
+                >
+                  <button
+                    type="button"
+                    onClick={() => togglePrompt(p.promptText)}
+                    aria-expanded={promptOpen}
+                    title={promptOpen ? "AI 답변 접기" : "이 질문에 AI가 어떻게 답했는지 보기"}
+                    className="flex w-full items-start gap-1.5 rounded text-left hover:bg-th-card-hover"
+                  >
+                    <span className="mt-0.5 shrink-0 text-[10px] text-th-text-muted">{promptOpen ? "▼" : "▶"}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-xs text-th-text">{p.promptText}</span>
+                      <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span className="whitespace-nowrap text-[10px] font-semibold text-th-text-secondary">
+                          {p.count}회
+                        </span>
+                        {p.providers.map((pv) => (
+                          <ProviderChip key={pv} provider={pv} />
+                        ))}
+                        <span className="whitespace-nowrap text-[10px] text-th-text-muted">{toKstDateKey(p.lastSeen)}</span>
+                        <span className="whitespace-nowrap text-[10px] font-medium text-th-text-accent">
+                          {promptOpen ? "답변 접기" : "AI 답변 보기"}
+                        </span>
+                      </span>
+                    </span>
+                  </button>
+                  {promptOpen && (
+                    <PromptAnswers
+                      workspaceId={workspaceId}
+                      pathSeg={pathSeg}
+                      canonicalUrlKey={item.canonicalUrlKey}
+                      promptText={p.promptText}
+                      auto={auto}
+                      branded={branded}
+                      tabProvider={filterParams.provider}
+                      lastSeen={p.lastSeen}
+                      brandTerms={brandTerms}
+                      competitorTerms={competitorTerms}
+                    />
+                  )}
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
           {promptError && (
             <div className="text-xs text-th-danger">질문 로드 실패: {promptError}</div>
@@ -320,6 +371,8 @@ export function BrandCitationUrls({
   responseTab = "auto-info",
   mode = "owned",
   filter = DEFAULT_CITATION_FILTER,
+  brandTerms = EMPTY_TERMS,
+  competitorTerms = EMPTY_TERMS,
 }: {
   workspaceId: string;
   /** 응답 유형 필터 — 없으면 "auto-info"(일반 검색·자동) 기준 */
@@ -328,6 +381,9 @@ export function BrandCitationUrls({
   mode?: SectionMode;
   /** 탭 상단 공통 필터(기간·AI 모델·신규만 보기). 없으면 기본값(최근 30일 · 전체 모델) */
   filter?: CitationFilter;
+  /** 질문별 AI 답변 카드의 브랜드·경쟁사 강조 — 없으면 강조 없이 보인다 */
+  brandTerms?: string[];
+  competitorTerms?: string[];
 }) {
   const cfg = MODE_CONFIG[mode];
   const todayKst = toKstDateKey(new Date());
@@ -532,6 +588,8 @@ export function BrandCitationUrls({
                     filterParams={filterParams}
                     pathSeg={cfg.pathSeg}
                     showTitle={cfg.showTitle}
+                    brandTerms={brandTerms}
+                    competitorTerms={competitorTerms}
                   />
                 ))}
               </div>

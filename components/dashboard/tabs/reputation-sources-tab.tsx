@@ -184,18 +184,25 @@ function ProviderBadge({ provider }: { provider: Provider }) {
   );
 }
 
-function ModelResponseCard({
+/**
+ * AI 응답 카드 — AI 응답 탭과 인용 출처 탭의 「질문별 AI 답변 보기」(brand-citation-urls.tsx)가 함께 쓴다.
+ * wrapHeader 는 좁은 자리(카드 안 카드)에서 머리줄 항목을 묶음 단위로 다음 줄로 넘기고 글자 단위 줄바꿈을 막는다.
+ * 넘기지 않으면(AI 응답 탭) 기존 모양 그대로다.
+ */
+export function ModelResponseCard({
   run,
   brandTerms,
   competitorTerms,
   delta,
   onDelete,
+  wrapHeader = false,
 }: {
   run: ScrapeRun;
   brandTerms: string[];
   competitorTerms: string[];
   delta?: number | null;
   onDelete?: () => void;
+  wrapHeader?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const rawDisplay = normalizeAnswerForDisplay(run.answer ?? "");
@@ -241,7 +248,14 @@ function ModelResponseCard({
       }
     >
       {hasAnyBrandSignal && (
-        <div className="flex flex-wrap items-center gap-1.5 border-b border-th-brand-bg/30 bg-th-brand-bg/5 px-4 py-1.5 text-xs">
+        <div
+          className={
+            wrapHeader
+              ? // 좁은 자리: 꼬리표 이름(「AI 본문 인용」 등)은 한 덩어리로 두고, 뒤의 설명만 다음 줄로 넘겨 낱말 단위로 줄바꿈
+                "flex flex-wrap items-center gap-1.5 border-b border-th-brand-bg/30 bg-th-brand-bg/5 px-3 py-1.5 text-xs [&>span]:max-w-full [&>span]:flex-wrap [&>span]:whitespace-nowrap [&>span>span:last-child]:min-w-0 [&>span>span:last-child]:whitespace-normal [&>span>span:last-child]:break-keep"
+              : "flex flex-wrap items-center gap-1.5 border-b border-th-brand-bg/30 bg-th-brand-bg/5 px-4 py-1.5 text-xs"
+          }
+        >
           {hasMainMention && (
             <span
               className="inline-flex items-center gap-1 rounded-full border border-th-success/50 bg-th-success-soft px-2 py-0.5 font-semibold text-th-success"
@@ -288,10 +302,21 @@ function ModelResponseCard({
       <div className="flex items-center hover:bg-th-card-hover rounded-t-lg">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex flex-1 items-center gap-3 px-4 py-3 text-left"
+          className={
+            wrapHeader
+              ? // 좁은 자리: 모델·점수·감정·자동·출처 수·날짜를 한 줄 흐름으로 두고 묶음 단위로 다음 줄로 넘긴다
+                "flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2.5 text-left [&_span]:whitespace-nowrap"
+              : "flex flex-1 items-center gap-3 px-4 py-3 text-left"
+          }
         >
           <ProviderBadge provider={run.provider} />
-          <div className="flex flex-1 items-center gap-3">
+          <div
+            className={
+              wrapHeader
+                ? "contents"
+                : "flex flex-1 items-center gap-3"
+            }
+          >
             <span className="text-xs text-th-text-muted">
               점수: <span className="font-semibold text-th-text">{run.visibilityScore}</span>/100
             </span>

@@ -71,6 +71,25 @@ const expandedRows = [
   },
 ];
 
+/** 트랜잭션 안에서 실행된 SQL — 정렬 방향(M3) 확인용 */
+const executedSql: unknown[] = [];
+const firstSeenGetMock = vi.fn();
+// ── 모킹: 인용 후보 행 캐시 (2026-11-06) — 기본은 실패시켜 기존 SQL 경로를 검증하고, 캐시 경로는 별도 테스트
+const rowsGetMock = vi.fn();
+vi.mock("@/lib/server/citation-rows-cache", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/server/citation-rows-cache")>(
+    "@/lib/server/citation-rows-cache",
+  );
+  return { ...actual, getCitationRowsCache: () => ({ get: rowsGetMock }) };
+});
+
+vi.mock("@/lib/server/citation-first-seen", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/server/citation-first-seen")>(
+    "@/lib/server/citation-first-seen",
+  );
+  return { ...actual, getFirstSeenCache: () => ({ get: firstSeenGetMock }) };
+});
+
 vi.mock("@/lib/server/db", async () => {
   const actual = await vi.importActual<typeof import("@/drizzle/schema")>("@/drizzle/schema");
   // where() 결과 — brandConfig 조회는 .limit() 로, 소유영상 로더는 await(thenable, 빈 배열)로 소비.
@@ -89,8 +108,9 @@ vi.mock("@/lib/server/db", async () => {
       transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
         let call = 0;
         const tx = {
-          execute: async () => {
+          execute: async (q: unknown) => {
             call += 1;
+            executedSql.push(q);
             return call === 1 ? [] : expandedRows;
           },
         };
@@ -112,6 +132,8 @@ const ctx = { params: Promise.resolve({ id: "ws-1" }) };
 
 beforeEach(() => {
   getSessionMock.mockReset();
+  rowsGetMock.mockReset();
+  rowsGetMock.mockRejectedValue(new Error("rows cache off in test"));
   assertAccessMock.mockReset();
   assertAccessMock.mockImplementation(async (_wsId, s) => {
     if (!s) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -155,5 +177,47 @@ describe("/api/workspaces/[id]/stats/citations/brand-mentions 권한 게이트",
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe("invalid_cursor");
+  });
+});
+
+describe("검수 1회차 — 기간 검색 · 상한 정렬", () => {
+  it("M3: 상한에 닿으면 최근 행부터 남긴다 (created_at 내림차순)", async () => {
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    executedSql.length = 0;
+    await GET(makeRequest("?auto=true&branded=false"), ctx);
+    const dialect = new PgDialect();
+    const text = executedSql
+      .map((q) => dialect.sqlToQuery(q as Parameters<typeof dialect.sqlToQuery>[0]).sql)
+      .find((t) => /jsonb_array_elements/.test(t));
+    expect(text).toMatch(/ORDER BY "runs"\."created_at" DESC, "runs"\."id" DESC/);
+  });
+
+  it("C4: 신규만 보기 + 최초 인용 계산 실패 → 빈 목록 + 실패 상태", async () => {
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    firstSeenGetMock.mockReset();
+    firstSeenGetMock.mockRejectedValue(new Error("timeout"));
+    const res = await GET(makeRequest("?from=2026-06-01&to=2026-06-30&newOnly=true"), ctx);
+    const body = await res.json();
+    expect(body.newStatus).toBe("unavailable");
+    expect(body.urls).toEqual([]);
+  });
+});
+
+describe("인용 후보 행 캐시 경로 (2026-11-06)", () => {
+  it("캐시가 있으면 DB 를 펼치지 않고 같은 결과를 기간·모델로 걸러 답한다(상한 없음)", async () => {
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    const viaSql = await (await GET(makeRequest("?auto=true&branded=false"), ctx)).json();
+    rowsGetMock.mockReset();
+    rowsGetMock.mockResolvedValue({ index: [...expandedRows], action: "hit" });
+    const viaCache = await (await GET(makeRequest("?auto=true&branded=false"), ctx)).json();
+    expect(viaCache.urls).toEqual(viaSql.urls);
+    expect(viaCache.uniqueUrlCount).toBe(viaSql.uniqueUrlCount);
+    expect(viaCache.capped).toBe(false);
+    // 기간 밖 · 다른 모델 행은 메모리에서 빠진다
+    firstSeenGetMock.mockReset();
+    firstSeenGetMock.mockResolvedValue({ index: new Map(), action: "hit" });
+    const none = await (await GET(makeRequest("?from=2026-01-01&to=2026-01-31"), ctx)).json();
+    expect(none.urls).toEqual([]);
   });
 });

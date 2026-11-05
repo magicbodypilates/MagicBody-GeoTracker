@@ -32,6 +32,7 @@ import type {
 
 import { WORKSPACE_ID_KEY } from "@/lib/client/constants";
 import { kstWindowStartUtcIso } from "@/lib/client/date-kst";
+import { mapWithConcurrency } from "@/lib/client/runs-incremental";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -43,6 +44,8 @@ export const MAX_RUNS_WINDOW_DAYS = 90;
 const RUNS_PAGE_SIZE = 500;
 /** 페이지네이션 안전 상한 — 무한 루프 방지(최대 RUNS_PAGE_SIZE × 이 값 행). */
 const MAX_RUNS_PAGES = 60;
+/** 응답 목록 페이지 동시 요청 수 — 첫 페이지로 전체 건수를 안 뒤 나머지를 이만큼씩 동시에 받는다 */
+const RUNS_PAGE_CONCURRENCY = 4;
 
 /* ==========================================================
  * 서버 타입 (DB 스키마와 1:1)
@@ -213,46 +216,105 @@ export async function ensureWorkspace(opts: {
  * 전체 로드 — AppState 조립
  * ========================================================== */
 
+/** 기간 창(일)을 허용 범위로 맞춘다 — 기본 30, 상한 90 */
+function clampWindowDays(days: number): number {
+  return Math.min(Math.max(Math.floor(days) || DEFAULT_RUNS_WINDOW_DAYS, 1), MAX_RUNS_WINDOW_DAYS);
+}
+
+/** 응답 목록 창 시작 시각(ISO) — KST 기준 최근 days 일의 첫날 00:00 */
+export function runsWindowStartIso(days: number): string {
+  return kstWindowStartUtcIso(clampWindowDays(days));
+}
+
+/**
+ * from 이후 runs 를 페이지 단위로 전부 받는다.
+ *
+ * 순서(2026-11-05 — 불러오기 속도 개선):
+ *   1) 첫 페이지(offset 0)를 받아 전체 건수(total)와 가장 최근 행 시각을 안다.
+ *   2) 나머지 페이지를 RUNS_PAGE_CONCURRENCY(4)개씩 동시에 받는다. 이때 `to` 를
+ *      "첫 페이지의 가장 최근 행 + 1ms" 로 고정해, 받는 도중 새 행이 들어와도 페이지 경계가 밀리지 않게 한다
+ *      (서버는 created_at ≤ to 만 센다 — 첫 페이지 행은 모두 포함된다).
+ *      +1ms 인 이유: 응답의 시각은 밀리초까지라 DB 의 마이크로초 값이 그보다 클 수 있다. 그대로 쓰면 가장 최근 행
+ *      몇 개가 빠져 뒤 페이지가 그만큼 앞당겨지고 경계의 행을 놓친다.
+ *   3) 마지막 페이지가 가득 차 있으면(건수 계산 이후 과거 시각 행이 들어온 경우 등) 짧은 페이지가 나올 때까지
+ *      순서대로 더 받는다.
+ *   4) id 로 중복을 걸러 합친다(페이지 경계에서 같은 행이 두 번 올 수 있다).
+ */
+async function fetchRunsPaged(wsId: string, fromIso: string): Promise<ServerRun[]> {
+  const fromParam = encodeURIComponent(fromIso);
+  const base = `${BP}/api/workspaces/${wsId}/runs?limit=${RUNS_PAGE_SIZE}&from=${fromParam}`;
+
+  const first = await j<{ runs: ServerRun[]; total: number }>(`${base}&offset=0`);
+  const all: ServerRun[] = [];
+  const seen = new Set<string>();
+  const push = (rows: ServerRun[]) => {
+    for (const r of rows) {
+      if (seen.has(r.id)) continue; // 페이지 경계 중복 제거
+      seen.add(r.id);
+      all.push(r);
+    }
+  };
+  push(first.runs);
+  if (first.runs.length < RUNS_PAGE_SIZE) return all;
+
+  let newestMs = 0;
+  for (const r of first.runs) {
+    const t = Date.parse(r.createdAt);
+    if (!Number.isNaN(t) && t > newestMs) newestMs = t;
+  }
+  const toParam = newestMs > 0 ? `&to=${encodeURIComponent(new Date(newestMs + 1).toISOString())}` : "";
+
+  const total = typeof first.total === "number" ? first.total : 0;
+  const pageCount = Math.min(Math.max(Math.ceil(total / RUNS_PAGE_SIZE), 1), MAX_RUNS_PAGES);
+  const offsets: number[] = [];
+  for (let page = 1; page < pageCount; page++) offsets.push(page * RUNS_PAGE_SIZE);
+
+  const pages = await mapWithConcurrency(offsets, RUNS_PAGE_CONCURRENCY, (offset) =>
+    j<{ runs: ServerRun[]; total: number }>(`${base}&offset=${offset}${toParam}`).then((r) => r.runs),
+  );
+  for (const rows of pages) push(rows);
+
+  // 마지막 페이지가 가득 찼으면 남은 행이 있을 수 있다 — 짧은 페이지가 나올 때까지 이어 받는다
+  let lastLen = pages.length > 0 ? pages[pages.length - 1].length : first.runs.length;
+  let page = pageCount;
+  while (lastLen >= RUNS_PAGE_SIZE && page < MAX_RUNS_PAGES) {
+    const { runs } = await j<{ runs: ServerRun[]; total: number }>(
+      `${base}&offset=${page * RUNS_PAGE_SIZE}${toParam}`,
+    );
+    push(runs);
+    lastLen = runs.length;
+    page += 1;
+  }
+  return all;
+}
+
 /**
  * runs 를 날짜 윈도우(KST 기준 최근 days 일) + 페이지네이션으로 전부 로드.
  *
  * 기존엔 `?limit=500` 단일 페이지만 받아 ~104~200행/일 기준 2.5~5일치만 보였다.
  * AI 응답·가시성 분석 탭이 30일(기본)치를 빠짐없이 보려면 total 까지 반복 fetch 해야 한다.
- *
- * 페이지 경계 안정성:
- *   - 서버가 `createdAt desc, id desc` 안정 정렬을 보장(한 슬롯 4 provider 가 동일초 createdAt).
- *   - 그래도 폴링 중 신규 insert 로 offset 이 밀릴 수 있어, id 기준 dedup 으로 중복 제거.
+ * 페이지 받는 방식(동시 요청·경계 고정·중복 제거)은 fetchRunsPaged 참고.
  *
  * @param wsId  워크스페이스 ID
  * @param days  조회 윈도우(일). 기본 30, 상한 90.
  */
 async function fetchRunsWindow(wsId: string, days: number): Promise<ServerRun[]> {
-  const windowDays = Math.min(
-    Math.max(Math.floor(days) || DEFAULT_RUNS_WINDOW_DAYS, 1),
-    MAX_RUNS_WINDOW_DAYS,
-  );
-  const fromIso = kstWindowStartUtcIso(windowDays);
-  const fromParam = encodeURIComponent(fromIso);
+  return fetchRunsPaged(wsId, runsWindowStartIso(days));
+}
 
-  const all: ServerRun[] = [];
-  const seen = new Set<string>();
-  let offset = 0;
+/**
+ * 응답 목록만 전체 다시 받기 — 60초 재조회·탭 전환·변경 작업 뒤에 쓴다.
+ * (loadFromServer 는 워크스페이스·질문·경쟁사·감사 기록까지 함께 받는데, 재조회 때는 응답 목록만 쓰였다.)
+ */
+export async function fetchRunsOnly(wsId: string, days: number): Promise<ScrapeRun[]> {
+  const runs = await fetchRunsWindow(wsId, days);
+  return runs.map((r) => scrapeRunFromServer(r));
+}
 
-  for (let page = 0; page < MAX_RUNS_PAGES; page++) {
-    const { runs, total } = await j<{ runs: ServerRun[]; total: number }>(
-      `${BP}/api/workspaces/${wsId}/runs?limit=${RUNS_PAGE_SIZE}&offset=${offset}&from=${fromParam}`,
-    );
-    for (const r of runs) {
-      if (seen.has(r.id)) continue; // 페이지 경계 중복 제거
-      seen.add(r.id);
-      all.push(r);
-    }
-    offset += RUNS_PAGE_SIZE;
-    // 마지막 페이지 판정: 받은 행이 페이지 크기 미만이거나, 누적이 total 이상.
-    if (runs.length < RUNS_PAGE_SIZE) break;
-    if (typeof total === "number" && all.length >= total) break;
-  }
-  return all;
+/** 응답 목록 증분 — sinceIso 이후(포함) 행만. 합치기는 runs-incremental.ts 의 mergeRunsIncremental */
+export async function fetchRunsSince(wsId: string, sinceIso: string): Promise<ScrapeRun[]> {
+  const runs = await fetchRunsPaged(wsId, sinceIso);
+  return runs.map((r) => scrapeRunFromServer(r));
 }
 
 /**
@@ -464,8 +526,12 @@ export async function updateCompetitor(
   });
 }
 
-export async function appendRun(wsId: string, run: ScrapeRun): Promise<void> {
-  await j(`${BP}/api/workspaces/${wsId}/runs`, {
+/**
+ * 응답 1건 저장. 저장된 행의 서버 id 를 돌려준다(없으면 null) — 화면의 id 없는 수동 실행 행에 붙여,
+ * 이후 증분 재조회가 같은 행을 다른 줄로 보지 않게 한다(2026-11-05 검수 C1).
+ */
+export async function appendRun(wsId: string, run: ScrapeRun): Promise<string | null> {
+  const res = await j<{ run?: { id?: string } } | undefined>(`${BP}/api/workspaces/${wsId}/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -486,6 +552,7 @@ export async function appendRun(wsId: string, run: ScrapeRun): Promise<void> {
       createdAt: run.createdAt,
     }),
   });
+  return typeof res?.run?.id === "string" ? res.run.id : null;
 }
 
 /* ==========================================================

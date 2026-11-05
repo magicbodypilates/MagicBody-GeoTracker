@@ -81,6 +81,26 @@ let ownedMetaRows: Array<{ active_count: number; last_synced_at: string | null }
 // 트랜잭션 내부 tx.execute 호출 횟수 — 유튜브 쿼리 실행 여부 회귀 검증용(reviewer HIGH).
 // SET LOCAL(1) + 브랜드 쿼리(1) = 2. 소유 영상이 있으면 유튜브 쿼리(1)가 더해져 3.
 let txExecuteCalls = 0;
+/** 트랜잭션 안에서 실행된 SQL — 정렬 방향(M3) 확인용 */
+const executedSql: unknown[] = [];
+
+// ── 모킹: 최초 인용 캐시 — 기간 검색 테스트에서 성공·실패를 주입한다(검수 C4). 전체 기간 요청은 부르지 않는다.
+const firstSeenGetMock = vi.fn();
+// ── 모킹: 인용 후보 행 캐시 (2026-11-06) — 기본은 실패시켜 기존 SQL 경로를 검증하고, 캐시 경로는 별도 테스트
+const rowsGetMock = vi.fn();
+vi.mock("@/lib/server/citation-rows-cache", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/server/citation-rows-cache")>(
+    "@/lib/server/citation-rows-cache",
+  );
+  return { ...actual, getCitationRowsCache: () => ({ get: rowsGetMock }) };
+});
+
+vi.mock("@/lib/server/citation-first-seen", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/server/citation-first-seen")>(
+    "@/lib/server/citation-first-seen",
+  );
+  return { ...actual, getFirstSeenCache: () => ({ get: firstSeenGetMock }) };
+});
 
 vi.mock("@/lib/server/db", async () => {
   const actual = await vi.importActual<typeof import("@/drizzle/schema")>("@/drizzle/schema");
@@ -105,9 +125,10 @@ vi.mock("@/lib/server/db", async () => {
         // 실패하므로(B-1), 컴파일 단정 테스트가 별도로 이를 고정한다.
         let call = 0;
         const tx = {
-          execute: async () => {
+          execute: async (q: unknown) => {
             call += 1;
             txExecuteCalls += 1;
+            executedSql.push(q);
             return call === 1 ? [] : txRows;
           },
         };
@@ -136,6 +157,10 @@ beforeEach(() => {
   ownedVideoRows = [];
   ownedMetaRows = [{ active_count: 0, last_synced_at: null }];
   txExecuteCalls = 0; // 트랜잭션 execute 호출 카운터 리셋
+  executedSql.length = 0;
+  firstSeenGetMock.mockReset();
+  rowsGetMock.mockReset();
+  rowsGetMock.mockRejectedValue(new Error("rows cache off in test"));
   _clearOwnedVideoCache(); // 소유영상 로더 TTL 캐시 초기화 (테스트 간 누수 방지)
   // 기본: assertWorkspaceAccess 는 원본과 동일한 순수 분기 재현
   assertAccessMock.mockImplementation(async (_wsId, s) => {
@@ -235,8 +260,9 @@ describe("/api/workspaces/[id]/stats/citations/urls 권한 게이트", () => {
     // capped 분리 노출(관측성)
     expect("cappedBrand" in body).toBe(true);
     expect("cappedYoutube" in body).toBe(true);
-    // 소유 영상이 있으므로 유튜브 superset 쿼리도 실행: SET LOCAL(1)+브랜드(1)+유튜브(1) = 3.
-    expect(txExecuteCalls).toBe(3);
+    // 소유 영상이 있으므로 유튜브 superset 쿼리도 실행. 2026-11-05 부터 두 쿼리는 각자 트랜잭션으로 동시에 돈다:
+    // [SET LOCAL(1)+브랜드(1)] + [SET LOCAL(1)+유튜브(1)] = 4.
+    expect(txExecuteCalls).toBe(4);
   });
 
   it("소유 영상 빈 Set → 유튜브 쿼리 미실행 + cappedYoutube=false + 브랜드 단일 경로와 동일 (reviewer HIGH)", async () => {
@@ -260,5 +286,60 @@ describe("/api/workspaces/[id]/stats/citations/urls 권한 게이트", () => {
     expect(body.nextCursor).toBeNull();
     // 소유 없음 신선도 meta
     expect(body.ownedVideos.count).toBe(0);
+  });
+});
+
+describe("검수 1회차 — 기간 검색 · 상한 정렬", () => {
+  it("M3: 행 상한에 닿으면 최근 행부터 남기도록 created_at 내림차순으로 자른다", async () => {
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    const res = await GET(makeRequest("?auto=true&branded=false"), ctx);
+    expect(res.status).toBe(200);
+    const dialect = new PgDialect();
+    const expandSql = executedSql
+      .map((q) => dialect.sqlToQuery(q as Parameters<typeof dialect.sqlToQuery>[0]).sql)
+      .find((t) => /jsonb_array_elements/.test(t));
+    expect(expandSql).toMatch(/ORDER BY "runs"\."created_at" DESC, "runs"\."id" DESC/);
+  });
+
+  it("C4: 신규만 보기인데 최초 인용 계산이 실패하면 거르지 않은 목록 대신 빈 목록 + 실패 상태", async () => {
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    firstSeenGetMock.mockRejectedValue(new Error("statement timeout"));
+    const res = await GET(makeRequest("?from=2026-06-01&to=2026-06-30&newOnly=true"), ctx);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.newOnly).toBe(true);
+    expect(body.newStatus).toBe("unavailable");
+    expect(body.urls).toEqual([]);
+    expect(body.uniqueUrlCount).toBe(0);
+  });
+
+  it("신규만 보기 + 계산 성공이면 신규만 남는다 (캐시에 없는 주소 = 신규)", async () => {
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    const { emptyFirstSeenIndex } = await import("@/lib/server/citation-first-seen");
+    firstSeenGetMock.mockResolvedValue({ index: emptyFirstSeenIndex(), action: "hit" });
+    const res = await GET(makeRequest("?from=2026-06-01&to=2026-06-30&newOnly=true"), ctx);
+    const body = await res.json();
+    expect(body.newStatus).toBe("ok");
+    expect(body.urls).toHaveLength(1);
+    expect(body.urls[0].isNew).toBe(true);
+  });
+});
+
+describe("인용 후보 행 캐시 경로 (2026-11-06)", () => {
+  it("캐시가 있으면 DB 를 펼치지 않고 같은 결과를 기간·모델로 걸러 답한다(상한 없음)", async () => {
+    getSessionMock.mockResolvedValue({ kind: "admin", role: 0 });
+    const viaSql = await (await GET(makeRequest("?auto=true&branded=false"), ctx)).json();
+    rowsGetMock.mockReset();
+    rowsGetMock.mockResolvedValue({ index: [...baseExpandedRows], action: "hit" });
+    const viaCache = await (await GET(makeRequest("?auto=true&branded=false"), ctx)).json();
+    expect(viaCache.urls).toEqual(viaSql.urls);
+    expect(viaCache.uniqueUrlCount).toBe(viaSql.uniqueUrlCount);
+    expect(viaCache.capped).toBe(false);
+    // 기간 밖 · 다른 모델 행은 메모리에서 빠진다
+    firstSeenGetMock.mockReset();
+    firstSeenGetMock.mockResolvedValue({ index: new Map(), action: "hit" });
+    const none = await (await GET(makeRequest("?from=2026-01-01&to=2026-01-31"), ctx)).json();
+    expect(none.urls).toEqual([]);
   });
 });

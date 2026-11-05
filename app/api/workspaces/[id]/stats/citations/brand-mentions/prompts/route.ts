@@ -10,6 +10,8 @@
  *   ?branded=true|false      (기본 false)
  *   ?pageSize=50             (기본 50, 최대 200)
  *   ?cursor=<opaque>         (프롬프트 keyset cursor)
+ *   ?from=YYYY-MM-DD&to=YYYY-MM-DD (KST, 양끝 포함 — 목록과 같은 기간. 없으면 all-time)
+ *   ?provider=<AI 모델>       (목록과 같은 모델. 없으면 전체)
  *
  * 집계·정규화·매칭 규칙은 brand-mentions 라우트와 동일한 순수함수(aggregateMentionPromptsForUrl)를 재사용.
  */
@@ -21,7 +23,7 @@ import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace } from "@/lib/server/branded-query-filter";
 import { buildRunStatsWhereClause } from "@/lib/server/run-stats-where";
 import { buildTargetKeys } from "@/components/dashboard/citation-utils";
-import { buildBrandMentionPrefilter } from "@/lib/server/citation-brand-host-filter";
+import { buildBrandMentionPrefilterFast } from "@/lib/server/citation-brand-host-filter";
 import {
   aggregateMentionPromptsForUrl,
   decodePromptCursor,
@@ -30,6 +32,12 @@ import {
   type CitationRow,
 } from "@/lib/server/citation-url-aggregate";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
+
+import {
+  isCitationParamError,
+  parseCitationPeriod,
+  parseProviderParam,
+} from "@/lib/server/citation-period";
 
 export const dynamic = "force-dynamic";
 
@@ -92,8 +100,16 @@ export async function GET(
     return NextResponse.json({ error: "invalid_cursor" }, { status: 400 });
   }
 
-  const now = new Date();
-  const from = new Date(now.getTime() - MAX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  // 목록과 같은 기간·모델 — from/to 없으면 all-time(상한 MAX_LOOKBACK_DAYS)
+  const period = parseCitationPeriod(sp, { maxLookbackDays: MAX_LOOKBACK_DAYS });
+  if (isCitationParamError(period)) {
+    return NextResponse.json({ error: period.error }, { status: 400 });
+  }
+  const prov = parseProviderParam(sp);
+  if (isCitationParamError(prov)) {
+    return NextResponse.json({ error: prov.error }, { status: 400 });
+  }
+  const provider = prov.provider;
 
   try {
     const [ws] = await db
@@ -106,23 +122,27 @@ export async function GET(
     // 언급 사전 필터 — brand-mentions 라우트와 동일. 특정 URL 의 프롬프트 전수도 언급 한정이므로
     // 펼침 단계에서 언급 후보로 좁혀 행 cap 이 브랜드 언급을 잘라내지 않게 한다. 정확 판정은 JS 유지.
     const brandTerms = await getBrandTermsForWorkspace(id);
-    const brandMentionPrefilter = buildBrandMentionPrefilter(brandTerms);
+    const brandMentionPrefilter = buildBrandMentionPrefilterFast(brandTerms);
 
     // 소유 유튜브 영상은 언급 뷰 드릴다운에서도 제외(R5·소유 뷰 중복 방지). 실패/빈 시 빈 Set.
     const ownedVideoIds = await getOwnedYoutubeVideoIds(id);
 
     const whereClause = buildRunStatsWhereClause({
       workspaceId: id,
-      fromDate: from,
-      toDate: now,
+      fromDate: period.from,
+      toDate: period.to,
       autoOnly,
       brandTerms,
       branded: brandedView,
+      provider: provider ?? undefined,
     });
 
     // SET LOCAL statement_timeout 은 bind 파라미터 불가 → safeEnvInt 검증 정수를 sql.raw 로 인라인(계획 B-1).
     // ORDER BY (계획 H-1): cap 도달 시 결정적으로 같은 앞부분을 자르게 한다.
     // jsonb_typeof 가드(계획 L-1): 비배열 citations 로 인한 쿼리 파손 방지.
+    // 2026-11-05 검수 M3 — 상한에 닿으면 **최근 행부터** 남긴다. 이전엔 오래된 행부터 남겨 「전체」 기간에서
+    // 최근 인용이 통째로 빠졌다(최근 30일 내 사이트 인용 88개 중 33개 누락 실측). 상한이 없을 때는 순서가
+    // 집계 결과를 바꾸지 않는다(집계는 순서 무관 — 처음·마지막 시각은 최솟값·최댓값).
     const expanded = (await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`));
       return tx.execute<ExpandedRow>(sql`
@@ -140,7 +160,7 @@ export async function GET(
         WHERE ${whereClause}
           AND jsonb_typeof(${schema.runs.citations}) = 'array'
           AND ${brandMentionPrefilter}
-        ORDER BY ${schema.runs.createdAt}, ${schema.runs.id}
+        ORDER BY ${schema.runs.createdAt} DESC, ${schema.runs.id} DESC
         LIMIT ${CITATION_ROW_CAP}
       `);
     })) as unknown as ExpandedRow[];

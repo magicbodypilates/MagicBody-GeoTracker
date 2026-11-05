@@ -4,6 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   ensureWorkspace,
   loadFromServer,
+  fetchRunsOnly,
+  fetchRunsSince,
+  runsWindowStartIso,
   upsertBrand,
   addPromptIfNew,
   removePromptByText,
@@ -21,6 +24,13 @@ import {
   purgePromptResponses,
 } from "@/lib/client/server-store";
 import { createRequestGeneration } from "@/lib/client/request-generation";
+import {
+  FULL_REFRESH_INTERVAL_MS,
+  incrementalSinceIso,
+  attachServerId,
+  mergeRunsIncremental,
+} from "@/lib/client/runs-incremental";
+import { runsDataVersion } from "@/components/dashboard/sources-fetch-state";
 import {
   archiveDoneMessage,
   purgeDoneMessage,
@@ -573,6 +583,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
    * 잠깐 다시 나타나지 않는다(변경 중에 출발한 재조회까지 버린다).
    */
   const runsGenRef = useRef(createRequestGeneration());
+  /**
+   * 응답 목록 증분 재조회용 기억 (2026-11-05 — 불러오기 속도 개선).
+   *   runsRef           — 지금 화면의 state.runs (증분 시작 시각 계산용)
+   *   lastFullRunsAtRef — 마지막으로 전체를 다시 받은 시각 (10분마다 전체 다시 받기)
+   *   loadedWindowRef   — 지금 state.runs 가 어떤 기간 창(일)으로 받은 것인지 (창이 바뀌면 전체 다시 받기)
+   */
+  const runsRef = useRef<ScrapeRun[]>([]);
+  const lastFullRunsAtRef = useRef(0);
+  const loadedWindowRef = useRef<number | null>(null);
   /** 보관·되돌리기·영구 삭제·자동 복원 뒤 +1 — AI 응답 탭의 보관함 숫자·패널이 다시 읽는다. */
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
 
@@ -615,6 +634,10 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         }
         // REQUIRED_ALIASES 자동 주입 제거 — 사용자가 Project Settings 에서 직접 관리
 
+        if (serverData.runs) {
+          lastFullRunsAtRef.current = Date.now();
+          loadedWindowRef.current = runsWindowDays;
+        }
         setState(merged);
         setLoaded(true);
       } catch (err) {
@@ -631,12 +654,56 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     };
   }, [activeWsId, demoMode]);
 
+  /** 화면의 응답 목록을 기억해 둔다 — 증분 재조회가 "어디서부터 받을지" 계산할 때 쓴다 */
+  useEffect(() => {
+    runsRef.current = state.runs;
+  }, [state.runs]);
+
+  /**
+   * 응답 목록 재조회 (2026-11-05 — 불러오기 속도 개선).
+   *   "auto" — 증분(가장 늦은 행 10분 전부터 그 뒤만 받아 합침). 단 기간 창이 바뀌었거나 마지막 전체 받기 뒤
+   *            10분이 지났으면 전체 다시 받기로 바꾼다(재채점·다른 화면의 삭제 반영).
+   *   "full" — 전체 다시 받기(응답 목록만). 추가·삭제·보관 같은 변경 작업 뒤에 쓴다.
+   * 출발 때 세대를 잡고 도착 때 최신이 아니면 결과를 버린다(runsGenRef — 응답 보관 §S9 규칙 그대로).
+   */
+  const refreshRuns = useCallback(
+    async (mode: "auto" | "full", isCancelled: () => boolean = () => false) => {
+      if (demoMode || !serverWsId) return;
+      const wsId = serverWsId;
+      const days = runsWindowDays;
+      const gen = runsGenRef.current.capture();
+      const full =
+        mode === "full" ||
+        loadedWindowRef.current !== days ||
+        Date.now() - lastFullRunsAtRef.current >= FULL_REFRESH_INTERVAL_MS;
+      const windowStartIso = runsWindowStartIso(days);
+      if (full) {
+        const runs = await fetchRunsOnly(wsId, days);
+        if (isCancelled() || !runsGenRef.current.isCurrent(gen)) return;
+        lastFullRunsAtRef.current = Date.now();
+        loadedWindowRef.current = days;
+        setState((prev) => ({ ...prev, runs }));
+        return;
+      }
+      const since = incrementalSinceIso(runsRef.current, windowStartIso);
+      const fresh = await fetchRunsSince(wsId, since);
+      if (isCancelled() || !runsGenRef.current.isCurrent(gen)) return;
+      const windowStartMs = Date.parse(windowStartIso);
+      setState((prev) => {
+        const merged = mergeRunsIncremental(prev.runs, fresh, windowStartMs);
+        return merged === prev.runs ? prev : { ...prev, runs: merged };
+      });
+    },
+    [demoMode, serverWsId, runsWindowDays],
+  );
+
   /**
    * 탭 전환 시 state.runs 즉시 재동기화.
    *
    * 자동화 탭의 "즉시 실행" 직후 사용자가 AI 응답 · 가시성 탭으로 넘어갈 때
    * 60초 주기 폴링을 기다리지 않고 바로 최신 데이터가 보이도록.
    * 데이터 탭(Responses · Visibility · Citation · Home) 전환 시에만 재조회.
+   * 탭만 바뀌면 증분, 기간 선택(runsWindowDays)이 바뀌면 refreshRuns 가 전체 다시 받기로 판단한다.
    */
   const dataHeavyTabs = useMemo(
     () => new Set<TabKey>(["Home", "Responses", "Visibility Analytics", "Citation Opportunities"]),
@@ -648,26 +715,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   useEffect(() => {
     if (demoMode || !serverWsId || !loaded) return;
     if (!dataHeavyTabs.has(activeTab)) return;
-    const wsId = serverWsId;
     let cancelled = false;
-    (async () => {
-      const gen = runsGenRef.current.capture();
-      try {
-        const fresh = await loadFromServer(wsId, runsWindowDays);
-        if (cancelled || !runsGenRef.current.isCurrent(gen)) return;
-        setState((prev) => ({
-          ...prev,
-          runs: fresh.runs ?? prev.runs,
-          auditReport: fresh.auditReport ?? prev.auditReport,
-        }));
-      } catch (e) {
-        console.warn("[dashboard] 탭 전환 재동기화 실패:", e instanceof Error ? e.message : e);
-      }
-    })();
+    refreshRuns("auto", () => cancelled).catch((e) => {
+      console.warn("[dashboard] 탭 전환 재동기화 실패:", e instanceof Error ? e.message : e);
+    });
     return () => {
       cancelled = true;
     };
-  }, [activeTab, serverWsId, loaded, demoMode, dataHeavyTabs, runsWindowDays]);
+  }, [activeTab, serverWsId, loaded, demoMode, dataHeavyTabs, refreshRuns]);
 
   /**
    * state.runs 주기적 재동기화 (60초).
@@ -678,48 +733,64 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
    *   - 결과: AI 응답 탭 · 가시성 탭 · 홈 탭 KPI 가 자동화 탭과 숫자가 맞지 않음
    *
    * 폴링 주기 60초 — 자동화 탭 내부 recentRuns 폴링과 동일한 박자.
+   * 증분으로 받고(refreshRuns "auto"), 브라우저 탭이 안 보이는 동안은 쉬었다가 다시 보이면 한 번 받는다.
    */
   useEffect(() => {
     if (demoMode || !serverWsId || !loaded) return;
-    const wsId = serverWsId;
     let cancelled = false;
-    const refetch = async () => {
-      const gen = runsGenRef.current.capture();
-      try {
-        const fresh = await loadFromServer(wsId, runsWindowDays);
-        if (cancelled || !runsGenRef.current.isCurrent(gen)) return;
-        setState((prev) => ({
-          ...prev,
-          runs: fresh.runs ?? prev.runs,
-          auditReport: fresh.auditReport ?? prev.auditReport,
-        }));
-      } catch (e) {
+    const refetch = () => {
+      refreshRuns("auto", () => cancelled).catch((e) => {
         console.warn("[dashboard] 주기 재동기화 실패:", e instanceof Error ? e.message : e);
-      }
+      });
     };
-    const t = setInterval(refetch, 60_000);
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      refetch();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    const t = setInterval(tick, 60_000);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [serverWsId, loaded, demoMode, runsWindowDays]);
+  }, [serverWsId, loaded, demoMode, refreshRuns]);
+
+  /**
+   * 수동 실행 응답 저장 (2026-11-05 검수 C1).
+   * 화면에는 id 없이 먼저 들어간 행에 저장 결과의 서버 id 를 붙인다 — 그래야 다음 증분 재조회가 같은 행을
+   * 다른 줄로 보지 않는다(증분 합치기에도 같은 응답을 알아보는 안전장치가 있다).
+   */
+  const saveManualRun = useCallback((wsId: string, run: ScrapeRun) => {
+    serverAppendRun(wsId, run)
+      .then((id) => {
+        if (!id) return;
+        setState((prev) => {
+          const runs = attachServerId(prev.runs, run, id);
+          return runs === prev.runs ? prev : { ...prev, runs };
+        });
+      })
+      .catch((e) => console.error("[dashboard] 서버 run 저장 실패:", e));
+  }, []);
+
+  /** 인용 출처 전체 출처 표의 다시 받기 신호 — 새 응답이 들어오면 바뀐다 (검수 C6) */
+  const runsVersion = useMemo(() => runsDataVersion(state.runs), [state.runs]);
 
   /**
    * 응답 목록만 지금 다시 읽는다 — 보관·되돌리기 등 변경 동작이 끝난 뒤 부른다.
    * 출발 때 새 세대를 잡으므로(변경 동작의 끝 무효화 뒤) 그 결과는 반영된다.
+   * 사라진 행을 반영해야 하므로 항상 전체 다시 받기다.
    */
   const reloadRunsNow = useCallback(async () => {
-    if (demoMode || !serverWsId) return;
-    const wsId = serverWsId;
-    const gen = runsGenRef.current.capture();
     try {
-      const fresh = await loadFromServer(wsId, runsWindowDays);
-      if (!runsGenRef.current.isCurrent(gen)) return;
-      setState((prev) => ({ ...prev, runs: fresh.runs ?? prev.runs }));
+      await refreshRuns("full");
     } catch (e) {
       console.warn("[dashboard] 응답 목록 다시 읽기 실패:", e instanceof Error ? e.message : e);
     }
-  }, [demoMode, serverWsId, runsWindowDays]);
+  }, [refreshRuns]);
 
   /** 응답 목록을 바꾸는 동작의 공통 흐름 — 시작·끝(성공·실패 모두)에 재조회 세대를 무효화한다. */
   const withRunsMutation = useCallback(async <T,>(op: () => Promise<T>): Promise<T> => {
@@ -891,46 +962,6 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
     setMessage(isServerWs ? "워크스페이스 삭제됨" : "로컬 항목 정리 완료");
   }
-
-  const partnerLeaderboard = useMemo(() => {
-    // Client-side junk URL filter as safety net
-    const junkHosts = [
-      "cloudfront.net", "cdn.prod.website-files.com", "cdn.jsdelivr.net",
-      "cdnjs.cloudflare.com", "unpkg.com", "fastly.net", "akamaihd.net",
-      "connect.facebook.net", "facebook.net", "google-analytics.com",
-      "googletagmanager.com", "doubleclick.net", "w3.org", "schema.org",
-      "amazonaws.com", "cloudflare.com", "hotjar.com", "sentry.io",
-    ];
-    const junkExtPattern = /\.(png|jpe?g|gif|svg|webp|avif|ico|css|js|woff2?|ttf|eot|mp4|webm)(\?|$)/i;
-
-    function isCleanUrl(url: string): boolean {
-      try {
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        if (junkHosts.some((j) => host === j || host.endsWith(`.${j}`))) return false;
-        if (junkExtPattern.test(parsed.pathname)) return false;
-        if (parsed.search.length > 200) return false;
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    const map = new Map<string, { count: number; prompts: Set<string> }>();
-    state.runs.forEach((run) => {
-      run.sources.filter(isCleanUrl).forEach((source) => {
-        const existing = map.get(source) ?? { count: 0, prompts: new Set<string>() };
-        existing.count += 1;
-        existing.prompts.add(run.prompt);
-        map.set(source, existing);
-      });
-    });
-
-    return [...map.entries()]
-      .map(([url, data]) => ({ url, count: data.count, prompts: [...data.prompts] }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 200);
-  }, [state.runs]);
 
   const visibilityTrend = useMemo(() => {
     const byDay = new Map<string, { total: number; sum: number }>();
@@ -1508,9 +1539,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
           }));
           // 서버 DB 에도 저장 (fire-and-forget)
           if (serverWsId) {
-            serverAppendRun(serverWsId, result.run).catch((e) =>
-              console.error("[dashboard] 서버 run 저장 실패:", e),
-            );
+            saveManualRun(serverWsId, result.run);
           }
           if (!firstArrived) {
             firstArrived = true;
@@ -1590,9 +1619,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
               runs: [result.run, ...prev.runs],
             }));
             if (serverWsId) {
-              serverAppendRun(serverWsId, result.run).catch((e) =>
-                console.error("[dashboard] 서버 run 저장 실패:", e),
-              );
+              saveManualRun(serverWsId, result.run);
             }
             if (!firstArrived) {
               firstArrived = true;
@@ -2561,7 +2588,16 @@ ${exampleJson}
     }
 
     if (activeTab === "Citations") {
-      return <PartnerDiscoveryTab partnerLeaderboard={partnerLeaderboard} brandWebsites={state.brand.websites} workspaceId={serverWsId ?? undefined} />;
+      // 전체 출처 표는 서버 집계(stats/citations/sources)로 옮겨 기간·AI 모델을 직접 고른다 (2026-11-05)
+      // 데모는 서버 워크스페이스가 없으므로 데모 응답으로 같은 집계 함수를 화면에서 돌린다 (검수 C8)
+      return (
+        <PartnerDiscoveryTab
+          brandWebsites={state.brand.websites}
+          workspaceId={serverWsId ?? undefined}
+          dataVersion={runsVersion}
+          localRuns={demoMode ? state.runs : undefined}
+        />
+      );
     }
 
     if (activeTab === "Citation Opportunities") {

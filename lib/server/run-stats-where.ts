@@ -38,6 +38,11 @@ export type BuildRunStatsWhereArgs = {
   brandTerms: string[];
   /** true=브랜드 명 검색만 / false=일반 검색만 (viewModeCondition) */
   branded: boolean;
+  /**
+   * AI 모델(provider) 정확 일치 필터(선택). 미지정이면 조건을 추가하지 않는다 — 기존 호출부 회귀 없음.
+   * 값 검증은 호출부 책임(인용 출처 라우트는 citation-period.ts 의 parseProviderParam 을 거친다).
+   */
+  provider?: string;
 };
 
 /**
@@ -80,6 +85,9 @@ export function buildRunStatsWhere(args: BuildRunStatsWhereArgs): SQL[] {
 
   const informational = viewModeCondition(args.brandTerms, args.branded);
   if (informational) conditions.push(informational);
+
+  // 8. (provider 지정 시) AI 모델 정확 일치 — 미지정이면 조건 없음(기존 7개 조건 그대로)
+  if (args.provider) conditions.push(eq(schema.runs.provider, args.provider));
 
   return conditions;
 }

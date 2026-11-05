@@ -47,6 +47,23 @@ const CLASSIFICATION: Record<string, Rule> = {
   "app/api/workspaces/[id]/stats/citations/urls/prompts/route.ts": { kind: "exclude", why: "통계(헬퍼·원문 SQL)", needs: [STATS_HELPER] },
   "app/api/workspaces/[id]/stats/citations/brand-mentions/route.ts": { kind: "exclude", why: "통계(헬퍼·원문 SQL)", needs: [STATS_HELPER] },
   "app/api/workspaces/[id]/stats/citations/brand-mentions/prompts/route.ts": { kind: "exclude", why: "통계(헬퍼·원문 SQL)", needs: [STATS_HELPER] },
+  // 2026-11-05 — 인용 출처 기간 검색: 전체 출처 표 서버 집계 · 전체 기간 최초 인용 시점 캐시
+  "app/api/workspaces/[id]/stats/citations/sources/route.ts": {
+    kind: "exclude",
+    why: "통계(자체 조건 · 이전 화면이 쓰던 응답 목록과 같은 조건 — 보관 제외만)",
+    needs: [NOT_ARCHIVED(1)],
+  },
+  "lib/server/citation-first-seen.ts": { kind: "exclude", why: "최초 인용 캐시 지문(건수·증분 건수 둘 다 보관 제외)", needs: [NOT_ARCHIVED(2)] },
+  "lib/server/citation-rows-cache.ts": {
+    kind: "exclude",
+    why: "인용 후보 행 캐시 — 목록과 같은 통계 헬퍼 조건(보관 제외 포함)으로 읽는다",
+    needs: [STATS_HELPER],
+  },
+  "lib/server/citation-first-seen-loaders.ts": {
+    kind: "exclude",
+    why: "최초 인용 캐시 로더 — 내 사이트·언급은 통계 헬퍼, 전체 출처는 자체 조건",
+    needs: [STATS_HELPER, NOT_ARCHIVED(1)],
+  },
   // ── 통계(자체 조건)
   "app/api/workspaces/[id]/stats/benchmark/route.ts": {
     kind: "exclude",

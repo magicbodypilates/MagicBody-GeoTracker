@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VISIBLE_PROVIDERS, PROVIDER_LABELS, type Provider } from "@/components/dashboard/types";
 import { toKstDateKey } from "@/lib/client/date-kst";
+import {
+  DEFAULT_CITATION_FILTER,
+  citationFilterKey,
+  citationFilterParams,
+  describeCitationFilter,
+  type CitationFilter,
+} from "@/components/dashboard/citation-filters";
+import { sectionDisplay, sectionRequestKey, type SectionMeta } from "@/components/dashboard/brand-citation-section-state";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -17,7 +25,9 @@ const PROVIDER_COLORS: Record<Provider, string> = {
 
 /* ══════════════════════════════════════════════════════════════════
  * 내 사이트 인용 URL 전수 섹션 (계획 v2 §7)
- * 전체 기간(all-time) 동안 브랜드 공식 URL 이 한 번이라도 인용된 개별 페이지를 전수 노출.
+ * 선택한 기간(탭 상단 필터 — 기본 최근 30일, 「전체」면 all-time) 동안 브랜드 공식 URL 이 인용된 개별 페이지를
+ * 전수 노출. 기간·AI 모델·신규만 보기 조건은 탭 상단 CitationFilterBar 가 정해 filter prop 으로 내려준다
+ * (2026-11-05 — 이전엔 기간 선택과 무관한 전체 기간 누적이었다).
  * URL별로 인용한 질문(프롬프트) 드릴다운. 기본 접힘 + "더 보기" 페이지네이션.
  *
  * 공유 컴포넌트 — 여러 탭(인용 출처/PartnerDiscoveryTab 등)에서 재사용.
@@ -43,6 +53,10 @@ type BrandCitationUrlItem = {
   hasMorePrompts: boolean;
   /** 언급 뷰(제3자)에서만 채워지는 대표 제목(헤드라인). 소유 뷰는 undefined. */
   title?: string;
+  /** 선택 기간 안에서 처음 인용된 주소인가 (기간을 골랐을 때만) */
+  isNew?: boolean;
+  /** 전체 기간 최초 인용 시각 (기간을 골랐을 때만) */
+  firstSeenAllTime?: string;
 };
 
 /** 섹션 모드 — "owned"(내 사이트 인용) vs "mention"(브랜드 언급 제3자) */
@@ -66,15 +80,15 @@ const MODE_CONFIG: Record<SectionMode, ModeConfig> = {
   owned: {
     pathSeg: "urls",
     sectionTitle: "내 사이트 인용 URL",
-    intro: "전체 기간 동안 내 사이트가 AI 답변에 한 번이라도 인용된 개별 페이지 URL 을 모두 보여줍니다.",
-    emptyLabel: "내 사이트가 인용된 URL이 아직 없습니다.",
+    intro: "선택한 기간 동안 내 사이트가 AI 답변에 인용된 개별 페이지 주소를 모두 보여줍니다.",
+    emptyLabel: "이 기간에 내 사이트가 인용된 주소가 없습니다.",
     showTitle: false,
   },
   mention: {
     pathSeg: "brand-mentions",
     sectionTitle: "브랜드 언급 출처 (제3자 페이지)",
-    intro: "전체 기간 동안 AI 답변에 인용된 외부 출처(보도자료·언론기사 등) 중, 제목·설명에 브랜드가 언급된 페이지를 보여줍니다. (내 사이트는 제외)",
-    emptyLabel: "브랜드를 언급한 제3자 페이지가 아직 없습니다.",
+    intro: "선택한 기간 동안 AI 답변에 인용된 외부 출처(보도자료·언론기사 등) 중, 제목·설명에 브랜드가 언급된 페이지를 보여줍니다. (내 사이트는 제외)",
+    emptyLabel: "이 기간에 브랜드를 언급한 제3자 페이지가 없습니다.",
     showTitle: true,
   },
 };
@@ -88,6 +102,10 @@ type OwnedVideosMeta = {
 
 type UrlsResponse = {
   allTime: boolean;
+  /** ok = 신규 판정함 / all-time = 전체 기간이라 판정 안 함 / unavailable = 계산 실패 */
+  newStatus?: "ok" | "all-time" | "unavailable";
+  /** 신규 주소 수(신규만 보기 적용 전) */
+  newUrlCount?: number | null;
   maxLookbackDays: number;
   uniqueUrlCount: number;
   invalidCitationCount: number;
@@ -129,6 +147,7 @@ function BrandUrlRow({
   workspaceId,
   auto,
   branded,
+  filterParams,
   pathSeg,
   showTitle,
 }: {
@@ -136,6 +155,8 @@ function BrandUrlRow({
   workspaceId: string;
   auto: boolean;
   branded: boolean;
+  /** 목록과 같은 기간·AI 모델 조건 — 질문 드릴다운에도 똑같이 건다 */
+  filterParams: Record<string, string>;
   /** prompts 엔드포인트 경로 세그먼트 (모드별) */
   pathSeg: "urls" | "brand-mentions";
   /** 대표 제목(헤드라인) 노출 여부 */
@@ -161,6 +182,7 @@ function BrandUrlRow({
         auto: String(auto),
         branded: String(branded),
         pageSize: "50",
+        ...filterParams,
       });
       if (promptCursor) qs.set("cursor", promptCursor);
       const resp = await fetch(
@@ -185,7 +207,7 @@ function BrandUrlRow({
     } finally {
       setLoadingPrompts(false);
     }
-  }, [item.canonicalUrlKey, item.prompts, auto, branded, promptCursor, workspaceId, pathSeg]);
+  }, [item.canonicalUrlKey, item.prompts, auto, branded, filterParams, promptCursor, workspaceId, pathSeg]);
 
   return (
     <div className="rounded-lg border border-th-border bg-th-card">
@@ -227,6 +249,14 @@ function BrandUrlRow({
             </div>
           )}
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {item.isNew && (
+              <span
+                className="rounded-full bg-th-success-soft px-2 py-0.5 text-[10px] font-bold text-th-success"
+                title={`이 기간에 처음 인용된 주소입니다${item.firstSeenAllTime ? ` (처음 인용 ${toKstDateKey(item.firstSeenAllTime)})` : ""}`}
+              >
+                신규
+              </span>
+            )}
             <span className="rounded-full bg-th-brand-bg/20 px-2 py-0.5 text-[10px] font-bold text-th-brand-text">
               인용 {item.totalCount}회
             </span>
@@ -289,20 +319,40 @@ export function BrandCitationUrls({
   workspaceId,
   responseTab = "auto-info",
   mode = "owned",
+  filter = DEFAULT_CITATION_FILTER,
 }: {
   workspaceId: string;
   /** 응답 유형 필터 — 없으면 "auto-info"(일반 검색·자동) 기준 */
   responseTab?: "auto-info" | "auto-branded" | "manual";
   /** 섹션 모드 — "owned"(내 사이트 인용) / "mention"(브랜드 언급 제3자). 기본 owned */
   mode?: SectionMode;
+  /** 탭 상단 공통 필터(기간·AI 모델·신규만 보기). 없으면 기본값(최근 30일 · 전체 모델) */
+  filter?: CitationFilter;
 }) {
   const cfg = MODE_CONFIG[mode];
+  const todayKst = toKstDateKey(new Date());
+  // 필터 → 서버 쿼리. 문자열 key 로 묶어 필터 값이 같으면 같은 객체를 쓰게 한다(불필요한 재조회 방지)
+  const filterKey = citationFilterKey(filter, todayKst);
+  const filterParams = useMemo(
+    () => citationFilterParams(filter, todayKst),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterKey 가 filter·todayKst 를 대표한다
+    [filterKey],
+  );
+  const listParams = useMemo(
+    () => citationFilterParams(filter, todayKst, { includeNewOnly: true }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterKey 가 filter·todayKst 를 대표한다
+    [filterKey],
+  );
+  const filterLabel = describeCitationFilter(filter, todayKst);
+  /** 요청 세대 — 필터가 바뀌면 +1. 늦게 도착한 이전 조건의 결과가 새 목록을 덮어쓰지 않게 한다 */
+  const genRef = useRef(0);
   const [expanded, setExpanded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<BrandCitationUrlItem[]>([]);
-  const [meta, setMeta] = useState<Omit<UrlsResponse, "urls" | "nextCursor"> | null>(null);
+  // key = 이 숫자를 받은 조회 — 머리말 숫자는 지금 조회와 같을 때만 그린다 (검수 2회차 N1)
+  const [meta, setMeta] = useState<(Omit<UrlsResponse, "urls" | "nextCursor"> & SectionMeta) | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -314,21 +364,27 @@ export function BrandCitationUrls({
   }, [responseTab]);
 
   const fetchPage = useCallback(
-    async (cursor: string | null, append: boolean) => {
+    async (cursor: string | null, append: boolean, gen: number, signal?: AbortSignal) => {
       const qs = new URLSearchParams({
         auto: String(auto),
         branded: String(branded),
         pageSize: "100",
+        ...listParams,
       });
       if (cursor) qs.set("cursor", cursor);
       const resp = await fetch(
         `${BP}/api/workspaces/${workspaceId}/stats/citations/${cfg.pathSeg}?${qs.toString()}`,
-        { credentials: "include" },
+        { credentials: "include", signal },
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = (await resp.json()) as UrlsResponse;
+      // 그 사이 필터가 바뀌었으면 이 결과는 버린다
+      if (gen !== genRef.current) return false;
       setMeta({
+        key: sectionRequestKey(cfg.pathSeg, auto, branded, filterKey),
         allTime: data.allTime,
+        newStatus: data.newStatus,
+        newUrlCount: data.newUrlCount,
         maxLookbackDays: data.maxLookbackDays,
         uniqueUrlCount: data.uniqueUrlCount,
         invalidCitationCount: data.invalidCitationCount,
@@ -337,68 +393,93 @@ export function BrandCitationUrls({
       });
       setItems((prev) => (append ? [...prev, ...data.urls] : data.urls));
       setNextCursor(data.nextCursor);
+      return true;
     },
-    [auto, branded, workspaceId, cfg.pathSeg],
+    [auto, branded, workspaceId, cfg.pathSeg, listParams, filterKey],
   );
 
-  // 펼칠 때 + 탭(auto/branded) 변경 시 재조회
+  // 펼칠 때 + 탭(auto/branded)·필터(기간·모델·신규만) 변경 시 재조회. 이전 요청은 끊고 결과도 버린다.
   useEffect(() => {
     if (!expanded) return;
-    let cancelled = false;
+    const gen = ++genRef.current;
+    const ctrl = new AbortController();
     setLoading(true);
     setError(null);
     setItems([]);
     setNextCursor(null);
-    fetchPage(null, false)
-      .then(() => {
-        if (!cancelled) setLoaded(true);
+    fetchPage(null, false, gen, ctrl.signal)
+      .then((applied) => {
+        if (applied) setLoaded(true);
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : "로드 실패");
+        if (gen === genRef.current && !ctrl.signal.aborted) setError(e instanceof Error ? e.message : "로드 실패");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (gen === genRef.current) setLoading(false);
       });
     return () => {
-      cancelled = true;
+      ctrl.abort();
     };
   }, [expanded, fetchPage]);
 
   const loadMore = useCallback(async () => {
     if (!nextCursor) return;
+    const gen = genRef.current;
     setLoadingMore(true);
     setError(null);
     try {
-      await fetchPage(nextCursor, true);
+      await fetchPage(nextCursor, true, gen);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "로드 실패");
+      if (gen === genRef.current) setError(e instanceof Error ? e.message : "로드 실패");
     } finally {
       setLoadingMore(false);
     }
   }, [nextCursor, fetchPage]);
 
+  const show = sectionDisplay({
+    loaded,
+    loading,
+    error,
+    itemsLength: items.length,
+    meta,
+    currentKey: sectionRequestKey(cfg.pathSeg, auto, branded, filterKey),
+    newOnly: filter.newOnly,
+  });
+
   return (
     <div className="rounded-xl border border-th-border bg-th-card">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-th-card-hover rounded-t-xl"
+        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3 text-left hover:bg-th-card-hover rounded-t-xl"
       >
-        <span className="text-xs text-th-text-muted">{expanded ? "▼" : "▶"}</span>
-        <span className="text-sm font-semibold text-th-text">{cfg.sectionTitle}</span>
-        {loaded && meta && (
-          <span className="rounded-full bg-th-brand-bg/20 px-2 py-0.5 text-xs font-bold text-th-brand-text">
-            {meta.uniqueUrlCount}개
+        <span className="shrink-0 text-xs text-th-text-muted">{expanded ? "▼" : "▶"}</span>
+        <span className="min-w-0 text-sm font-semibold text-th-text">{cfg.sectionTitle}</span>
+        {show.showCount && show.current && (
+          <span className="shrink-0 whitespace-nowrap rounded-full bg-th-brand-bg/20 px-2 py-0.5 text-xs font-bold text-th-brand-text">
+            {show.current.uniqueUrlCount}개
           </span>
         )}
-        <span className="ml-2 text-[10px] text-th-text-muted">전체 기간 누적</span>
+        {show.showNewCount && show.current && (
+          <span className="shrink-0 whitespace-nowrap rounded-full bg-th-success-soft px-2 py-0.5 text-xs font-bold text-th-success">
+            신규 {show.current.newUrlCount}개
+          </span>
+        )}
+        <span className="text-[10px] text-th-text-muted sm:ml-2">{filterLabel}</span>
       </button>
 
       {expanded && (
         <div className="space-y-2 border-t border-th-border px-4 py-3">
           <p className="text-[11px] text-th-text-muted">
             {cfg.intro}
-            {" "}(기간 선택과 무관 · {responseTab === "auto-branded" ? "질문에 브랜드명이 포함된 검색" : responseTab === "manual" ? "수동 실행" : "일반 검색"} 기준)
+            {" "}({responseTab === "auto-branded" ? "질문에 브랜드명이 포함된 검색" : responseTab === "manual" ? "수동 실행" : "일반 검색"} 기준 · 날짜는 선택한 기간 안에서 처음·마지막으로 인용된 날입니다)
           </p>
+          {show.showNewUnavailable && (
+            <div className="rounded-md border border-th-border bg-th-card-alt px-3 py-1.5 text-[11px] text-th-text-muted">
+              {filter.newOnly
+                ? "신규 여부를 계산하지 못해 「신규만 보기」를 적용하지 못했습니다. 잠시 뒤 다시 시도하거나 「신규만 보기」를 끄고 보세요."
+                : "이번에는 신규 여부를 계산하지 못했습니다. 잠시 뒤 다시 열면 표시됩니다."}
+            </div>
+          )}
 
           {/* 소유 유튜브 영상 신선도 배지 (owned 뷰 전용 · 계획 v2 §2.2) —
               우리 채널 영상 목록이 마지막으로 언제 갱신됐는지 + stale(자동 갱신 점검 필요) 노출. */}
@@ -426,27 +507,29 @@ export function BrandCitationUrls({
               URL 목록을 불러오지 못했습니다: {error}
             </div>
           )}
-          {!loading && !error && loaded && items.length === 0 && (
+          {/* 상한 안내는 결과 개수와 무관하게 보인다 — 상한에 걸려 0건일 수도 있다 (검수 2회차 M3-잔여) */}
+          {show.showCappedNotice && (
+            <div className="rounded-md border border-th-border bg-th-card-alt px-3 py-1.5 text-[11px] text-th-text-muted">
+              데이터가 많아 가장 최근 인용 기록부터 일부만 세었습니다(그보다 오래된 인용은 빠졌을 수 있고, 처음 인용일도 실제보다 늦게 보일 수 있습니다). 이 목록 아래로는 더 불러오지 않습니다.
+            </div>
+          )}
+          {show.showEmpty && (
             <div className="rounded-lg border border-th-border bg-th-card-alt px-3 py-6 text-center text-sm text-th-text-secondary">
-              {cfg.emptyLabel}
+              {filter.newOnly ? "이 기간에 새로 인용된 주소가 없습니다." : cfg.emptyLabel}
             </div>
           )}
 
           {!loading && !error && items.length > 0 && (
             <>
-              {meta && meta.capped && (
-                <div className="rounded-md border border-th-border bg-th-card-alt px-3 py-1.5 text-[11px] text-th-text-muted">
-                  데이터가 많아 일부 인용 기록만 기준으로 집계했습니다. 이 목록 아래로는 더 불러오지 않습니다.
-                </div>
-              )}
               <div className="space-y-1.5">
                 {items.map((it) => (
                   <BrandUrlRow
-                    key={it.canonicalUrlKey}
+                    key={`${filterKey}|${it.canonicalUrlKey}`}
                     item={it}
                     workspaceId={workspaceId}
                     auto={auto}
                     branded={branded}
+                    filterParams={filterParams}
                     pathSeg={cfg.pathSeg}
                     showTitle={cfg.showTitle}
                   />

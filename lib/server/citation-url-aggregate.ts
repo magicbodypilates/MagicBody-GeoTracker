@@ -262,6 +262,8 @@ export type AggregateOptions = {
   pageSize?: number;
   /** 이전 페이지에서 이어받은 keyset cursor (없으면 첫 페이지) */
   cursor?: UrlCursor | null;
+  /** 신규 판정 (선택) — 기간 검색일 때만 */
+  newness?: NewnessOptions;
 };
 
 /** aggregateBrandCitationUrls 반환 (소유 뷰) */
@@ -271,9 +273,11 @@ export type AggregateResult = {
   /** invalid(파싱 실패)로 제외된 citation 수 */
   invalidCitationCount: number;
   /** 이번 페이지 URL 목록 */
-  urls: BrandCitationUrl[];
+  urls: Array<BrandCitationUrl & NewnessFields>;
   /** 다음 페이지 cursor (없으면 null) */
   nextCursor: UrlCursor | null;
+  /** 신규 URL 수(신규만 보기 적용 전). 신규 판정을 안 했으면 null */
+  newUrlCount: number | null;
 };
 
 /** aggregateBrandMentionUrls 옵션 (언급 뷰) */
@@ -290,14 +294,17 @@ export type MentionAggregateOptions = {
   promptInlineLimit?: number;
   pageSize?: number;
   cursor?: UrlCursor | null;
+  /** 신규 판정 (선택) — 기간 검색일 때만 */
+  newness?: NewnessOptions;
 };
 
 /** aggregateBrandMentionUrls 반환 (언급 뷰) */
 export type MentionAggregateResult = {
   uniqueUrlCount: number;
   invalidCitationCount: number;
-  urls: BrandMentionUrl[];
+  urls: Array<BrandMentionUrl & NewnessFields>;
   nextCursor: UrlCursor | null;
+  newUrlCount: number | null;
 };
 
 /**
@@ -384,6 +391,32 @@ export type CitationKeepFn = (
 /** 집계 내부 레코드 — title 포함(언급 뷰용). 소유 뷰는 title 을 버린다. */
 type AggregatedUrlRecord = BrandMentionUrl;
 
+/**
+ * 「신규」 판정 입력 (2026-11-05 — 인용 출처 기간 검색).
+ *
+ * 신규 = 그 URL 의 **전체 기간 최초 인용 시점**이 선택 기간 시작(fromMs) 이후인 것.
+ * 전체 기간 최초 인용 시점은 호출부가 캐시(citation-first-seen.ts)에서 찾아 준다.
+ * 캐시에 없는 key 는 "캐시를 만든 뒤 처음 인용됐다"는 뜻이므로 신규로 본다.
+ * 화면 표시용 전체 기간 최초 시점은 캐시 값과 기간 안 최초 시점 중 이른 쪽으로 한다
+ * (캐시가 기간 집계보다 조금 늦게 만들어져도 표시가 뒤집히지 않게).
+ */
+export type NewnessOptions = {
+  /** canonicalUrlKey → 전체 기간 최초 인용 시각(ms). 모르면 null */
+  firstSeenMs: (canonicalUrlKey: string) => number | null;
+  /** 선택 기간 시작 (inclusive, ms) */
+  fromMs: number;
+  /** true 면 신규 URL 만 남긴 뒤 정렬·페이지네이션 */
+  newOnly: boolean;
+};
+
+/** 신규 판정이 붙은 응답 항목에 추가되는 필드 */
+export type NewnessFields = {
+  /** 선택 기간 안에서 처음 인용된 URL 인가 */
+  isNew?: boolean;
+  /** 전체 기간 최초 인용 시각 (ISO) */
+  firstSeenAllTime?: string;
+};
+
 type UrlCoreOptions = {
   keep: CitationKeepFn;
   /** 소유 유튜브 video-ID 집합 — 매칭 행은 canonical watch URL 로 치환 후 집계(계획 v2 §5 결정 C·D1) */
@@ -391,6 +424,8 @@ type UrlCoreOptions = {
   promptInlineLimit?: number;
   pageSize?: number;
   cursor?: UrlCursor | null;
+  /** 신규 판정 — 없으면 판정하지 않는다(기존 응답과 동일) */
+  newness?: NewnessOptions;
 };
 
 /**
@@ -399,7 +434,7 @@ type UrlCoreOptions = {
  *     하나의 canonicalUrlKey(youtube.com/watch?v=ID)로 병합.
  *   - 비소유·비유튜브는 effectiveRaw = raw 로 완전 불변(H4 회귀 방어 — 비소유/비유튜브 행은 손대지 않음).
  */
-function resolveOwned(
+export function resolveOwned(
   raw: string,
   ownedVideoIds: Set<string> | undefined,
 ): { owned: boolean; effectiveRaw: string } {
@@ -412,11 +447,58 @@ function resolveOwned(
   return { owned: false, effectiveRaw: raw };
 }
 
+/**
+ * 한 인용 행을 집계 key(canonicalUrlKey)로 바꾼다 — 집계 core 와 **같은 규칙**(소유 영상 치환 →
+ * 정규화 → 뷰별 포함 판정)을 쓴다. 전체 기간 최초 인용 시점 캐시가 집계와 같은 key 를 만들어야
+ * 「신규」 판정이 어긋나지 않으므로 이 함수 하나를 함께 쓴다.
+ *
+ * @returns 정규화 실패·포함 판정 탈락이면 null
+ */
+export function citationRowCanonicalKey(
+  row: CitationRow,
+  keep: CitationKeepFn,
+  ownedVideoIds: Set<string> | undefined,
+): string | null {
+  const raw = row.url || row.domain || "";
+  const { owned, effectiveRaw } = resolveOwned(raw, ownedVideoIds);
+  const norm = normalizeCitationUrl(effectiveRaw);
+  if (!norm) return null;
+  if (!keep(row, norm, owned)) return null;
+  return norm.canonicalUrlKey;
+}
+
+/** 소유(내 사이트) 뷰 포함 판정 — 소유 유튜브 영상이거나 브랜드 공식 URL */
+export function ownedViewKeep(brandKeySet: Set<string>): CitationKeepFn {
+  return (_row, norm, owned) =>
+    owned || isBrandCitationKey(norm.host, norm.canonicalUrlKey, brandKeySet);
+}
+
+/**
+ * 언급(제3자) 뷰 포함 판정 — 언급 판정 + 소유(내 사이트) 아님 + 소유 유튜브 영상 아님(!owned).
+ * isOwnedCitationUrl 은 press-domain-match.ts 와 공유하는 판정을 원본 raw URL 에 한 번 더 적용한다
+ * (2026-09-23 개정 — 위 헤더 주석 참조). 기존 두 조건과 겹치는 경우가 대부분이라 결과가 좁아지는
+ * 방향으로만 작동한다(과다 제외 없음).
+ */
+export function mentionViewKeep(
+  brandKeySet: Set<string>,
+  brandTerms: string[],
+  ownedVideoIds: Set<string> | undefined,
+): CitationKeepFn {
+  const ownWebsiteKeys = [...brandKeySet];
+  return (row, norm, owned) =>
+    isBrandMentionText(row.title, row.description, brandTerms) &&
+    !isBrandCitationKey(norm.host, norm.canonicalUrlKey, brandKeySet) &&
+    !owned &&
+    !isOwnedCitationUrl(row.url ?? row.domain, ownWebsiteKeys, ownedVideoIds);
+}
+
 type UrlCoreResult = {
   uniqueUrlCount: number;
   invalidCitationCount: number;
   page: AggregatedUrlRecord[];
   nextCursor: UrlCursor | null;
+  /** 신규 판정을 했으면 신규 URL 수(신규만 보기 적용 전), 안 했으면 null */
+  newUrlCount: number | null;
 };
 
 /**
@@ -572,20 +654,39 @@ function aggregateUrlsCore(rows: CitationRow[], opts: UrlCoreOptions): UrlCoreRe
     };
   });
 
-  all.sort(compareUrl);
+  // 신규 판정 — 정렬·페이지네이션 **전에** 붙이고(신규만 보기면 거른다), 그래야 cursor 가
+  // 신규만 남긴 목록 기준으로 이어진다.
+  let newUrlCount: number | null = null;
+  let list: AggregatedUrlRecord[] = all;
+  if (opts.newness) {
+    const nz = opts.newness;
+    newUrlCount = 0;
+    for (const rec of list) {
+      const periodFirstMs = urlMap.get(rec.canonicalUrlKey)?.firstSeenMs ?? 0;
+      const cached = nz.firstSeenMs(rec.canonicalUrlKey);
+      const allTimeMs = cached === null ? periodFirstMs : Math.min(cached, periodFirstMs);
+      const isNew = allTimeMs >= nz.fromMs;
+      (rec as AggregatedUrlRecord & NewnessFields).isNew = isNew;
+      (rec as AggregatedUrlRecord & NewnessFields).firstSeenAllTime = new Date(allTimeMs).toISOString();
+      if (isNew) newUrlCount++;
+    }
+    if (nz.newOnly) list = list.filter((r) => (r as NewnessFields).isNew === true);
+  }
 
-  const uniqueUrlCount = all.length;
+  list.sort(compareUrl);
+
+  const uniqueUrlCount = list.length;
 
   // keyset 페이지네이션 — cursor 이후 항목부터 pageSize 만큼
-  const startIdx = cursor ? firstIndexAfterCursor(all, cursor) : 0;
-  const page = all.slice(startIdx, startIdx + pageSize);
-  const hasMore = startIdx + pageSize < all.length;
+  const startIdx = cursor ? firstIndexAfterCursor(list, cursor) : 0;
+  const page = list.slice(startIdx, startIdx + pageSize);
+  const hasMore = startIdx + pageSize < list.length;
   const nextCursor: UrlCursor | null =
     hasMore && page.length > 0
       ? { t: page[page.length - 1].totalCount, k: page[page.length - 1].canonicalUrlKey }
       : null;
 
-  return { uniqueUrlCount, invalidCitationCount, page, nextCursor };
+  return { uniqueUrlCount, invalidCitationCount, page, nextCursor, newUrlCount };
 }
 
 /** AggregatedUrlRecord → BrandCitationUrl (소유 뷰는 title 을 노출하지 않음 — 기존 응답 shape 보존) */
@@ -604,18 +705,19 @@ export function aggregateBrandCitationUrls(
 ): AggregateResult {
   const core = aggregateUrlsCore(rows, {
     // 소유 유튜브 영상(owned)이거나 브랜드 공식 URL 이면 "내 사이트" 로 포함(계획 v2 §5 결정 D1).
-    keep: (_row, norm, owned) =>
-      owned || isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+    keep: ownedViewKeep(opts.brandKeySet),
     ownedVideoIds: opts.ownedVideoIds,
     promptInlineLimit: opts.promptInlineLimit,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
+    newness: opts.newness,
   });
   return {
     uniqueUrlCount: core.uniqueUrlCount,
     invalidCitationCount: core.invalidCitationCount,
     urls: core.page.map(toBrandCitationUrl),
     nextCursor: core.nextCursor,
+    newUrlCount: core.newUrlCount,
   };
 }
 
@@ -631,27 +733,22 @@ export function aggregateBrandMentionUrls(
   rows: CitationRow[],
   opts: MentionAggregateOptions,
 ): MentionAggregateResult {
-  const ownWebsiteKeys = [...opts.brandKeySet];
   const core = aggregateUrlsCore(rows, {
     // 언급 판정 + 소유(내 사이트) 아님 + 소유 유튜브 영상 아님(!owned) → 제3자 언급만(R5·중복
-    // 방지). isOwnedCitationUrl 은 press-domain-match.ts 와 공유하는 판정을 원본 raw URL 에
-    // 한 번 더 적용한다(2026-09-23 개정 — 위 헤더 주석 참조). 기존 두 조건과 겹치는 경우가
-    // 대부분이라 결과가 좁아지는 방향으로만 작동한다(과다 제외 없음).
-    keep: (row, norm, owned) =>
-      isBrandMentionText(row.title, row.description, opts.brandTerms) &&
-      !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet) &&
-      !owned &&
-      !isOwnedCitationUrl(row.url ?? row.domain, ownWebsiteKeys, opts.ownedVideoIds),
+    // 방지). 판정 본문은 mentionViewKeep 한 곳에 있다(최초 인용 캐시와 공유).
+    keep: mentionViewKeep(opts.brandKeySet, opts.brandTerms, opts.ownedVideoIds),
     ownedVideoIds: opts.ownedVideoIds,
     promptInlineLimit: opts.promptInlineLimit,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
+    newness: opts.newness,
   });
   return {
     uniqueUrlCount: core.uniqueUrlCount,
     invalidCitationCount: core.invalidCitationCount,
     urls: core.page,
     nextCursor: core.nextCursor,
+    newUrlCount: core.newUrlCount,
   };
 }
 
@@ -831,8 +928,7 @@ export function aggregatePromptsForUrl(
   },
 ): PromptPageResult {
   return aggregatePromptsCore(rows, targetCanonicalUrlKey, {
-    keep: (_row, norm, owned) =>
-      owned || isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet),
+    keep: ownedViewKeep(opts.brandKeySet),
     ownedVideoIds: opts.ownedVideoIds,
     pageSize: opts.pageSize,
     cursor: opts.cursor,
@@ -855,15 +951,9 @@ export function aggregateMentionPromptsForUrl(
   targetCanonicalUrlKey: string,
   opts: MentionPromptsOptions,
 ): PromptPageResult {
-  const ownWebsiteKeys = [...opts.brandKeySet];
   return aggregatePromptsCore(rows, targetCanonicalUrlKey, {
-    // isOwnedCitationUrl 추가 이유는 aggregateBrandMentionUrls 와 동일(위 헤더 주석 참조) —
-    // 이 드릴다운이 그 목록의 URL 을 대상으로 하므로 같은 keep 조건을 유지해야 한다.
-    keep: (row, norm, owned) =>
-      isBrandMentionText(row.title, row.description, opts.brandTerms) &&
-      !isBrandCitationKey(norm.host, norm.canonicalUrlKey, opts.brandKeySet) &&
-      !owned &&
-      !isOwnedCitationUrl(row.url ?? row.domain, ownWebsiteKeys, opts.ownedVideoIds),
+    // 이 드릴다운이 그 목록의 URL 을 대상으로 하므로 목록과 같은 keep 조건(mentionViewKeep)을 쓴다.
+    keep: mentionViewKeep(opts.brandKeySet, opts.brandTerms, opts.ownedVideoIds),
     ownedVideoIds: opts.ownedVideoIds,
     pageSize: opts.pageSize,
     cursor: opts.cursor,

@@ -150,3 +150,151 @@ export function buildYoutubeVideoPrefilter(): SQL {
     OR (${sql.raw("cite->>'url'")} ILIKE '%google.%' ESCAPE '\\' AND (${sql.raw("cite->>'url'")} ILIKE '%youtu.be%' ESCAPE '\\' OR ${sql.raw("cite->>'url'")} ILIKE '%youtube%' ESCAPE '\\'))
   )`;
 }
+
+/* ── 빠른 사전 필터 (2026-11-06 — 90일·전체 기간 속도) ─────────────────────────────────────────────
+ * 운영 실측(90일 인용 11.9만 줄): 위 빌더처럼 `cite->>'url' ILIKE ...` 를 패턴마다 따로 쓰면 인용 한 줄에서
+ * jsonb 값 꺼내기·대소문자 비교를 패턴 수만큼(브랜드 9곳 × url·domain = 18번) 반복해 3～4초가 걸렸다.
+ * 아래 빌더는 값을 **한 번** 꺼내 소문자로 만든 뒤 패턴 배열과 한 번에 비교한다(`LIKE ANY`) — PostgreSQL 은
+ * `식 LIKE ANY(배열)` 의 왼쪽 식을 한 번만 계산한다. 같은 90일이 1.4초 안팎으로 줄었다.
+ *
+ * 브랜드 사이트 사전 필터는 호스트 대신 **판정 키 그대로**(buildTargetKeys — 일반 사이트는 호스트, 소셜은
+ * 호스트/채널)로 거른다. 최종 판정(isBrandCitationKey)이 받아들이는 인용은 주소 문자열에 그 키가 반드시
+ * 들어 있으므로 상위 집합이 유지되고, 공용 플랫폼(blog.naver.com·youtube.com 등)의 남의 글은 미리 빠진다
+ * (90일 27,696 → 3,530줄 · 전체 76,095 → 8,497줄). 채널 이름이 퍼센트 인코딩/한글 원문 어느 쪽으로 적혀도
+ * 잡히게 두 형태를 모두 넣는다. 최종 판정 로직은 그대로다.
+ */
+
+function likePatternArray(values: string[]): SQL {
+  return sql`ARRAY[${sql.join(
+    values.map((v) => sql`${`%${escapeIlike(v)}%`}`),
+    sql`, `,
+  )}]::text[]`;
+}
+
+function safeDecode(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
+/**
+ * 브랜드 사이트 사전 필터 — 판정 키(buildTargetKeys 결과)로 거른다. 최종 판정(isBrandCitationKey)의 **상위 집합**.
+ *
+ * 2026-11-06 검수 S1 — 「호스트/채널」 키를 주소에 통째로(부분 문자열) 비교하면, 정규화 후에는 같은 주소인데
+ * 원문 모양이 달라 빠지는 경우가 있었다(`//BrandBlog01` 이중 슬래시 · `:443` 포트 · `/x/../brandblog01` ·
+ * `%40`(@) 인코딩 핸들 · 인코딩 섞인 한글 핸들). 그래서 소셜 키는 두 조각으로 나눠 본다.
+ *   ① 일반 사이트 키(호스트)  : 주소·도메인에 그 호스트가 들어 있음 (서브도메인·포트·대소문자 무관)
+ *   ② 소셜 키(호스트/채널)    : 주소에 그 호스트가 있고, 다음 중 하나
+ *        - 채널 이름(앞의 @ 를 뗀 것)이 원문·디코드·인코드 어느 형태로든 들어 있음
+ *          → 이중 슬래시·포트·`..`·대소문자 차이는 채널 이름 조각만 보므로 통과한다
+ *        - 주소에 `%` 가 있음 → 인코딩이 섞여 위 비교를 보장할 수 없는 주소는 호스트 단위 후보로 남긴다
+ * 주소는 한 번만 꺼내 소문자로 만든 뒤(하위 SELECT) 모든 비교에 재사용한다. 최종 판정 로직은 그대로다.
+ * @returns 키가 없으면 항상-거짓(빈 결과)
+ */
+export type BrandKeyPrefilterPlan = { hosts: string[]; social: Array<{ host: string; handles: string[] }> };
+
+/** 사전 필터 계획 — SQL 빌더와 JS 거울(brandKeyPrefilterAccepts)이 같은 계획을 쓴다 */
+export function planBrandKeyPrefilter(targetKeys: string[]): BrandKeyPrefilterPlan {
+  const hosts = new Set<string>();
+  const social = new Map<string, Set<string>>(); // 소셜 호스트 → 채널 이름 조각들
+  for (const k of targetKeys) {
+    const lower = k.trim().toLowerCase();
+    if (!lower) continue;
+    const slash = lower.indexOf("/");
+    if (slash < 0) {
+      hosts.add(lower);
+      continue;
+    }
+    const host = lower.slice(0, slash);
+    const handle = lower.slice(slash + 1).replace(/^@/, "").replace(/^%40/, "");
+    if (!host || !handle) continue;
+    let set = social.get(host);
+    if (!set) {
+      set = new Set();
+      social.set(host, set);
+    }
+    const decoded = safeDecode(handle).toLowerCase();
+    set.add(handle);
+    set.add(decoded);
+    set.add(encodeURIComponent(decoded).toLowerCase());
+  }
+  return {
+    hosts: [...hosts],
+    social: [...social].map(([host, hs]) => ({ host, handles: [...hs] })),
+  };
+}
+
+/**
+ * 계획 → LIKE 패턴 두 묶음.
+ *   주소용  : 일반 사이트 호스트 `%host%` · 소셜 `%host%채널%`(호스트 뒤 어딘가에 채널 이름 조각) · 소셜 `%host%\%%`
+ *             (호스트 뒤에 `%` — 인코딩이 섞여 조각 비교를 보장 못 하는 주소는 호스트 단위 후보로 남긴다)
+ *   도메인용: 주소용과 같은 묶음(최종 판정은 주소가 비었을 때 도메인 칸을 주소처럼 읽으므로 같은 규칙으로 본다)
+ * 최종 판정이 받아들이는 소셜 주소는 호스트가 경로보다 앞에 오므로 「호스트 뒤 채널」 형태로 빠짐없이 잡힌다.
+ * 2026-11-06 실측: 처음엔 하위 SELECT 로 주소를 한 번만 꺼내 비교했는데 줄마다 하위 계획이 돌아 첫 요청이
+ * 2.9 → 8.0초로 느려졌다. 패턴 배열 두 개(`LIKE ANY` — 왼쪽 식은 한 번만 계산)로 같은 상위 집합을 표현한다.
+ */
+export function brandKeyPrefilterPatterns(plan: BrandKeyPrefilterPlan): { url: string[]; domain: string[] } {
+  const hostPats = plan.hosts.map((h) => `%${escapeIlike(h)}%`);
+  const url = [...hostPats];
+  for (const { host, handles } of plan.social) {
+    const h = escapeIlike(host);
+    for (const handle of handles) url.push(`%${h}%${escapeIlike(handle)}%`);
+    url.push(`%${h}%\\%%`);
+  }
+  const all = [...new Set(url)];
+  return { url: all, domain: all };
+}
+
+/** SQL LIKE 를 JS 로 — 백슬래시 이스케이프 포함 (테스트·거울용) */
+export function likeMatches(value: string, pattern: string): boolean {
+  const esc = (c: string) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "\\") re += esc(pattern[++i] ?? "");
+    else if (c === "%") re += ".*";
+    else if (c === "_") re += ".";
+    else re += esc(c);
+  }
+  return new RegExp(`^${re}$`, "s").test(value);
+}
+
+/** 계획을 JS 로 그대로 적용 — SQL 과 같은 패턴으로 판정한다(테스트에서 상위 집합 확인용) */
+export function brandKeyPrefilterAccepts(
+  plan: BrandKeyPrefilterPlan,
+  url: string | null | undefined,
+  domain: string | null | undefined,
+): boolean {
+  const pats = brandKeyPrefilterPatterns(plan);
+  const lu = (url ?? "").toLowerCase();
+  const ld = (domain ?? "").toLowerCase();
+  return pats.url.some((p) => likeMatches(lu, p)) || pats.domain.some((p) => likeMatches(ld, p));
+}
+
+export function buildBrandKeyPrefilter(targetKeys: string[]): SQL {
+  const plan = planBrandKeyPrefilter(targetKeys);
+  if (plan.hosts.length === 0 && plan.social.length === 0) return sql`FALSE`;
+  const pats = brandKeyPrefilterPatterns(plan);
+  const arr = (vs: string[]) => sql`ARRAY[${sql.join(vs.map((v) => sql`${v}`), sql`, `)}]::text[]`;
+  const urlCond = sql`lower(${sql.raw("cite->>'url'")}) LIKE ANY(${arr(pats.url)})`;
+  if (pats.domain.length === 0) return sql`(${urlCond})`;
+  return sql`(${urlCond} OR lower(${sql.raw("cite->>'domain'")}) LIKE ANY(${arr(pats.domain)}))`;
+}
+
+/** 브랜드 언급 사전 필터 — buildBrandMentionPrefilter 와 같은 의미, 제목·설명을 한 번씩만 꺼내 비교 */
+export function buildBrandMentionPrefilterFast(terms: string[]): SQL {
+  const cleaned = [...new Set(terms.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0))];
+  if (cleaned.length === 0) return sql`FALSE`;
+  const arr = likePatternArray(cleaned);
+  return sql`(lower(${sql.raw("cite->>'title'")}) LIKE ANY(${arr}) OR lower(${sql.raw("cite->>'description'")}) LIKE ANY(${arr}))`;
+}
+
+/** 유튜브 영상 사전 필터 — buildYoutubeVideoPrefilter 와 같은 경로 목록, 주소를 한 번만 꺼내 비교 */
+export function buildYoutubeVideoPrefilterFast(): SQL {
+  return sql`(
+    lower(${sql.raw("cite->>'url'")}) LIKE ANY(ARRAY['%youtube.com/watch%', '%youtube.com/shorts/%', '%youtube.com/embed/%', '%youtube.com/live/%', '%youtube.com/v/%', '%youtube.com/attribution_link%', '%youtube-nocookie.com/%', '%youtu.be/%']::text[])
+    OR (lower(${sql.raw("cite->>'url'")}) LIKE '%google.%' AND lower(${sql.raw("cite->>'url'")}) LIKE ANY(ARRAY['%youtu.be%', '%youtube%']::text[]))
+  )`;
+}

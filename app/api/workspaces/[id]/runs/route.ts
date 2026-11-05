@@ -23,6 +23,7 @@ import { db, schema } from "@/lib/server/db";
 import { and, desc, sql } from "drizzle-orm";
 import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { buildRunsListConditions } from "@/lib/server/run-list-conditions";
+import { compressedJson } from "@/lib/server/json-compress";
 
 export const dynamic = "force-dynamic";
 
@@ -84,7 +85,8 @@ export async function GET(
       .from(schema.runs)
       .where(where);
 
-    return NextResponse.json({ runs: rows, total: count, limit, offset });
+    // 응답 목록은 한 페이지가 수 MB 라 brotli/gzip 으로 직접 압축해 보낸다 (json-compress.ts — 2026-11-05)
+    return compressedJson(req, { runs: rows, total: count, limit, offset });
   } catch (err) {
     // 응답 본문엔 SQL 원문을 싣지 않는다 — 상세는 서버 로그에만 남기고 고정 코드만 돌려준다.
     const cause = err instanceof Error ? err.cause : undefined;

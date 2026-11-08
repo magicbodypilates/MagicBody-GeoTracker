@@ -6,8 +6,9 @@
  *   계약 정본은 lib/server/page-analytics-normalize.ts 머리말이다. 여기서는 그 계약을 화면으로만 옮긴다.
  *
  * ⭐ 여기서 틀리면 사장님이 잘못된 숫자를 보신다 — 다섯 가지
- *   1. ×100 은 **딱 두 곳**: 요약 카드의 "클릭까지 간 방문 비율"(summary.clickedVisitRate) 과
- *      클릭 표의 "그 페이지를 본 방문 중 비율"(items[].clickRate). 둘 다 fmtPct 하나로만 통과시킨다.
+ *   1. ×100 은 **딱 세 곳**: 요약 카드의 "클릭까지 간 방문 비율"(summary.clickedVisitRate) 과
+ *      클릭 표의 "그 페이지를 본 방문 중 비율"(items[].clickRate), 소개영상 단계표의 "재생한 방문 중"(단계 방문 ÷ 재생 방문).
+ *      셋 다 fmtPct 하나로만 통과시킨다.
  *      ⛔ 조회 수·방문 수·진입 수·클릭 수는 절대 ×100 하지 않는다.
  *   2. **null 은 0% 가 아니다.** "잰 적이 없다"이므로 "—" 로 적는다. 0% 로 그리면 "아무도 안 눌렀다"로 읽힌다.
  *   3. 증감률은 (조회 − 직전 조회) ÷ 직전 조회. **직전 값이 null 이면 아예 그리지 않는다**(0 취급 금지).
@@ -179,6 +180,23 @@ const CLICK_KIND_LABEL: Record<PageClickKind, string> = {
  * ⚠️ 서버 PageClickMarkerRegistry.CommonAreaRoute · 사이트 contentClickLabel.js 의 값과 같아야 한다.
  */
 const COMMON_AREA_ROUTE = "regularClassOffline";
+
+/**
+ * 상품 상세 맨 위 「상단 소개영상」의 재생·시청 단계 표식 (2026-11-09 사장님 요청 — 몇 명이 어디까지 봤나).
+ * 사이트(MagicBody-Web introVideoTracking.js)가 보내고 서버(PageClickMarkerRegistry)가 이름을 붙인다 — 이름을 바꾸려면 세 곳을 함께.
+ * 시청 단계(10%～끝까지)는 클릭이 아니라 **본 정도**라 클릭 표에서 빼고 단계표로만 보여준다. 재생은 누른 것이라 클릭 표에도 남는다.
+ * 순서 고정: 재생 → 10% → 25% → 50% → 75% → 끝까지.
+ */
+const INTRO_VIDEO_STAGES: { target: string; label: string }[] = [
+  { target: "intro_video_play", label: "재생" },
+  { target: "intro_video_10", label: "10%" },
+  { target: "intro_video_25", label: "25%" },
+  { target: "intro_video_50", label: "50%" },
+  { target: "intro_video_75", label: "75%" },
+  { target: "intro_video_end", label: "끝까지(95% 이상)" },
+];
+const INTRO_VIDEO_PLAY = "intro_video_play";
+const INTRO_VIDEO_TARGETS = new Set(INTRO_VIDEO_STAGES.map((s) => s.target));
 
 /** 오류 코드 → 사람 말 (관심 고객 화면과 같은 어휘). */
 const ERROR_MESSAGES: Record<string, string> = {
@@ -969,6 +987,24 @@ function PageRowGroup({
   );
 }
 
+/**
+ * 클릭 줄을 「소개영상 단계」와 「진짜 클릭」으로 가른다.
+ * ⚠️ 소개영상으로 보는 것은 표식 종류가 marker 이고 이름이 위 단계 목록에 있는 줄뿐이다. `intro_video_` 로 시작해도
+ *    목록에 없는 새 이름은 조용히 사라지지 않게 클릭 표에 그대로 남긴다(서버에 이름을 등록하지 않았다면 「이름 미등록」으로 보인다).
+ */
+function splitIntroVideoRows(items: ClickRow[]): { intro: ClickRow[]; clicks: ClickRow[] } {
+  const intro: ClickRow[] = [];
+  const clicks: ClickRow[] = [];
+  for (const it of items) {
+    if (it.clickKind === "marker" && INTRO_VIDEO_TARGETS.has(it.clickTarget)) {
+      intro.push(it);
+      // 재생은 실제로 누른 것이라 클릭 표에도 남긴다 — 서버 요약 「총 클릭 수」와 같은 기준(검수 D2).
+      if (it.clickTarget === INTRO_VIDEO_PLAY) clicks.push(it);
+    } else clicks.push(it);
+  }
+  return { intro, clicks };
+}
+
 /** 표 ③ — 그 페이지에서 무엇을 눌렀나. 줄을 펼칠 때만 조회한다. */
 function ClickPanel({
   routeName,
@@ -1024,6 +1060,11 @@ function ClickPanel({
     return () => ac.abort();
   }, [routeName, pathParam, rangeParams, excludeInternal]);
 
+  // 소개영상 단계 줄은 클릭 표에서 빼고 따로 보여준다(클릭이 아니라 본 정도이므로).
+  const split = useMemo(() => (data ? splitIntroVideoRows(data.items) : null), [data]);
+  const introRows = split ? split.intro : [];
+  const clickItems = split ? split.clicks : [];
+
   return (
     <div className="space-y-4 border-l-2 border-th-accent/50 px-4 py-3">
       {!loaded ? (
@@ -1042,6 +1083,16 @@ function ClickPanel({
             totalCount={data.postsTotalCount}
           />
 
+          {/* ── 상단 소개영상 — 어디까지 봤나 (소개영상 줄이 있을 때만 · 2026-11-09) ── */}
+          {introRows.length > 0 && (
+            <IntroVideoTable
+              rows={introRows}
+              pageVisitCount={data.pageVisitCount}
+              truncated={data.truncated}
+              visitCountIsPeriodSum={data.visitCountIsPeriodSum}
+            />
+          )}
+
           {/* ── 이 화면에서 무엇을 눌렀나 ─────────────────────────────── */}
           <div>
             <div className="mb-1 flex flex-wrap items-baseline gap-2">
@@ -1051,7 +1102,8 @@ function ClickPanel({
               </span>
               {data.truncated && (
                 <span className="rounded border border-th-warning/50 bg-th-warning-soft px-1.5 py-px text-[10px] text-th-text-secondary">
-                  상위 {data.items.length}개만 표시 (전체 {fmtInt(data.totalCount)}개)
+                  {/* 시청 단계 줄은 아래 표에서 빠지므로 개수에서도 뺀다(검수 D1). */}
+                  상위 {clickItems.length}개만 표시 (전체 {fmtInt(data.totalCount - (data.items.length - clickItems.length))}개)
                 </span>
               )}
             </div>
@@ -1068,7 +1120,7 @@ function ClickPanel({
               </div>
             )}
 
-            {data.items.length === 0 ? (
+            {clickItems.length === 0 ? (
               <p className="py-3 text-[11px] text-th-text-muted">
                 이 기간 동안 이 화면에서 눌린 자리가 없습니다. (콘텐츠 카드·신청·상담 버튼과 외부로 나간 링크를
                 셉니다.{" "}
@@ -1104,7 +1156,7 @@ function ClickPanel({
                       </tr>
                     </thead>
                     <tbody>
-                      {data.items.map((it) => (
+                      {clickItems.map((it) => (
                         <tr key={`${it.clickKind}-${it.clickTarget}`} className="border-b border-th-border-subtle">
                           <td className="max-w-[260px] py-1.5 pr-2" title={it.clickTarget}>
                             <span className="align-middle text-th-text">{it.displayName}</span>
@@ -1148,7 +1200,7 @@ function ClickPanel({
                     합계입니다 — 여러 날 오신 분이 여러 번 세어져 비율이 실제보다 낮게 보일 수 있습니다.
                   </p>
                 )}
-                {data.items.some((i) => i.clickRate === null) && (
+                {clickItems.some((i) => i.clickRate === null) && (
                   <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
                     ⓘ 비율이 &lsquo;—&rsquo;인 줄은{" "}
                     <strong className="text-th-text">0%가 아니라 잴 수 없는 것</strong>입니다(견줄 방문 수가
@@ -1157,7 +1209,7 @@ function ClickPanel({
                 )}
                 {/* 지난 기록의 외부 링크 줄은 숨기지 않는다 — 그 클릭이 상단 메뉴·푸터에서 났는지 기록에 남아 있지 않다
                     (검수 D1 · 계획 승인 때 사장님께 고지). 오프라인 정규과정은 원래 상단 메뉴·푸터 클릭을 세므로 안내가 필요 없다. */}
-                {routeName !== COMMON_AREA_ROUTE && data.items.some((i) => i.clickKind === "external_link") && (
+                {routeName !== COMMON_AREA_ROUTE && clickItems.some((i) => i.clickKind === "external_link") && (
                   <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
                     ⓘ 이번 개편 전 기록의 외부 링크 줄에는 상단 메뉴·푸터에서 누른 것이 섞여 있습니다. 상담 버튼은
                     외부 링크가 아니라 &lsquo;상담·문의 버튼(카카오톡 채널)&rsquo; 줄로 모든 화면에서 셉니다.
@@ -1177,6 +1229,94 @@ function ClickPanel({
             />
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/* ── 상단 소개영상 — 어디까지 봤나 (2026-11-09 사장님 요청 — 상품 상세를 펼쳤을 때) ──── */
+
+/**
+ * 상품 상세 맨 위 소개영상을 **어느 단계까지 본 방문이 몇 건인지** 보여준다. 단계 줄은 서버가 클릭 줄과 같은 모양으로 주므로
+ * (clickKind=marker · clickTarget=intro_video_…) 화면이 단계 순서(재생 → 10% → … → 끝까지)로 다시 늘어놓는다.
+ * ⚠️ 줄이 없는 단계는 **0건**이다(그 단계까지 본 방문이 없다). 단 클릭 줄이 잘렸으면(truncated) 못 본 것일 수 있어 안내한다.
+ * ⚠️ 「재생한 방문 중」은 단계 방문 ÷ 재생 방문이다. 재생한 방문이 0이면 0%가 아니라 「—」(잴 수 없다).
+ * ⚠️ ×100 은 fmtPct 한 곳에서만 한다(여기서는 0～1 비율을 넘긴다).
+ */
+function IntroVideoTable({
+  rows,
+  pageVisitCount,
+  truncated,
+  visitCountIsPeriodSum,
+}: {
+  rows: ClickRow[];
+  pageVisitCount: number;
+  truncated: boolean;
+  visitCountIsPeriodSum: boolean;
+}) {
+  const byTarget = new Map(rows.map((r) => [r.clickTarget, r]));
+  const playedVisits = byTarget.get(INTRO_VIDEO_PLAY)?.clickVisitCount ?? 0;
+
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+        <h4 className="text-sm font-semibold text-th-text">상단 소개영상 — 어디까지 봤나</h4>
+      </div>
+
+      <div className="-ml-4 overflow-x-auto pl-4">
+        <table className="w-full min-w-[560px] text-xs">
+          <thead>
+            <tr className="border-b border-th-border text-left text-th-text-muted">
+              <th className="py-1.5 pr-2">단계</th>
+              <th className="py-1.5 pr-3 text-right" title="그 단계까지 본 방문 수입니다.">
+                본 방문
+              </th>
+              <th
+                className="py-1.5 pr-3 text-right"
+                title="영상을 재생한 방문 가운데 그 단계까지 본 방문의 비율입니다. 재생한 방문이 없으면 '—'입니다."
+              >
+                재생한 방문 중
+              </th>
+              <th
+                className="py-1.5 pr-4 text-right"
+                title="이 화면을 본 방문 가운데 그 단계까지 본 방문의 비율입니다. 잴 수 없으면 '—'입니다."
+              >
+                이 화면을 본 방문 중
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {INTRO_VIDEO_STAGES.map((s) => {
+              const r = byTarget.get(s.target);
+              const visits = r ? r.clickVisitCount : 0;
+              const ofPlayed = playedVisits > 0 ? visits / playedVisits : null;
+              const ofPage = r ? r.clickRate : pageVisitCount > 0 ? 0 : null;
+              return (
+                <tr key={s.target} className="border-b border-th-border-subtle">
+                  <td className="py-1.5 pr-2 text-th-text">{s.label}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(visits)}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">{fmtPct(ofPlayed)}</td>
+                  <td className="py-1.5 pr-4 text-right font-mono text-th-text-secondary">{fmtPct(ofPage)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="mt-2 text-[11px] leading-relaxed text-th-text-muted">
+        ⓘ 방문은 한 번 들어와 머문 것을 한 건으로 셉니다(같은 분이 다시 들어오면 따로 셉니다). 영상을 앞으로 건너뛰면
+        그 지점까지 본 것으로 셉니다 — 그 구간을 전부 본 것은 아닙니다.
+      </p>
+      {visitCountIsPeriodSum && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 기간은 날짜별 요약 기준이라 방문 수가 날짜별 합계입니다 — 여러 날 오신 분이 여러 번 세어질 수 있습니다.
+        </p>
+      )}
+      {truncated && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 화면은 눌린 자리가 많아 일부 줄이 잘려 보입니다 — 0으로 보이는 단계는 실제보다 낮을 수 있습니다.
+        </p>
       )}
     </div>
   );

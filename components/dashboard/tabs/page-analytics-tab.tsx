@@ -198,6 +198,40 @@ const INTRO_VIDEO_STAGES: { target: string; label: string }[] = [
 const INTRO_VIDEO_PLAY = "intro_video_play";
 const INTRO_VIDEO_TARGETS = new Set(INTRO_VIDEO_STAGES.map((s) => s.target));
 
+/**
+ * 오프라인 정규과정 교육소개 섹션 — 메뉴 순서·제목.
+ * 사이트(MagicBody-Web RegularclassIntroInline.vue RC_NAV_ITEMS)·서버 이름표(PageClickMarkerRegistry rc_sec_*·rc_nav_*)와 한 쌍이다.
+ * 섹션 본(rc_sec_<id>) = 화면에 2초 이상 머문 방문 · 섹션 메뉴(rc_nav_<id>) = 섹션 이동 메뉴로 찾아간 방문.
+ */
+const RC_SECTIONS: { id: string; title: string }[] = [
+  { id: "rc-clip", title: "수강생이 소개로 오는 이유" },
+  { id: "concerns", title: "가장 많이 들은 고민" },
+  { id: "key-numbers", title: "한눈에 보는 매직바디" },
+  { id: "differentiators", title: "6가지 차별점" },
+  { id: "rehab-curriculum", title: "15년 연구한 재활 커리큘럼" },
+  { id: "aftercare", title: "매달 무료 사후관리 교육" },
+  { id: "employment-system", title: "취업까지 책임지는 5단계" },
+  { id: "alumni-network", title: "6,438명 동문 네트워크" },
+  { id: "market-truth", title: "수강료가 천차만별인 이유" },
+  { id: "guarantee-sec", title: "100% 환불 보장" },
+  { id: "ceo-roadmap", title: "11주 커리큘럼" },
+  { id: "personas", title: "나도 강사가 될 수 있을까?" },
+  { id: "lifetime-assets", title: "수료 후 평생 자산" },
+  { id: "preview-lectures", title: "온라인 강의 맛보기" },
+  { id: "reviews", title: "졸업생 후기" },
+  { id: "global-cert", title: "해외로 뻗어 나가는 자격증" },
+  { id: "faq", title: "자주 묻는 질문" },
+];
+const RC_SECTION_VIEW = "rc_sec_";
+const RC_SECTION_NAV = "rc_nav_";
+const RC_SECTION_TARGETS = new Set(RC_SECTIONS.flatMap((s) => [RC_SECTION_VIEW + s.id, RC_SECTION_NAV + s.id]));
+/**
+ * 섹션 표를 보여주는 유일한 화면 — 교육소개 본문이 그려지는 오프라인 정규과정(기록이 없어도 전부 0으로 보인다).
+ * 다른 줄(강의 상세 묶음 등)은 방문 수가 다른 강의까지 합친 값이라 「들어온 방문 중」이 틀리므로 표를 그리지 않고,
+ * 그 줄의 섹션 기록은 클릭 표에 그대로 남긴다.
+ */
+const RC_SECTION_ROUTE = "regularClassOffline";
+
 /** 오류 코드 → 사람 말 (관심 고객 화면과 같은 어휘). */
 const ERROR_MESSAGES: Record<string, string> = {
   invalid_input: "조회 조건이 올바르지 않습니다. 기간을 다시 골라 주세요. (최대 1,095일)",
@@ -991,21 +1025,27 @@ function PageRowGroup({
 }
 
 /**
- * 클릭 줄을 「소개영상 단계」와 「진짜 클릭」으로 가른다.
- * ⚠️ 소개영상으로 보는 것은 표식 종류가 marker 이고 이름이 위 단계 목록에 있는 줄뿐이다. `intro_video_` 로 시작해도
+ * 클릭 줄을 「소개영상 단계」·「교육소개 섹션」·「진짜 클릭」으로 가른다. 섹션 줄은 withSections 일 때(오프라인 정규과정)만 가른다.
+ * ⚠️ 소개영상·섹션으로 보는 것은 표식 종류가 marker 이고 이름이 위 목록에 있는 줄뿐이다. 앞부분이 같아도
  *    목록에 없는 새 이름은 조용히 사라지지 않게 클릭 표에 그대로 남긴다(서버에 이름을 등록하지 않았다면 「이름 미등록」으로 보인다).
  */
-function splitIntroVideoRows(items: ClickRow[]): { intro: ClickRow[]; clicks: ClickRow[] } {
+function splitClickRows(
+  items: ClickRow[],
+  withSections: boolean,
+): { intro: ClickRow[]; sections: ClickRow[]; clicks: ClickRow[] } {
   const intro: ClickRow[] = [];
+  const sections: ClickRow[] = [];
   const clicks: ClickRow[] = [];
   for (const it of items) {
     if (it.clickKind === "marker" && INTRO_VIDEO_TARGETS.has(it.clickTarget)) {
       intro.push(it);
       // 재생은 실제로 누른 것이라 클릭 표에도 남긴다 — 서버 요약 「총 클릭 수」와 같은 기준(검수 D2).
       if (it.clickTarget === INTRO_VIDEO_PLAY) clicks.push(it);
+    } else if (withSections && it.clickKind === "marker" && RC_SECTION_TARGETS.has(it.clickTarget)) {
+      sections.push(it);
     } else clicks.push(it);
   }
-  return { intro, clicks };
+  return { intro, sections, clicks };
 }
 
 /** 표 ③ — 그 페이지에서 무엇을 눌렀나. 줄을 펼칠 때만 조회한다. */
@@ -1063,9 +1103,11 @@ function ClickPanel({
     return () => ac.abort();
   }, [routeName, pathParam, rangeParams, excludeInternal]);
 
-  // 소개영상 단계 줄은 클릭 표에서 빼고 따로 보여준다(클릭이 아니라 본 정도이므로).
-  const split = useMemo(() => (data ? splitIntroVideoRows(data.items) : null), [data]);
+  // 소개영상 단계·교육소개 섹션 줄은 클릭 표에서 빼고 따로 보여준다(클릭이 아니라 본 정도이므로).
+  const withSections = routeName === RC_SECTION_ROUTE;
+  const split = useMemo(() => (data ? splitClickRows(data.items, withSections) : null), [data, withSections]);
   const introRows = split ? split.intro : [];
+  const sectionRows = split ? split.sections : [];
   const clickItems = split ? split.clicks : [];
 
   return (
@@ -1090,6 +1132,16 @@ function ClickPanel({
           {introRows.length > 0 && (
             <IntroVideoTable
               rows={introRows}
+              pageVisitCount={data.pageVisitCount}
+              truncated={data.truncated}
+              visitCountIsPeriodSum={data.visitCountIsPeriodSum}
+            />
+          )}
+
+          {/* ── 교육소개 — 섹션별로 얼마나 봤나 (오프라인 정규과정 줄에서만) ── */}
+          {withSections && (
+            <SectionViewTable
+              rows={sectionRows}
               pageVisitCount={data.pageVisitCount}
               truncated={data.truncated}
               visitCountIsPeriodSum={data.visitCountIsPeriodSum}
@@ -1319,6 +1371,100 @@ function IntroVideoTable({
       {truncated && (
         <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
           ⓘ 이 화면은 눌린 자리가 많아 일부 줄이 잘려 보입니다 — 0으로 보이는 단계는 실제보다 낮을 수 있습니다.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ── 교육소개 — 섹션별로 얼마나 봤나 (오프라인 정규과정을 펼쳤을 때) ──── */
+
+/**
+ * 교육소개 섹션마다 **본 방문**(화면에 2초 이상 머문 방문)과 **메뉴로 찾아간 방문**을 메뉴 순서대로 보여준다.
+ * 섹션마다 따로 센 숫자다 — 메뉴로 건너뛸 수 있어 앞 섹션보다 뒤 섹션이 클 수 있다(누적 도달이 아니다).
+ * ⚠️ 줄이 없는 섹션은 **0건**이다. 단 클릭 줄이 잘렸으면(truncated) 못 본 것일 수 있어 안내한다.
+ * ⚠️ 「들어온 방문 중」은 서버 clickRate(본 방문 ÷ 이 화면 방문)를 쓰고, ×100 은 fmtPct 한 곳에서만 한다.
+ */
+function SectionViewTable({
+  rows,
+  pageVisitCount,
+  truncated,
+  visitCountIsPeriodSum,
+}: {
+  rows: ClickRow[];
+  pageVisitCount: number;
+  truncated: boolean;
+  visitCountIsPeriodSum: boolean;
+}) {
+  const byTarget = new Map(rows.map((r) => [r.clickTarget, r]));
+  const empty = rows.length === 0;
+
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+        <h4 className="text-sm font-semibold text-th-text">교육소개 — 섹션별로 얼마나 봤나</h4>
+      </div>
+      <p className="mb-1 text-[11px] leading-relaxed text-th-text-muted">
+        섹션이 화면에 2초 이상 머문 방문만 셉니다. 메뉴를 눌러 지나친 섹션은 세지 않습니다.
+      </p>
+
+      <div className="-ml-4 overflow-x-auto pl-4">
+        <table className="w-full min-w-[560px] text-xs">
+          <thead>
+            <tr className="border-b border-th-border text-left text-th-text-muted">
+              <th className="py-1.5 pr-2">섹션</th>
+              <th className="py-1.5 pr-3 text-right" title="그 섹션이 화면에 2초 이상 머문 방문 수입니다.">
+                본 방문
+              </th>
+              <th
+                className="py-1.5 pr-3 text-right"
+                title="이 화면에 들어온 방문 가운데 그 섹션을 본 방문의 비율입니다. 잴 수 없으면 '—'입니다."
+              >
+                들어온 방문 중
+              </th>
+              <th className="py-1.5 pr-4 text-right" title="섹션 이동 메뉴에서 그 섹션을 눌러 찾아간 방문 수입니다.">
+                메뉴로 찾아간 방문
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {RC_SECTIONS.map((s) => {
+              const v = byTarget.get(RC_SECTION_VIEW + s.id);
+              const n = byTarget.get(RC_SECTION_NAV + s.id);
+              const viewed = v ? v.clickVisitCount : 0;
+              const ofPage = v ? v.clickRate : pageVisitCount > 0 ? 0 : null;
+              return (
+                <tr key={s.id} className="border-b border-th-border-subtle">
+                  <td className="py-1.5 pr-2 text-th-text">{s.title}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(viewed)}</td>
+                  <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">{fmtPct(ofPage)}</td>
+                  <td className="py-1.5 pr-4 text-right font-mono text-th-text-secondary">
+                    {fmtInt(n ? n.clickVisitCount : 0)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="mt-2 text-[11px] leading-relaxed text-th-text-muted">
+        ⓘ 섹션마다 따로 셉니다 — 메뉴로 건너뛸 수 있어 뒤 섹션 숫자가 앞 섹션보다 클 수 있습니다. 방문은 한 번 들어와
+        머문 것을 한 건으로 셉니다.
+      </p>
+      {empty && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 기간에는 섹션 기록이 없습니다. 섹션 기록은 이 기능을 사이트에 올린 날부터 쌓입니다.
+        </p>
+      )}
+      {visitCountIsPeriodSum && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 기간은 날짜별 요약 기준이라 방문 수가 날짜별 합계입니다 — 여러 날 오신 분이 여러 번 세어질 수 있습니다.
+        </p>
+      )}
+      {truncated && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 화면은 눌린 자리가 많아 일부 줄이 잘려 보입니다 — 0으로 보이는 섹션은 실제보다 낮을 수 있습니다.
         </p>
       )}
     </div>

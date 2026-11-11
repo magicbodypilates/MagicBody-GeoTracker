@@ -330,7 +330,7 @@ async function fetchAnalytics<T>(
 
 /* ── 기간 고르기 ─────────────────────────────────────────────────────────── */
 
-type RangeMode = "all" | 7 | 30 | 90 | "custom";
+type RangeMode = "all" | "today" | 7 | 30 | 90 | "custom";
 
 type Range =
   | { kind: "days"; days: number }
@@ -341,6 +341,7 @@ const ALL_TIME_FALLBACK_DAYS = 1095;
 
 const PRESETS: { key: RangeMode; label: string; title?: string }[] = [
   { key: "all", label: "전체 기간", title: "수집을 시작한 날부터 오늘까지 전부 봅니다." },
+  { key: "today", label: "오늘", title: "오늘 0시(한국 시간)부터 지금까지 봅니다." },
   { key: 7, label: "최근 7일" },
   { key: 30, label: "최근 30일" },
   { key: 90, label: "최근 90일" },
@@ -527,6 +528,8 @@ export function PageAnalyticsTab() {
         ? { kind: "custom", fromKst: stats.collectionStartedAt, toKst: kstDateBefore(0) }
         : { kind: "days", days: ALL_TIME_FALLBACK_DAYS };
     }
+    // 서버는 최근 1일을 오늘 0시(한국 시간)부터 지금까지 원본 기록으로 센다.
+    if (mode === "today") return { kind: "days", days: 1 };
     return { kind: "days", days: mode };
   }, [mode, customFrom, customTo, stats?.collectionStartedAt]);
 

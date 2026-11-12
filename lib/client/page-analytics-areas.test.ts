@@ -7,6 +7,8 @@ import {
   DETAIL_AREAS,
   DETAIL_AREA_TARGETS,
   isDetailAreaRoute,
+  buildRcSectionList,
+  rcSectionIdOf,
 } from "./page-analytics-areas";
 
 const row = (clickTarget: string, clickVisitCount: number, clickRate: number | null, clickKind = "marker") => ({
@@ -125,5 +127,37 @@ describe("buildAreaTableLines", () => {
     expect(keys.slice(i, i + 4)).toEqual(["intro", "sec:concerns", "sec:faq", "reviews"]);
     expect(lines[i + 2]).toMatchObject({ nested: true, viewed: 3, ofPage: 0.3, nav: 1, title: "자주 묻는 질문" });
     expect(lines[i + 1]).toMatchObject({ nested: true, viewed: 0, ofPage: 0, nav: 0 });
+  });
+});
+
+describe("섹션 목록 — 페이지 원본 기준", () => {
+  const rec = (t: string, kind = "marker") => ({ clickTarget: t, clickKind: kind });
+  it("rcSectionIdOf — 형식에 맞는 섹션 표식만 id 를 준다", () => {
+    expect(rcSectionIdOf("rc_sec_hero")).toBe("hero");
+    expect(rcSectionIdOf("rc_nav_rc-clip")).toBe("rc-clip");
+    expect(rcSectionIdOf("rc_sec_")).toBeNull();
+    expect(rcSectionIdOf("rc_sec_Bad_ID")).toBeNull();
+    expect(rcSectionIdOf("rc_sec_" + "a".repeat(41))).toBeNull();
+    expect(rcSectionIdOf("cv_area_top")).toBeNull();
+  });
+  it("원본 순서·제목을 따르고, 원본에 없는 기록 id 는 예전 순서 자리에 끼운다", () => {
+    const page = [
+      { id: "concerns", title: "6가지 고민" },
+      { id: "new-sec", title: "새 섹션" },
+      { id: "faq", title: "FAQ" },
+    ];
+    const list = buildRcSectionList(page, [rec("rc_sec_hero"), rec("rc_sec_rc-clip"), rec("rc_nav_zzz"), rec("rc_sec_faq")]);
+    expect(list.map((s) => s.id)).toEqual(["hero", "rc-clip", "concerns", "new-sec", "faq", "zzz"]);
+    expect(list.find((s) => s.id === "rc-clip")?.title).toBe("수강생이 소개로 오는 이유");
+    expect(list.find((s) => s.id === "zzz")?.title).toBe("zzz");
+    expect(list.find((s) => s.id === "concerns")?.title).toBe("6가지 고민");
+  });
+  it("원본에 히어로가 있으면 원본 자리를 따른다(옮겨도 같은 줄)", () => {
+    const list = buildRcSectionList([{ id: "concerns", title: "고민" }, { id: "hero", title: "히어로" }], [rec("rc_sec_hero")]);
+    expect(list.map((s) => s.id)).toEqual(["concerns", "hero"]);
+  });
+  it("원본을 못 읽으면 기록 있는 id 를 예전 순서로, 예전 목록에 없으면 id 순으로 뒤에", () => {
+    const list = buildRcSectionList(null, [rec("rc_sec_faq"), rec("rc_sec_b-new"), rec("rc_sec_a-new"), rec("rc_sec_hero"), rec("rc_sec_x", "external_link")]);
+    expect(list.map((s) => s.id)).toEqual(["hero", "faq", "a-new", "b-new"]);
   });
 });

@@ -134,3 +134,86 @@ export function buildAreaTableLines(
   }
   return out;
 }
+
+/**
+ * 오프라인 정규과정 섹션 표식 — 섹션 본(rc_sec_<id>) = 화면에 2초 이상 머문 방문 · 섹션 메뉴(rc_nav_<id>) = 섹션 이동 메뉴로 찾아간 방문.
+ * 섹션은 페이지가 정한다(사이트 sectionViewTracking.js 가 section[id][data-screen-label] 마다 보낸다). id 형식은 사이트·서버와 같다.
+ */
+export const RC_SECTION_VIEW = "rc_sec_";
+export const RC_SECTION_NAV = "rc_nav_";
+const RC_SECTION_ID_RE = /^[a-z0-9-]{1,40}$/;
+
+/** 섹션 표식이면 그 섹션 id, 아니면 null. */
+export function rcSectionIdOf(target: string): string | null {
+  const prefix = target.startsWith(RC_SECTION_VIEW) ? RC_SECTION_VIEW : target.startsWith(RC_SECTION_NAV) ? RC_SECTION_NAV : "";
+  if (!prefix) return null;
+  const id = target.slice(prefix.length);
+  return RC_SECTION_ID_RE.test(id) ? id : null;
+}
+
+/**
+ * 페이지 원본을 못 읽었을 때 쓰는 예전 순서·제목(2026-11-12 기준).
+ * 원본에 없는 id(예: 상세 화면 쪽에 그려지는 rc-clip, 다른 곳으로 옮긴 섹션)의 자리·제목을 정할 때도 쓴다.
+ */
+export const RC_SECTIONS_FALLBACK: { id: string; title: string }[] = [
+  { id: "hero", title: "히어로" },
+  { id: "rc-clip", title: "수강생이 소개로 오는 이유" },
+  { id: "concerns", title: "가장 많이 들은 고민" },
+  { id: "key-numbers", title: "한눈에 보는 매직바디" },
+  { id: "differentiators", title: "6가지 차별점" },
+  { id: "employment-system", title: "취업까지 책임지는 5단계" },
+  { id: "alumni-network", title: "6,438명 동문 네트워크" },
+  { id: "rehab-curriculum", title: "15년 연구한 재활 커리큘럼" },
+  { id: "aftercare", title: "매달 무료 사후관리 교육" },
+  { id: "market-truth", title: "수강료가 천차만별인 이유" },
+  { id: "guarantee-sec", title: "100% 환불 보장" },
+  { id: "ceo-roadmap", title: "11주 커리큘럼" },
+  { id: "personas", title: "나도 강사가 될 수 있을까?" },
+  { id: "lifetime-assets", title: "수료 후 평생 자산" },
+  { id: "preview-lectures", title: "온라인 강의 맛보기" },
+  { id: "reviews", title: "졸업생 후기" },
+  { id: "global-cert", title: "해외로 뻗어 나가는 자격증" },
+  { id: "faq", title: "자주 묻는 질문" },
+];
+
+/**
+ * 섹션 표 줄 목록 — 페이지 원본 순서가 기준이고, 기록에는 있는데 원본에 없는 id 도 빠뜨리지 않는다.
+ *   · pageSections(원본) 이 있으면 그 순서·제목. 없으면(못 읽음) 예전 순서(RC_SECTIONS_FALLBACK) 중 기록이 있는 것.
+ *   · 원본에 없는데 기록이 있는 id 는 예전 순서에서 바로 앞에 있던 섹션 뒤에 끼운다(예전 순서에도 없으면 맨 뒤, id 순).
+ *   · 원본에 없는 id 의 제목은 예전 제목, 그것도 없으면 id.
+ * 기록 줄(recordRows)은 기기 구분 없는 전체 줄을 준다 — 기기를 바꿔도 줄이 들고 나지 않게.
+ */
+export function buildRcSectionList(
+  pageSections: { id: string; title: string }[] | null,
+  recordRows: { clickTarget: string; clickKind: string }[],
+): { id: string; title: string }[] {
+  const recorded = new Set<string>();
+  for (const r of recordRows) {
+    if (r.clickKind !== "marker") continue;
+    const id = rcSectionIdOf(r.clickTarget);
+    if (id) recorded.add(id);
+  }
+  const fallbackTitle = new Map(RC_SECTIONS_FALLBACK.map((s) => [s.id, s.title]));
+  const base = pageSections && pageSections.length > 0 ? pageSections : RC_SECTIONS_FALLBACK.filter((s) => recorded.has(s.id));
+  const out = base.map((s) => ({ id: s.id, title: s.title || s.id }));
+  const have = new Set(out.map((s) => s.id));
+
+  const fallbackOrder = RC_SECTIONS_FALLBACK.map((s) => s.id);
+  const orphans = [...recorded].filter((id) => !have.has(id));
+  const known = orphans.filter((id) => fallbackOrder.includes(id)).sort((a, b) => fallbackOrder.indexOf(a) - fallbackOrder.indexOf(b));
+  const unknown = orphans.filter((id) => !fallbackOrder.includes(id)).sort();
+  for (const id of known) {
+    let at = 0; // 앞에 아무것도 없으면 맨 앞
+    for (let i = fallbackOrder.indexOf(id) - 1; i >= 0; i -= 1) {
+      const j = out.findIndex((s) => s.id === fallbackOrder[i]);
+      if (j >= 0) {
+        at = j + 1;
+        break;
+      }
+    }
+    out.splice(at, 0, { id, title: fallbackTitle.get(id) ?? id });
+    have.add(id);
+  }
+  for (const id of unknown) out.push({ id, title: id });
+  return out;
+}

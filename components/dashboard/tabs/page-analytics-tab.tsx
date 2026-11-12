@@ -41,7 +41,15 @@ import {
   type ItemDeviceRow,
 } from "@/lib/client/page-analytics-device";
 import { DeviceCard, DeviceSwitch } from "./page-analytics-device";
-import { buildAreaTableLines, DETAIL_AREA_TARGETS, isDetailAreaRoute } from "@/lib/client/page-analytics-areas";
+import {
+  buildAreaTableLines,
+  buildRcSectionList,
+  DETAIL_AREA_TARGETS,
+  isDetailAreaRoute,
+  RC_SECTION_NAV,
+  RC_SECTION_VIEW,
+  rcSectionIdOf,
+} from "@/lib/client/page-analytics-areas";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -220,32 +228,34 @@ const INTRO_VIDEO_PLAY = "intro_video_play";
 const INTRO_VIDEO_TARGETS = new Set(INTRO_VIDEO_STAGES.map((s) => s.target));
 
 /**
- * 오프라인 정규과정 교육소개 섹션 — 메뉴 순서·제목.
- * 사이트(MagicBody-Web RegularclassIntroInline.vue RC_NAV_ITEMS)·서버 이름표(PageClickMarkerRegistry rc_sec_*·rc_nav_*)와 한 쌍이다.
- * 섹션 본(rc_sec_<id>) = 화면에 2초 이상 머문 방문 · 섹션 메뉴(rc_nav_<id>) = 섹션 이동 메뉴로 찾아간 방문.
+ * 오프라인 정규과정 상세 페이지의 섹션 순서·제목 — 운영 페이지 원본에서 서버가 읽어 준다(한 시간 보관).
+ * 못 읽으면 null — 표는 기록에 있는 id 로 그린다(buildRcSectionList).
  */
-const RC_SECTIONS: { id: string; title: string }[] = [
-  { id: "rc-clip", title: "수강생이 소개로 오는 이유" },
-  { id: "concerns", title: "가장 많이 들은 고민" },
-  { id: "key-numbers", title: "한눈에 보는 매직바디" },
-  { id: "differentiators", title: "6가지 차별점" },
-  { id: "rehab-curriculum", title: "15년 연구한 재활 커리큘럼" },
-  { id: "aftercare", title: "매달 무료 사후관리 교육" },
-  { id: "employment-system", title: "취업까지 책임지는 5단계" },
-  { id: "alumni-network", title: "6,438명 동문 네트워크" },
-  { id: "market-truth", title: "수강료가 천차만별인 이유" },
-  { id: "guarantee-sec", title: "100% 환불 보장" },
-  { id: "ceo-roadmap", title: "11주 커리큘럼" },
-  { id: "personas", title: "나도 강사가 될 수 있을까?" },
-  { id: "lifetime-assets", title: "수료 후 평생 자산" },
-  { id: "preview-lectures", title: "온라인 강의 맛보기" },
-  { id: "reviews", title: "졸업생 후기" },
-  { id: "global-cert", title: "해외로 뻗어 나가는 자격증" },
-  { id: "faq", title: "자주 묻는 질문" },
-];
-const RC_SECTION_VIEW = "rc_sec_";
-const RC_SECTION_NAV = "rc_nav_";
-const RC_SECTION_TARGETS = new Set(RC_SECTIONS.flatMap((s) => [RC_SECTION_VIEW + s.id, RC_SECTION_NAV + s.id]));
+function useRcPageSections(enabled: boolean): { id: string; title: string }[] | null {
+  const [sections, setSections] = useState<{ id: string; title: string }[] | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    const ac = new AbortController();
+    void (async () => {
+      try {
+        const res = await fetch("/api/admin/page-analytics/rc-sections", { signal: ac.signal, cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { sections?: unknown };
+        if (!Array.isArray(body.sections)) return;
+        const list = body.sections.filter(
+          (s): s is { id: string; title: string } =>
+            !!s && typeof (s as { id?: unknown }).id === "string" && typeof (s as { title?: unknown }).title === "string",
+        );
+        if (list.length > 0) setSections(list);
+      } catch {
+        /* 못 읽으면 기록에 있는 id 로 그린다 */
+      }
+    })();
+    return () => ac.abort();
+  }, [enabled]);
+  return sections;
+}
+
 /**
  * 섹션 줄을 영역 표에 붙이는 유일한 화면 — 교육소개 본문이 그려지는 오프라인 정규과정(기록이 없어도 전부 0으로 보인다).
  * 다른 줄의 섹션 기록은 클릭 표에 그대로 남긴다.
@@ -1090,7 +1100,7 @@ function splitClickRows(
       intro.push(it);
       // 재생은 실제로 누른 것이라 클릭 표에도 남긴다 — 서버 요약 「총 클릭 수」와 같은 기준(검수 D2).
       if (it.clickTarget === INTRO_VIDEO_PLAY) clicks.push(it);
-    } else if (withSections && it.clickKind === "marker" && RC_SECTION_TARGETS.has(it.clickTarget)) {
+    } else if (withSections && it.clickKind === "marker" && rcSectionIdOf(it.clickTarget) !== null) {
       sections.push(it);
     } else if (withAreas && it.clickKind === "marker" && DETAIL_AREA_TARGETS.has(it.clickTarget)) {
       areas.push(it);
@@ -1243,6 +1253,7 @@ function ClickPanel({
               areaRows={areaShown}
               allAreaRows={areaRows}
               sectionRows={withSections ? sectionShown : null}
+              allSectionRows={sectionRows}
               pageVisitCount={filterVisits}
               truncated={data.truncated}
               visitCountIsPeriodSum={data.visitCountIsPeriodSum}
@@ -1491,6 +1502,7 @@ function DetailAreaTable({
   areaRows,
   allAreaRows,
   sectionRows,
+  allSectionRows,
   pageVisitCount,
   truncated,
   visitCountIsPeriodSum,
@@ -1499,14 +1511,21 @@ function DetailAreaTable({
   /** 기기 구분 없는 영역 줄 — 상품에 있는 영역인지 정하는 기준(기기를 바꿔도 줄이 들고 나지 않게). */
   allAreaRows: ClickRow[];
   sectionRows: ClickRow[] | null;
+  /** 기기 구분 없는 섹션 줄 — 섹션 목록(줄 구성)을 정하는 기준. */
+  allSectionRows: ClickRow[];
   pageVisitCount: number;
   truncated: boolean;
   visitCountIsPeriodSum: boolean;
 }) {
+  const pageSections = useRcPageSections(sectionRows !== null);
+  const sectionList = useMemo(
+    () => (sectionRows ? buildRcSectionList(pageSections, allSectionRows) : []),
+    [sectionRows, pageSections, allSectionRows],
+  );
   const lines = buildAreaTableLines(
     areaRows,
     pageVisitCount,
-    sectionRows ? { rows: sectionRows, list: RC_SECTIONS, viewPrefix: RC_SECTION_VIEW, navPrefix: RC_SECTION_NAV } : null,
+    sectionRows ? { rows: sectionRows, list: sectionList, viewPrefix: RC_SECTION_VIEW, navPrefix: RC_SECTION_NAV } : null,
     allAreaRows,
   );
 

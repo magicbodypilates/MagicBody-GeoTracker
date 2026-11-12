@@ -8,7 +8,11 @@ import { resolve } from "node:path";
  */
 export default defineConfig({
   resolve: {
-    alias: { "@": resolve(__dirname, ".") },
+    alias: {
+      "@": resolve(__dirname, "."),
+      // server-only 는 서버 환경 표시가 없으면 오류를 던진다. 시험(node)에서는 빈 모듈로 대체.
+      "server-only": resolve(__dirname, "node_modules/server-only/empty.js"),
+    },
   },
   test: {
     include: ["**/*.test.ts"],

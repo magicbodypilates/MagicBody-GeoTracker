@@ -479,7 +479,13 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
 /** 상단 KPI/주요 변동 스트립을 노출할 탭 */
 const SHOW_KPI_TABS: TabKey[] = ["Home", "Prompt Hub", "Responses", "Visibility Analytics"];
 
-export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } = {}) {
+/** 사이드바 바로가기 — 주소는 서버가 세션 확인 후 넘길 때만 존재한다. */
+type SidebarLink = { label: string; href: string };
+
+export function SovereignDashboard({
+  demoMode = false,
+  sidebarLinks = [],
+}: { demoMode?: boolean; sidebarLinks?: readonly SidebarLink[] } = {}) {
   const auth = useAuth();
   /**
    * 경로 기반 탭 필터 — auth.kind 기준:
@@ -3040,6 +3046,24 @@ ${exampleJson}
             OpenRouter
           </a>
         </div>
+
+        {/* 바로가기 — 서버가 넘긴 링크가 있을 때만 */}
+        {auth.kind === "admin" && auth.role === 0 && sidebarLinks.length > 0 && (
+          <div className="border-t border-th-border px-3 py-2">
+            {sidebarLinks.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm text-th-text-secondary hover:bg-th-card-hover hover:text-th-text"
+              >
+                <span className="truncate">{link.label}</span>
+                <span aria-hidden="true" className="shrink-0 text-xs text-th-text-muted">↗</span>
+              </a>
+            ))}
+          </div>
+        )}
 
         {/* User info + logout — 로그인된 모든 사용자 (role >= 0) 표시 */}
         {auth.role >= 0 && (

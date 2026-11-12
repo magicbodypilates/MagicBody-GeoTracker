@@ -8,6 +8,7 @@ import { cookies } from "next/headers";
 import { SovereignDashboard } from "@/components/sovereign-dashboard";
 import { AuthProvider, type AuthInfo } from "@/components/auth/auth-context";
 import { ADMIN_SESSION_COOKIE, verifyAdminSession } from "@/lib/server/session";
+import { consoleLinksFor } from "@/lib/server/console-links";
 
 const isDemoOnly = (process.env.NEXT_PUBLIC_DEMO_ONLY ?? "").trim().toLowerCase() === "true";
 
@@ -20,9 +21,12 @@ export default async function AdminHome() {
     ? { role: 0, kind: "admin" }
     : { role: -1, kind: "admin" };
 
+  // 세션이 검증됐을 때만 바로가기 주소를 응답에 싣는다.
+  const sidebarLinks = consoleLinksFor(payload ? "admin" : null);
+
   return (
     <AuthProvider value={auth}>
-      <SovereignDashboard demoMode={isDemoOnly} />
+      <SovereignDashboard demoMode={isDemoOnly} sidebarLinks={sidebarLinks} />
     </AuthProvider>
   );
 }

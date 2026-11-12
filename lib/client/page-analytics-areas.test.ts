@@ -161,3 +161,21 @@ describe("섹션 목록 — 페이지 원본 기준", () => {
     expect(list.map((s) => s.id)).toEqual(["hero", "faq", "a-new", "b-new"]);
   });
 });
+
+describe("상단 위로 옮긴 섹션", () => {
+  it("히어로는 상단 상품 정보 위 맨 첫 줄(들여쓰기 없음)이고 교육소개 아래에는 다시 나오지 않는다", () => {
+    const lines = buildAreaTableLines([], 10, {
+      rows: [],
+      list: [
+        { id: "hero", title: "히어로" },
+        { id: "concerns", title: "6가지 고민" },
+      ],
+      viewPrefix: "rc_sec_",
+      navPrefix: "rc_nav_",
+    });
+    expect(lines[0]).toMatchObject({ key: "sec:hero", nested: false });
+    expect(lines[1].key).toBe("top");
+    expect(lines.filter((l) => l.key === "sec:hero")).toHaveLength(1);
+    expect(lines.find((l) => l.key === "sec:concerns")?.nested).toBe(true);
+  });
+});

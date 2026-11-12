@@ -29,6 +29,8 @@ export const DETAIL_AREA_TARGETS = new Set(
 );
 /** 교육소개 섹션을 들여 붙이는 영역. */
 export const DETAIL_AREA_SECTION_PARENT = "intro";
+/** 화면에서 상단 상품 정보 위로 옮겨 그리는 섹션 — 표에서도 맨 위 줄로 둔다(원본 파일에서는 교육소개 안에 있다). */
+export const RC_SECTIONS_ABOVE_TOP = new Set(["hero"]);
 
 /**
  * 상품 하나만 가리키는 상세 화면 이름 — 사이트 라우터에서 classView.vue 를 쓰고 서버가 따로 줄을 만드는 화면 전부.
@@ -120,16 +122,19 @@ export function buildAreaTableLines(
   const areaBy = pick(areaRows);
   const presentBy = pick(presentRows ?? areaRows);
   const out: AreaTableLine[] = [];
+  const secBy = sections ? pick(sections.rows) : null;
+  const secLine = (s: { id: string; title: string }, nested: boolean) =>
+    line(secBy!, "sec:" + s.id, s.title, sections!.viewPrefix + s.id, sections!.navPrefix + s.id, nested);
+  if (sections) {
+    for (const s of sections.list) if (RC_SECTIONS_ABOVE_TOP.has(s.id)) out.push(secLine(s, false));
+  }
   for (const a of DETAIL_AREAS) {
     const view = DETAIL_AREA_VIEW + a.key;
     const tab = DETAIL_AREA_TAB + a.key;
     if (!a.always && !hasAny(presentBy.get(view)) && !hasAny(presentBy.get(tab))) continue;
     out.push(line(areaBy, a.key, a.title, view, a.tab ? tab : null, false));
     if (sections && a.key === DETAIL_AREA_SECTION_PARENT) {
-      const secBy = pick(sections.rows);
-      for (const s of sections.list) {
-        out.push(line(secBy, "sec:" + s.id, s.title, sections.viewPrefix + s.id, sections.navPrefix + s.id, true));
-      }
+      for (const s of sections.list) if (!RC_SECTIONS_ABOVE_TOP.has(s.id)) out.push(secLine(s, true));
     }
   }
   return out;

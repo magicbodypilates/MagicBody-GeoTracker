@@ -30,6 +30,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  deviceVisitParts,
+  mobileShare,
+  pageVisitsForDevice,
+  rowsForDevice,
+  type DeviceFilter,
+  type DeviceRow,
+  type DeviceVisits,
+  type ItemDeviceRow,
+} from "@/lib/client/page-analytics-device";
+import { DeviceCard, DeviceSwitch } from "./page-analytics-device";
+import { buildAreaTableLines, DETAIL_AREA_TARGETS, isDetailAreaRoute } from "@/lib/client/page-analytics-areas";
 
 const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -66,6 +78,8 @@ type PageRow = {
   viewsPerVisit: number | null;
   /** null 이면 비교 불가 — 증감률을 그리지 않는다. */
   previousViewCount: number | null;
+  /** 이 화면 방문의 기기별 수. 서버가 칸을 안 주면 null. */
+  deviceVisits: DeviceVisits | null;
 };
 
 type FlowRow = {
@@ -99,6 +113,8 @@ type PageStats = {
   flows: FlowRow[];
   dropSummary: { reason: string; dropCount: number }[];
   unknownRouteDrops: number;
+  /** 사이트 전체 기기별 방문·조회. 서버가 칸을 안 주면 null(기기 표시를 숨긴다). */
+  devices: DeviceRow[] | null;
 };
 
 type ClickRow = {
@@ -163,6 +179,11 @@ type ClickStats = {
   nextPages: NextPageRow[] | null;
   nextPagesTruncated: boolean;
   nextPagesTotalCount: number;
+  /** 이 화면의 기기별 방문·조회. 서버가 칸을 안 주면 null. */
+  devices: DeviceRow[] | null;
+  /** 클릭 항목 × 기기(상세 구간만). */
+  itemDevices: ItemDeviceRow[] | null;
+  itemDevicesAvailable: boolean;
 };
 
 /* ── 어휘 ────────────────────────────────────────────────────────────────── */
@@ -226,9 +247,8 @@ const RC_SECTION_VIEW = "rc_sec_";
 const RC_SECTION_NAV = "rc_nav_";
 const RC_SECTION_TARGETS = new Set(RC_SECTIONS.flatMap((s) => [RC_SECTION_VIEW + s.id, RC_SECTION_NAV + s.id]));
 /**
- * 섹션 표를 보여주는 유일한 화면 — 교육소개 본문이 그려지는 오프라인 정규과정(기록이 없어도 전부 0으로 보인다).
- * 다른 줄(강의 상세 묶음 등)은 방문 수가 다른 강의까지 합친 값이라 「들어온 방문 중」이 틀리므로 표를 그리지 않고,
- * 그 줄의 섹션 기록은 클릭 표에 그대로 남긴다.
+ * 섹션 줄을 영역 표에 붙이는 유일한 화면 — 교육소개 본문이 그려지는 오프라인 정규과정(기록이 없어도 전부 0으로 보인다).
+ * 다른 줄의 섹션 기록은 클릭 표에 그대로 남긴다.
  */
 const RC_SECTION_ROUTE = "regularClassOffline";
 
@@ -821,6 +841,16 @@ export function PageAnalyticsTab() {
             />
           </div>
 
+          {/* ── 어떤 기기로 보나 (서버가 기기 칸을 줄 때만) ──────────── */}
+          {stats.devices && (
+            <DeviceCard
+              devices={stats.devices}
+              dataSource={stats.dataSource}
+              fromKst={stats.fromKst}
+              toKst={stats.effectiveToKst || stats.toKst}
+            />
+          )}
+
           {empty ? (
             <EmptyBox text="이 기간에는 아직 기록이 없습니다. 수집이 시작되기 전 기간이면 0건이 정상입니다." />
           ) : (
@@ -865,6 +895,7 @@ function PagesTable({
   rangeParams: Record<string, string>;
   excludeInternal: boolean;
 }) {
+  const showDevice = stats.devices !== null;
   return (
     <div className="rounded-lg border border-th-border bg-th-card p-4">
       <div className="mb-1 flex flex-wrap items-baseline gap-2">
@@ -914,6 +945,14 @@ function PagesTable({
               >
                 지난 기간 대비
               </th>
+              {showDevice && (
+                <th
+                  className="py-1.5 pr-4 text-right text-sm"
+                  title="이 화면 방문 중 휴대폰으로 본 방문의 비율입니다. 기기 정보가 있는 방문으로만 냅니다."
+                >
+                  모바일 비율
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -929,6 +968,7 @@ function PagesTable({
                   onToggle={() => onToggleRow(key)}
                   rangeParams={rangeParams}
                   excludeInternal={excludeInternal}
+                  showDevice={showDevice}
                 />
               );
             })}
@@ -946,6 +986,7 @@ function PageRowGroup({
   onToggle,
   rangeParams,
   excludeInternal,
+  showDevice,
 }: {
   row: PageRow;
   rowId: string;
@@ -953,6 +994,7 @@ function PageRowGroup({
   onToggle: () => void;
   rangeParams: Record<string, string>;
   excludeInternal: boolean;
+  showDevice: boolean;
 }) {
   const panelId = `clicks-${rowId.replace(/\W/g, "_")}`;
   return (
@@ -1005,10 +1047,15 @@ function PageRowGroup({
         <td className="py-1.5 pr-4 text-right font-mono">
           <DeltaCell current={row.viewCount} previous={row.previousViewCount} />
         </td>
+        {showDevice && (
+          <td className="py-1.5 pr-4 text-right font-mono text-sm text-th-text-secondary">
+            {fmtPct(mobileShare(row.deviceVisits))}
+          </td>
+        )}
       </tr>
       {open && (
         <tr id={panelId} className="border-b border-th-border">
-          <td colSpan={6} className="bg-th-inset p-0">
+          <td colSpan={showDevice ? 7 : 6} className="bg-th-inset p-0">
             {/* 조회 조건이 바뀌면 화면을 통째로 새로 만든다 — 옛 기간의 클릭 표가 잠깐이라도 남지 않게. */}
             <ClickPanel
               key={`${rowId}|${JSON.stringify(rangeParams)}|${excludeInternal}`}
@@ -1032,9 +1079,11 @@ function PageRowGroup({
 function splitClickRows(
   items: ClickRow[],
   withSections: boolean,
-): { intro: ClickRow[]; sections: ClickRow[]; clicks: ClickRow[] } {
+  withAreas: boolean,
+): { intro: ClickRow[]; sections: ClickRow[]; areas: ClickRow[]; clicks: ClickRow[] } {
   const intro: ClickRow[] = [];
   const sections: ClickRow[] = [];
+  const areas: ClickRow[] = [];
   const clicks: ClickRow[] = [];
   for (const it of items) {
     if (it.clickKind === "marker" && INTRO_VIDEO_TARGETS.has(it.clickTarget)) {
@@ -1043,9 +1092,11 @@ function splitClickRows(
       if (it.clickTarget === INTRO_VIDEO_PLAY) clicks.push(it);
     } else if (withSections && it.clickKind === "marker" && RC_SECTION_TARGETS.has(it.clickTarget)) {
       sections.push(it);
+    } else if (withAreas && it.clickKind === "marker" && DETAIL_AREA_TARGETS.has(it.clickTarget)) {
+      areas.push(it);
     } else clicks.push(it);
   }
-  return { intro, sections, clicks };
+  return { intro, sections, areas, clicks };
 }
 
 /** 표 ③ — 그 페이지에서 무엇을 눌렀나. 줄을 펼칠 때만 조회한다. */
@@ -1104,11 +1155,37 @@ function ClickPanel({
   }, [routeName, pathParam, rangeParams, excludeInternal]);
 
   // 소개영상 단계·교육소개 섹션 줄은 클릭 표에서 빼고 따로 보여준다(클릭이 아니라 본 정도이므로).
-  const withSections = routeName === RC_SECTION_ROUTE;
-  const split = useMemo(() => (data ? splitClickRows(data.items, withSections) : null), [data, withSections]);
+  const withAreas = isDetailAreaRoute(routeName);
+  const withSections = withAreas && routeName === RC_SECTION_ROUTE;
+  const split = useMemo(
+    () => (data ? splitClickRows(data.items, withSections, withAreas) : null),
+    [data, withSections, withAreas],
+  );
   const introRows = split ? split.intro : [];
   const sectionRows = split ? split.sections : [];
+  const areaRows = split ? split.areas : [];
   const clickItems = split ? split.clicks : [];
+
+  // 섹션·소개영상 단계표의 「전체/모바일/PC」 — 「전체」는 기존 계산 그대로.
+  const [deviceFilter, setDeviceFilter] = useState<DeviceFilter>("all");
+  const hasDevices = !!data && data.devices !== null;
+  const itemDevicesOk = !!data && data.itemDevicesAvailable && data.itemDevices !== null;
+  // 고른 기기의 숫자 중 하나라도 알 수 없으면(null) 0 으로 지어내지 않고 「전체」로 돌아간다.
+  const deviceVisits = data && itemDevicesOk && deviceFilter !== "all" ? pageVisitsForDevice(data.devices, deviceFilter) : null;
+  const introDevice =
+    data && itemDevicesOk && deviceFilter !== "all" ? rowsForDevice(introRows, data.itemDevices, deviceFilter, deviceVisits) : null;
+  const sectionDevice =
+    data && itemDevicesOk && deviceFilter !== "all" ? rowsForDevice(sectionRows, data.itemDevices, deviceFilter, deviceVisits) : null;
+  const areaDevice =
+    data && itemDevicesOk && deviceFilter !== "all" ? rowsForDevice(areaRows, data.itemDevices, deviceFilter, deviceVisits) : null;
+  const deviceBroken =
+    itemDevicesOk && deviceFilter !== "all" && (introDevice === null || sectionDevice === null || areaDevice === null);
+  const activeFilter: DeviceFilter = itemDevicesOk && !deviceBroken ? deviceFilter : "all";
+  const filterVisits = activeFilter !== "all" ? (deviceVisits as number) : data?.pageVisitCount ?? 0;
+  const introShown = activeFilter !== "all" ? (introDevice as ClickRow[]) : introRows;
+  const sectionShown = activeFilter !== "all" ? (sectionDevice as ClickRow[]) : sectionRows;
+  const areaShown = activeFilter !== "all" ? (areaDevice as ClickRow[]) : areaRows;
+  const pageDeviceParts = data ? deviceVisitParts(data.devices) : [];
 
   return (
     <div className="space-y-4 border-l-2 border-th-accent/50 px-4 py-3">
@@ -1121,6 +1198,19 @@ function ClickPanel({
         </div>
       ) : (
         <>
+          {/* ── 이 화면 방문 기기 (서버가 기기 칸을 줄 때만) ── */}
+          {hasDevices && pageDeviceParts.length > 0 && (
+            <p className="text-sm text-th-text-secondary">
+              이 화면 방문 기기:{" "}
+              {pageDeviceParts.map((x, i) => (
+                <span key={x.label}>
+                  {i > 0 && " · "}
+                  {x.label} <strong className="text-th-text">{fmtPct(x.share)}</strong>
+                </span>
+              ))}
+            </p>
+          )}
+
           {/* ── 게시물 순위 — 조회 수 많은 순 (게시물이 있는 화면에서만) ── */}
           <PostsTable
             rows={data.posts}
@@ -1129,20 +1219,31 @@ function ClickPanel({
           />
 
           {/* ── 상단 소개영상 — 어디까지 봤나 (소개영상 줄이 있을 때만 · 2026-11-09) ── */}
+          {hasDevices && (introRows.length > 0 || withAreas) && (
+            <DeviceSwitch
+              value={activeFilter}
+              onChange={setDeviceFilter}
+              available={itemDevicesOk && !deviceBroken}
+              note={deviceBroken ? "기기별 숫자 일부를 확인할 수 없어 지금은 전체만 볼 수 있습니다." : undefined}
+            />
+          )}
+
           {introRows.length > 0 && (
             <IntroVideoTable
-              rows={introRows}
-              pageVisitCount={data.pageVisitCount}
+              rows={introShown}
+              pageVisitCount={filterVisits}
               truncated={data.truncated}
               visitCountIsPeriodSum={data.visitCountIsPeriodSum}
             />
           )}
 
-          {/* ── 교육소개 — 섹션별로 얼마나 봤나 (오프라인 정규과정 줄에서만) ── */}
-          {withSections && (
-            <SectionViewTable
-              rows={sectionRows}
-              pageVisitCount={data.pageVisitCount}
+          {/* ── 영역별로 얼마나 봤나 (상품 상세 줄 · 오프라인 정규과정은 교육소개 섹션을 들여 붙임) ── */}
+          {withAreas && (
+            <DetailAreaTable
+              areaRows={areaShown}
+              allAreaRows={areaRows}
+              sectionRows={withSections ? sectionShown : null}
+              pageVisitCount={filterVisits}
               truncated={data.truncated}
               visitCountIsPeriodSum={data.visitCountIsPeriodSum}
             />
@@ -1377,82 +1478,97 @@ function IntroVideoTable({
   );
 }
 
-/* ── 교육소개 — 섹션별로 얼마나 봤나 (오프라인 정규과정을 펼쳤을 때) ──── */
+/* ── 영역별로 얼마나 봤나 (상품 상세 줄을 펼쳤을 때) ──── */
 
 /**
- * 교육소개 섹션마다 **본 방문**(화면에 2초 이상 머문 방문)과 **메뉴로 찾아간 방문**을 메뉴 순서대로 보여준다.
- * 섹션마다 따로 센 숫자다 — 메뉴로 건너뛸 수 있어 앞 섹션보다 뒤 섹션이 클 수 있다(누적 도달이 아니다).
- * ⚠️ 줄이 없는 섹션은 **0건**이다. 단 클릭 줄이 잘렸으면(truncated) 못 본 것일 수 있어 안내한다.
+ * 상세 화면 영역마다 **본 방문**(화면에 2초 이상 머문 방문)과 **탭 메뉴로 찾아간 방문**을 화면 순서대로 보여준다.
+ * 오프라인 정규과정은 교육소개 영역 아래에 교육소개 섹션(마지막 칸은 섹션 메뉴로 찾아간 방문)을 들여 붙인다.
+ * 줄마다 따로 센 숫자다 — 탭·메뉴로 건너뛸 수 있어 뒤 줄이 앞 줄보다 클 수 있다(누적 도달이 아니다).
+ * ⚠️ 기록 없는 줄은 0건이다. 클릭 줄이 잘렸으면(truncated) 못 본 것일 수 있어 안내한다.
  * ⚠️ 「들어온 방문 중」은 서버 clickRate(본 방문 ÷ 이 화면 방문)를 쓰고, ×100 은 fmtPct 한 곳에서만 한다.
  */
-function SectionViewTable({
-  rows,
+function DetailAreaTable({
+  areaRows,
+  allAreaRows,
+  sectionRows,
   pageVisitCount,
   truncated,
   visitCountIsPeriodSum,
 }: {
-  rows: ClickRow[];
+  areaRows: ClickRow[];
+  /** 기기 구분 없는 영역 줄 — 상품에 있는 영역인지 정하는 기준(기기를 바꿔도 줄이 들고 나지 않게). */
+  allAreaRows: ClickRow[];
+  sectionRows: ClickRow[] | null;
   pageVisitCount: number;
   truncated: boolean;
   visitCountIsPeriodSum: boolean;
 }) {
-  const byTarget = new Map(rows.map((r) => [r.clickTarget, r]));
-  const empty = rows.length === 0;
+  const lines = buildAreaTableLines(
+    areaRows,
+    pageVisitCount,
+    sectionRows ? { rows: sectionRows, list: RC_SECTIONS, viewPrefix: RC_SECTION_VIEW, navPrefix: RC_SECTION_NAV } : null,
+    allAreaRows,
+  );
 
   return (
     <div>
       <div className="mb-1 flex flex-wrap items-baseline gap-2">
-        <h4 className="text-sm font-semibold text-th-text">교육소개 — 섹션별로 얼마나 봤나</h4>
+        <h4 className="text-sm font-semibold text-th-text">영역별로 얼마나 봤나</h4>
       </div>
       <p className="mb-1 text-[11px] leading-relaxed text-th-text-muted">
-        섹션이 화면에 2초 이상 머문 방문만 셉니다. 메뉴를 눌러 지나친 섹션은 세지 않습니다.
+        영역이 화면에 2초 이상 머문 방문만 셉니다. 탭을 눌러 지나친 영역은 세지 않습니다. 그 상품에 없는 영역은
+        나오지 않습니다.
       </p>
 
       <div className="-ml-4 overflow-x-auto pl-4">
         <table className="w-full min-w-[560px] text-xs">
           <thead>
             <tr className="border-b border-th-border text-left text-th-text-muted">
-              <th className="py-1.5 pr-2">섹션</th>
-              <th className="py-1.5 pr-3 text-right" title="그 섹션이 화면에 2초 이상 머문 방문 수입니다.">
+              <th className="py-1.5 pr-2">영역</th>
+              <th className="py-1.5 pr-3 text-right" title="그 영역이 화면에 2초 이상 머문 방문 수입니다.">
                 본 방문
               </th>
               <th
                 className="py-1.5 pr-3 text-right"
-                title="이 화면에 들어온 방문 가운데 그 섹션을 본 방문의 비율입니다. 잴 수 없으면 '—'입니다."
+                title="이 화면에 들어온 방문 가운데 그 영역을 본 방문의 비율입니다. 잴 수 없으면 '—'입니다."
               >
                 들어온 방문 중
               </th>
-              <th className="py-1.5 pr-4 text-right" title="섹션 이동 메뉴에서 그 섹션을 눌러 찾아간 방문 수입니다.">
-                메뉴로 찾아간 방문
+              <th
+                className="py-1.5 pr-4 text-right"
+                title="탭 메뉴에서 그 탭을 눌러 찾아간 방문 수입니다. 들여 쓴 교육소개 섹션 줄은 섹션 이동 메뉴로 찾아간 방문 수입니다."
+              >
+                탭 메뉴로 찾아간 방문
               </th>
             </tr>
           </thead>
           <tbody>
-            {RC_SECTIONS.map((s) => {
-              const v = byTarget.get(RC_SECTION_VIEW + s.id);
-              const n = byTarget.get(RC_SECTION_NAV + s.id);
-              const viewed = v ? v.clickVisitCount : 0;
-              const ofPage = v ? v.clickRate : pageVisitCount > 0 ? 0 : null;
-              return (
-                <tr key={s.id} className="border-b border-th-border-subtle">
-                  <td className="py-1.5 pr-2 text-th-text">{s.title}</td>
-                  <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(viewed)}</td>
-                  <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">{fmtPct(ofPage)}</td>
-                  <td className="py-1.5 pr-4 text-right font-mono text-th-text-secondary">
-                    {fmtInt(n ? n.clickVisitCount : 0)}
-                  </td>
-                </tr>
-              );
-            })}
+            {lines.map((l) => (
+              <tr key={l.key} className="border-b border-th-border-subtle">
+                <td className={l.nested ? "py-1.5 pl-4 pr-2 text-th-text-secondary" : "py-1.5 pr-2 text-th-text"}>
+                  {l.nested && <span className="mr-1 text-th-text-muted">└</span>}
+                  {l.title}
+                </td>
+                <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(l.viewed)}</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">{fmtPct(l.ofPage)}</td>
+                <td className="py-1.5 pr-4 text-right font-mono text-th-text-secondary">{l.nav === null ? "—" : fmtInt(l.nav)}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
 
       <p className="mt-2 text-[11px] leading-relaxed text-th-text-muted">
-        ⓘ 섹션마다 따로 셉니다 — 메뉴로 건너뛸 수 있어 뒤 섹션 숫자가 앞 섹션보다 클 수 있습니다. 방문은 한 번 들어와
+        ⓘ 줄마다 따로 셉니다 — 탭이나 메뉴로 건너뛸 수 있어 아래 줄 숫자가 위 줄보다 클 수 있습니다. 방문은 한 번 들어와
         머문 것을 한 건으로 셉니다.
+        {sectionRows && " 들여 쓴 줄은 교육소개 안 섹션이고, 마지막 칸은 섹션 이동 메뉴로 찾아간 방문입니다."}
       </p>
-      {empty && (
+      {areaRows.length === 0 && (
+        <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
+          ⓘ 이 기간에는 영역 기록이 없습니다. 영역 기록은 이 기능을 사이트에 올린 날부터 쌓입니다.
+        </p>
+      )}
+      {sectionRows && sectionRows.length === 0 && (
         <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
           ⓘ 이 기간에는 섹션 기록이 없습니다. 섹션 기록은 이 기능을 사이트에 올린 날부터 쌓입니다.
         </p>
@@ -1464,7 +1580,7 @@ function SectionViewTable({
       )}
       {truncated && (
         <p className="mt-1 text-[11px] leading-relaxed text-th-text-muted">
-          ⓘ 이 화면은 눌린 자리가 많아 일부 줄이 잘려 보입니다 — 0으로 보이는 섹션은 실제보다 낮을 수 있습니다.
+          ⓘ 이 화면은 눌린 자리가 많아 일부 줄이 잘려 보입니다 — 0으로 보이는 줄은 실제보다 낮을 수 있습니다.
         </p>
       )}
     </div>
@@ -1756,6 +1872,16 @@ function ReadingNotes({ stats }: { stats: PageStats }) {
           새로 더해지고, 상단 메뉴·푸터 클릭은 오프라인 정규과정 화면에서 난 것만 셉니다. 상담 버튼은 모든
           화면에서 셉니다.
         </Notice>
+
+        {stats.devices && (
+          <Notice tone="info">
+            <span className="text-sm">
+              <strong className="text-th-text">기기 판정 기준</strong> — 카카오톡·네이버 앱 안에서 연 화면은 그
+              휴대폰·태블릿으로 셉니다. 아이패드와 휴대폰의 &lsquo;PC 버전 보기&rsquo;는 PC 로 잡힐 수 있습니다. 한
+              방문은 그 방문의 첫 기록 기기 하나로만 셉니다(기기별 방문을 더하면 방문 수와 같습니다).
+            </span>
+          </Notice>
+        )}
 
         {stats.visitCountIsPeriodSum && (
           <Notice tone="warn">

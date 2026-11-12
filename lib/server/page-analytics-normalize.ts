@@ -48,6 +48,13 @@
  *      한 줄 = 도착 화면(라우트 단위 · 상세·요약 같은 단위) · moveCount(이동 수) · visitCount(이동한 방문) ·
  *      visitRate(이 화면을 본 방문 중 비율, 0～1, null 가능 → ×100 은 화면이 한 번만). 이동 수 많은 순 · 상위 30개.
  *
+ *   ⑧ ⭐ 2026-11-12 — **기기 칸**(device-tracking_261112). 기기 코드: m 모바일 · t 태블릿 · d PC · x 알 수 없음 · "-" 기기 정보 없음.
+ *      pages 응답 `devices`(사이트 전체 · 방문은 그 방문의 대표 기기 하나로 · 합 = summary.visitCount) ·
+ *      `pages[].deviceVisits`({m,t,d,x,none} · 합 = 그 줄 visitCount).
+ *      clicks 응답 `devices`(그 화면 · 합 = pageVisitCount) · `itemDevices`(상세 구간만 · 요약 구간은 null) ·
+ *      `itemDevicesAvailable`. 서버가 칸을 안 주면(배포 전) `devices`·`deviceVisits`·`itemDevices` 가 **null** — 화면은 기기 표시를 숨긴다.
+ *      개수가 없음·음수·숫자 아님이면 null 이다(0 으로 지어내지 않는다).
+ *
  *   기간은 `lookbackDays`(1～1095) **또는** `fromKst`&`toKst`("yyyy-MM-dd", 양끝 포함) 중 하나.
  *   범위 밖은 clamp 가 아니라 **400** 이다(화면이 조용히 다른 기간을 보고 있으면 안 된다).
  *
@@ -121,7 +128,23 @@ export const PAGE_DROP_REASONS = [
   "origin",
 ] as const;
 
+/** 기기 코드 — .NET 응답과 1:1. "-" = 기기 정보 없음. */
+export const PAGE_DEVICE_CODES = ["m", "t", "d", "x", "-"] as const;
+export type PageDeviceCode = (typeof PAGE_DEVICE_CODES)[number];
+
 /* ── raw (.NET) 타입 ────────────────────────────────────────────────────── */
+
+export type PageDeviceRowRaw = { device?: string | null; visitCount?: unknown; viewCount?: unknown };
+
+export type PageDeviceVisitsRaw = { m?: unknown; t?: unknown; d?: unknown; x?: unknown; none?: unknown };
+
+export type PageItemDeviceRowRaw = {
+  clickTarget?: string | null;
+  clickKind?: string | null;
+  device?: string | null;
+  clickedVisitCount?: unknown;
+  clickCount?: unknown;
+};
 
 export type PageSummaryRaw = {
   viewCount?: number;
@@ -145,6 +168,7 @@ export type PageRowRaw = {
   visitCount?: number;
   entryCount?: number;
   previousViewCount?: number | null;
+  deviceVisits?: PageDeviceVisitsRaw | null;
 };
 
 export type PageFlowRowRaw = {
@@ -177,6 +201,7 @@ export type PageViewStatsRaw = {
   pagesTotalCount?: number;
   flows?: PageFlowRowRaw[];
   dropSummary?: PageDropRowRaw[];
+  devices?: PageDeviceRowRaw[] | null;
 };
 
 export type PageClickRowRaw = {
@@ -236,9 +261,39 @@ export type PageClickStatsRaw = {
   nextPages?: PageNextPageRowRaw[] | null;
   nextPagesTruncated?: boolean;
   nextPagesTotalCount?: number;
+  devices?: PageDeviceRowRaw[] | null;
+  itemDevices?: PageItemDeviceRowRaw[] | null;
+  itemDevicesAvailable?: boolean;
 };
 
 /* ── 정규화 결과 타입 (화면이 보는 계약) ────────────────────────────────── */
+
+/** 기기별 방문·조회 1행. 개수가 잘못 오면 null. */
+export type PageDeviceRowNormalized = {
+  device: PageDeviceCode;
+  visitCount: number | null;
+  viewCount: number | null;
+};
+
+/** 화면 하나의 기기별 방문 수. none = 기기 정보 없음. */
+export type PageDeviceVisitsNormalized = {
+  m: number | null;
+  t: number | null;
+  d: number | null;
+  x: number | null;
+  none: number | null;
+};
+
+/** 클릭 항목 × 기기 1행(상세 구간만). */
+export type PageItemDeviceRowNormalized = {
+  clickTarget: string;
+  clickKind: PageClickKind;
+  device: PageDeviceCode;
+  /** 이 항목을 누른 방문 수(방문 대표 기기 기준). */
+  clickedVisitCount: number | null;
+  /** 클릭 수(클릭 기록의 기기 기준). */
+  clickCount: number | null;
+};
 
 export type PageSummaryNormalized = {
   /** 본 횟수(같은 사람이 여러 번 본 것도 센다). */
@@ -274,6 +329,8 @@ export type PageRowNormalized = {
   viewsPerVisit: number | null;
   /** 직전 같은 길이 기간의 조회 수. **null 이면 비교 불가** — 증감률을 그리지 않는다. */
   previousViewCount: number | null;
+  /** 이 화면 방문의 기기별 수. 서버가 칸을 안 주면 null. */
+  deviceVisits: PageDeviceVisitsNormalized | null;
 };
 
 export type PageFlowRowNormalized = {
@@ -314,6 +371,8 @@ export type PageViewStatsNormalized = {
   dropSummary: PageDropRowNormalized[];
   /** ⭐ registry 누락 건수 — 화면이 반드시 노출한다(조용한 실패 금지 · 계획 §3-7 7번). */
   unknownRouteDrops: number;
+  /** 사이트 전체 기기별 방문·조회. 서버가 칸을 안 주면 null(화면은 기기 카드를 숨긴다). */
+  devices: PageDeviceRowNormalized[] | null;
 };
 
 export type PageClickRowNormalized = {
@@ -400,6 +459,12 @@ export type PageClickStatsNormalized = {
   nextPages: PageNextPageRowNormalized[] | null;
   nextPagesTruncated: boolean;
   nextPagesTotalCount: number;
+  /** 이 화면의 기기별 방문·조회. 서버가 칸을 안 주면 null. */
+  devices: PageDeviceRowNormalized[] | null;
+  /** 클릭 항목 × 기기. 요약 구간·칸 없음이면 null. */
+  itemDevices: PageItemDeviceRowNormalized[] | null;
+  /** 항목별 기기 나눔을 쓸 수 있는가(상세 구간 + 서버가 칸을 줌). */
+  itemDevicesAvailable: boolean;
 };
 
 /* ── 안전 변환기 (card-click-normalize.ts 와 동일 규약) ──────────────────── */
@@ -441,6 +506,72 @@ function safeRate(v: unknown): number | null {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n) || n < 0) return null;
   return n;
+}
+
+/** 기기 칸 개수 — 없음·음수·숫자 아님은 null(0 으로 지어내지 않는다). 숫자 문자열은 받는다. */
+export function safeDeviceCount(v: unknown): number | null {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v.trim()) : NaN;
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n);
+}
+
+function safeDeviceCode(v: unknown): PageDeviceCode | null {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return (PAGE_DEVICE_CODES as readonly string[]).includes(s) ? (s as PageDeviceCode) : null;
+}
+
+/** 기기 행 — 배열이 아니면 null(서버가 칸을 안 줌). 모르는 기기 코드 줄은 버린다. 같은 코드는 한 줄로 합친다. */
+export function normalizeDeviceRows(raw: unknown): PageDeviceRowNormalized[] | null {
+  if (!Array.isArray(raw)) return null;
+  const byCode = new Map<PageDeviceCode, PageDeviceRowNormalized>();
+  for (const r of raw as PageDeviceRowRaw[]) {
+    if (!r || typeof r !== "object") continue;
+    const device = safeDeviceCode(r.device);
+    if (!device) continue;
+    const visitCount = safeDeviceCount(r.visitCount);
+    const viewCount = safeDeviceCount(r.viewCount);
+    const prev = byCode.get(device);
+    if (!prev) {
+      byCode.set(device, { device, visitCount, viewCount });
+    } else {
+      prev.visitCount = prev.visitCount === null || visitCount === null ? null : prev.visitCount + visitCount;
+      prev.viewCount = prev.viewCount === null || viewCount === null ? null : prev.viewCount + viewCount;
+    }
+  }
+  return PAGE_DEVICE_CODES.filter((c) => byCode.has(c)).map((c) => byCode.get(c)!);
+}
+
+/** 화면 줄의 기기별 방문 — 객체가 아니면 null. */
+export function normalizeDeviceVisits(raw: unknown): PageDeviceVisitsNormalized | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as PageDeviceVisitsRaw;
+  return {
+    m: safeDeviceCount(r.m),
+    t: safeDeviceCount(r.t),
+    d: safeDeviceCount(r.d),
+    x: safeDeviceCount(r.x),
+    none: safeDeviceCount(r.none),
+  };
+}
+
+function normalizeItemDeviceRows(raw: unknown): PageItemDeviceRowNormalized[] | null {
+  if (!Array.isArray(raw)) return null;
+  const rows: PageItemDeviceRowNormalized[] = [];
+  for (const r of raw as PageItemDeviceRowRaw[]) {
+    if (!r || typeof r !== "object") continue;
+    const clickTarget = safeText(r.clickTarget);
+    const device = safeDeviceCode(r.device);
+    if (!clickTarget || !device) continue;
+    rows.push({
+      clickTarget,
+      clickKind: safeClickKind(r.clickKind),
+      device,
+      clickedVisitCount: safeDeviceCount(r.clickedVisitCount),
+      clickCount: safeDeviceCount(r.clickCount),
+    });
+  }
+  return rows;
 }
 
 function safeDataSource(v: unknown): PageDataSource {
@@ -498,6 +629,7 @@ function normalizePageRows(raw: unknown): PageRowNormalized[] {
         r.previousViewCount === null || r.previousViewCount === undefined
           ? null
           : safeInt(r.previousViewCount),
+      deviceVisits: normalizeDeviceVisits(r.deviceVisits),
     });
   }
   return rows;
@@ -564,6 +696,7 @@ export function normalizePageViewStats(
     flows: normalizeFlowRows(env.flows),
     dropSummary: drops,
     unknownRouteDrops: unknown ? unknown.dropCount : 0,
+    devices: normalizeDeviceRows(env.devices),
   };
 }
 
@@ -614,6 +747,8 @@ export function normalizePageClickStats(
     }
   }
 
+  const itemDevices = dataSource === "detail" ? normalizeItemDeviceRows(env.itemDevices) : null;
+
   const posts: PagePostRowNormalized[] = [];
   for (const r of Array.isArray(env.posts) ? env.posts : []) {
     const postRoute = safeText(r.routeName);
@@ -656,5 +791,8 @@ export function normalizePageClickStats(
     nextPages,
     nextPagesTruncated: nextPages !== null && env.nextPagesTruncated === true,
     nextPagesTotalCount: nextPages !== null ? safeInt(env.nextPagesTotalCount) : 0,
+    devices: normalizeDeviceRows(env.devices),
+    itemDevices,
+    itemDevicesAvailable: env.itemDevicesAvailable === true && itemDevices !== null,
   };
 }

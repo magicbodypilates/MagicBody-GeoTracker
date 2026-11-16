@@ -394,7 +394,7 @@ async function fetchAnalytics<T>(
 
 /* ── 기간 고르기 ─────────────────────────────────────────────────────────── */
 
-type RangeMode = "all" | "today" | 7 | 30 | 90 | "custom";
+type RangeMode = "all" | "today" | 7 | 30 | 90 | "day" | "custom";
 
 type Range =
   | { kind: "days"; days: number }
@@ -409,8 +409,18 @@ const PRESETS: { key: RangeMode; label: string; title?: string }[] = [
   { key: 7, label: "최근 7일" },
   { key: 30, label: "최근 30일" },
   { key: 90, label: "최근 90일" },
-  { key: "custom", label: "직접 지정" },
+  { key: "day", label: "날짜 선택", title: "날짜 하나를 골라 그날 하루(한국 시간)만 봅니다." },
+  { key: "custom", label: "기간 선택" },
 ];
+
+/** "yyyy-MM-dd" 를 N일 옮긴 날짜. 형식이 맞지 않으면 빈 문자열. */
+function shiftDate(day: string, days: number): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return "";
+  const d = new Date(`${day}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 
 /* ── 안내 문구 ───────────────────────────────────────────────────────────── */
 
@@ -502,6 +512,12 @@ function SummaryCard({
   );
 }
 
+/**
+ * 펼친 화면 안 목록의 한 줄 — 줄 사이 흐린 선 + 마우스를 올린 줄 옅은 배경.
+ * 펼친 패널 바탕(th-inset)과 겹치지 않는 테두리 색을 쓴다.
+ */
+const PANEL_ROW_CLASS = "border-b border-th-border-hover/70 transition-colors hover:bg-th-accent/10";
+
 /* ── 배지 ────────────────────────────────────────────────────────────────── */
 
 function Badge({ tone, text, title }: { tone: "warn" | "muted"; text: string; title?: string }) {
@@ -561,6 +577,7 @@ export function PageAnalyticsTab() {
   const [mode, setMode] = useState<RangeMode>("all");
   const [customFrom, setCustomFrom] = useState<string>(() => kstDateBefore(30));
   const [customTo, setCustomTo] = useState<string>(() => kstDateBefore(0));
+  const [dayDate, setDayDate] = useState<string>(() => kstDateBefore(0));
   const [excludeInternal, setExcludeInternal] = useState(true);
 
   const [stats, setStats] = useState<PageStats | null>(null);
@@ -578,7 +595,8 @@ export function PageAnalyticsTab() {
 
   /** 직접 지정이 아직 온전하지 않으면 조회하지 않는다(서버가 400 을 주기 전에 화면에서 알린다). */
   const customInvalid =
-    mode === "custom" && (!customFrom || !customTo || customFrom > customTo);
+    (mode === "custom" && (!customFrom || !customTo || customFrom > customTo)) ||
+    (mode === "day" && shiftDate(dayDate, 0) === "");
 
   /**
    * "전체 기간" 은 수집 시작일(collectionStartedAt)이 아직 없으면(첫 조회·서버 미설정)
@@ -587,6 +605,8 @@ export function PageAnalyticsTab() {
    */
   const range: Range = useMemo(() => {
     if (mode === "custom") return { kind: "custom", fromKst: customFrom, toKst: customTo };
+    // 하루 보기는 시작·끝을 같은 날짜로 둔 직접 지정 조회다.
+    if (mode === "day") return { kind: "custom", fromKst: dayDate, toKst: dayDate };
     if (mode === "all") {
       return stats?.collectionStartedAt
         ? { kind: "custom", fromKst: stats.collectionStartedAt, toKst: kstDateBefore(0) }
@@ -595,7 +615,14 @@ export function PageAnalyticsTab() {
     // 서버는 최근 1일을 오늘 0시(한국 시간)부터 지금까지 원본 기록으로 센다.
     if (mode === "today") return { kind: "days", days: 1 };
     return { kind: "days", days: mode };
-  }, [mode, customFrom, customTo, stats?.collectionStartedAt]);
+  }, [mode, customFrom, customTo, dayDate, stats?.collectionStartedAt]);
+
+  // 하루 보기의 이동 한계 — 오늘(한국 시간) 다음으로는, 수집 시작일 이전으로는 가지 않는다.
+  const todayKst = kstDateBefore(0);
+  const collectionStartDay = stats?.collectionStartedAt ? stats.collectionStartedAt.slice(0, 10) : "";
+  const dayValid = shiftDate(dayDate, 0) !== "";
+  const canPrevDay = dayValid && (!collectionStartDay || dayDate > collectionStartDay);
+  const canNextDay = dayValid && dayDate < todayKst;
 
   const rangeParams = useMemo<Record<string, string>>(() => {
     // 계약상 기간은 둘 중 하나만 보낸다 — 둘 다 보내면 화면이 무엇을 보고 있는지 흐려진다.
@@ -759,6 +786,41 @@ export function PageAnalyticsTab() {
             <span className="text-th-text-muted">
               시작·끝 모두 포함하며 한국 시간 기준입니다. 최대 1,095일(3년)까지 고를 수 있습니다.
             </span>
+          </div>
+        )}
+
+        {mode === "day" && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-th-text-secondary">
+            <button
+              type="button"
+              onClick={() => setDayDate((d) => shiftDate(d, -1) || d)}
+              disabled={!canPrevDay}
+              title={canPrevDay ? "하루 전 날짜를 봅니다." : "수집을 시작한 날보다 앞으로는 갈 수 없습니다."}
+              className="rounded-md border border-th-border bg-th-card px-2.5 py-1 text-xs text-th-text-secondary hover:bg-th-card-hover disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ◀ 전날
+            </button>
+            <label className="flex items-center gap-1">
+              날짜
+              <input
+                type="date"
+                value={dayDate}
+                min={collectionStartDay || undefined}
+                max={todayKst}
+                onChange={(e) => setDayDate(e.target.value)}
+                className="rounded-md border border-th-border bg-th-card px-2 py-1 text-xs text-th-text"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => setDayDate((d) => shiftDate(d, 1) || d)}
+              disabled={!canNextDay}
+              title={canNextDay ? "하루 뒤 날짜를 봅니다." : "오늘 다음 날짜는 볼 수 없습니다."}
+              className="rounded-md border border-th-border bg-th-card px-2.5 py-1 text-xs text-th-text-secondary hover:bg-th-card-hover disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              다음날 ▶
+            </button>
+            <span className="text-th-text-muted">고른 날 0시부터 24시까지(한국 시간)를 봅니다.</span>
           </div>
         )}
       </div>
@@ -1324,7 +1386,7 @@ function ClickPanel({
                     </thead>
                     <tbody>
                       {clickItems.map((it) => (
-                        <tr key={`${it.clickKind}-${it.clickTarget}`} className="border-b border-th-border-subtle">
+                        <tr key={`${it.clickKind}-${it.clickTarget}`} className={PANEL_ROW_CLASS}>
                           <td className="max-w-[260px] py-1.5 pr-2" title={it.clickTarget}>
                             <span className="align-middle text-th-text">{it.displayName}</span>
                             {/* 외부로 나간 링크는 주소가 곧 이름이라 사전 대상이 아니다 — 종류 칸이 구분한다.
@@ -1459,7 +1521,7 @@ function IntroVideoTable({
               const ofPlayed = playedVisits > 0 ? visits / playedVisits : null;
               const ofPage = r ? r.clickRate : pageVisitCount > 0 ? 0 : null;
               return (
-                <tr key={s.target} className="border-b border-th-border-subtle">
+                <tr key={s.target} className={PANEL_ROW_CLASS}>
                   <td className="py-1.5 pr-2 text-th-text">{s.label}</td>
                   <td className="py-1.5 pr-3 text-right font-mono text-th-text">{fmtInt(visits)}</td>
                   <td className="py-1.5 pr-3 text-right font-mono text-th-text-secondary">{fmtPct(ofPlayed)}</td>
@@ -1563,7 +1625,7 @@ function DetailAreaTable({
           </thead>
           <tbody>
             {lines.map((l) => (
-              <tr key={l.key} className="border-b border-th-border-subtle">
+              <tr key={l.key} className={PANEL_ROW_CLASS}>
                 <td className={l.nested ? "py-1.5 pl-4 pr-2 text-th-text-secondary" : "py-1.5 pr-2 text-th-text"}>
                   {l.nested && <span className="mr-1 text-th-text-muted">└</span>}
                   {l.title}
@@ -1660,7 +1722,7 @@ function NextPagesTable({
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.routeName} className="border-b border-th-border-subtle">
+                <tr key={r.routeName} className={PANEL_ROW_CLASS}>
                   <td className="max-w-[260px] py-1.5 pr-2" title={r.routeName}>
                     <span className={`align-middle ${r.known ? "text-th-text" : "italic text-th-text-muted"}`}>
                       {r.displayName}
@@ -1746,7 +1808,7 @@ function PostsTable({
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={rowKey(r.routeName, r.pathParam)} className="border-b border-th-border-subtle">
+              <tr key={rowKey(r.routeName, r.pathParam)} className={PANEL_ROW_CLASS}>
                 <td className="max-w-[340px] py-1.5 pr-2">
                   {r.pathParam !== "" && r.titleKnown && (
                     <span className="mr-1 align-middle font-mono text-[10px] text-th-text-muted">

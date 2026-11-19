@@ -100,7 +100,14 @@ type BenchmarkResult = {
   days: number;
   competitorStatus?: "none" | HeavyStatus;
   heavyMaxDays?: number;
-  brand: { name: string; sampleCount: number; mentionRate: number; citedRate: number };
+  brand: {
+    name: string;
+    sampleCount: number;
+    mentionRate: number;
+    citedRate: number;
+    /** 우리 언급률 계산 기준 — prose: 본문 규칙(경쟁사와 같음) · stored-array: 저장값 기준 */
+    mentionBasis?: "prose" | "stored-array";
+  };
   competitors: Array<{ name: string; sampleCount: number; mentionRate: number; citedRate: number }>;
 };
 
@@ -658,6 +665,12 @@ export function HomeServerTab({ onOpenTab, brandName, refreshNonce }: HomeServer
                   </div>
                   <p className="mt-2 text-xs text-th-text-muted">
                     기간 {periodLabel} · 전체 AI 응답 중 해당 브랜드/경쟁사가 언급된 비율
+                  </p>
+                  {/* 다른 카드의 언급률(저장값 기준)과 숫자가 다를 수 있어 기준을 알린다 */}
+                  <p className="mt-1 text-sm text-th-text-muted">
+                    {benchmark.brand.mentionBasis === "stored-array"
+                      ? "우리 브랜드 수치는 다른 카드와 같은 기준이라, 주소나 출처 표시로만 나온 응답도 언급에 들어가 있습니다."
+                      : "11월 10일 이후 응답부터는 주소나 출처 표시로만 이름이 나온 경우를 우리와 경쟁사 모두 언급에서 뺐습니다. 그래서 다른 카드의 언급률보다 낮게 보일 수 있습니다."}
                   </p>
                 </div>
               )}

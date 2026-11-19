@@ -115,7 +115,7 @@ describe("전 세트 × 전 조합 열거: 0..100 이탈 없음", () => {
     // 34+48+45=127 이라 v16a 보다도 더 크게 cap 에 걸린다) — 아래 "v17a — 언론 배점 45"
     // describe 의 동일한 구조 테스트가 이 cap-hit 을 따로 고정한다. 나머지 세트는 실제로
     // 이 불변식을 지켜야 한다.
-    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a" && id !== "v17a")) {
+    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a" && id !== "v17a" && id !== "v18a")) {
       const c = SCORE_SETS[setId];
       // 브랜드 분기 최대 — sentiment·추천은 if/if 로 더해지고, URL·인용·언론·소셜은
       // else-if 로 그중 하나만 선택된다(calcVisibilityWithSet 참조). brandBodyUrl 만
@@ -164,6 +164,8 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     // v17a 도 같은 이유로 이 검산표는 v16a 와 같다(언론 배점 인상 45 도 else-if 대체 신호라
     // 이 표에 안 잡힌다). v17a 고유 배점은 아래 "v17a — 언론 배점 45" describe 가 따로 덮는다.
     v17a: { brand: 97, gen: 99, noMention: 55 },
+    // v18a — 브랜드 분기는 v17a 그대로. 일반 가산 필드는 단계 배점 모드라 0(읽지 않는다).
+    v18a: { brand: 97, gen: 0, noMention: 35 },
   };
 
   it("검산표와 정확히 일치", () => {
@@ -185,7 +187,7 @@ describe("세트별 분기 최대 앵커(설계 검산표)", () => {
     // legacy8·low60 어느 쪽도 이 두 키를 실제로 갖지 않으므로 Object.keys(l) 에도 나오지
     // 않는다 — 이 루프가 실제로 도는 14개 키는 전부 값이 있다(non-null 단언은 타입만 좁힘).
     for (const k of keys) {
-      expect(s[k]).toBe(Math.round(l[k]! * 0.6));
+      expect(s[k]).toBe(Math.round((l[k] as number) * 0.6));
     }
   });
 
@@ -860,7 +862,7 @@ describe("언론 인용 신호(hasPressCitation) — v16a·v17a 를 제외한 �
     // 2026-09-24 언론 배점 인상(45)이 들어간 세트다 — 그 배점 확정·우선순위·cap 동작은
     // 각각 아래 "v16a — 언론·블로그·소셜 배점"·"v17a — 언론 배점 45" describe 가 전담해서
     // 검증하므로, 여기서는 "배점 0" 전제가 여전히 성립하는 나머지 세트만 돈다.
-    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a" && id !== "v17a")) {
+    for (const setId of SCORE_SET_IDS.filter((id) => id !== "v16a" && id !== "v17a" && id !== "v18a")) {
       const set = SCORE_SETS[setId];
 
       const gen0Base = {

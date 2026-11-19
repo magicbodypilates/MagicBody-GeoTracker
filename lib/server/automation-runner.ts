@@ -82,6 +82,11 @@ export const SCORING_PROFILES: Record<ScoringSetSwitch, ScoringProfile> = {
   // 새 수집 응답이 scoreVersion 17 로 직접 저장된다. 이미 버전 16 으로 저장된 행은 재산출
   // 잡 v17 이 담당한다(v17 잡 결과 = 같은 답·인용을 이 프로파일로 수집 시점에 채점한 값).
   v17a: { setId: "v17a", version: 17, applyOwnedCitationJudgment: true },
+  // v18a — 2026-11-19 사장님 결정(A안). 판정(소유 유튜브·제3자 인용)은 v17a 와 같고, 일반
+  // 질의에서 링크·칩·카드뿐인 언급을 인용으로 보고 본문 언급은 고정 단계값으로 매긴다
+  // (세트의 mentionTiers — calcVisibilityFromText 가 본문 언급을 따로 센다). "v17a" 로 되돌리면
+  // 새 수집은 지금과 완전히 같게 버전 17 로 저장된다. 과거 행은 재산출 잡 v18 이 담당한다.
+  v18a: { setId: "v18a", version: 18, applyOwnedCitationJudgment: true },
 };
 
 export const DEFAULT_SCORING_SWITCH: ScoringSetSwitch = "v14a";

@@ -96,7 +96,7 @@ describe("resolveScoringProfile — 계획 §4-5 (세트·버전) 쌍 선택자"
   });
 
   it("세트 id 와 버전은 항상 쌍으로만 움직인다 — v14a/14 · v15a/15 · v16a/16 · v17a/17", () => {
-    const expected: Record<string, number> = { v14a: 14, v15a: 15, v16a: 16, v17a: 17 };
+    const expected: Record<string, number> = { v14a: 14, v15a: 15, v16a: 16, v17a: 17, v18a: 18 };
     for (const key of Object.keys(SCORING_PROFILES) as ScoringSetSwitch[]) {
       const p = SCORING_PROFILES[key];
       expect(p.setId).toBe(key);

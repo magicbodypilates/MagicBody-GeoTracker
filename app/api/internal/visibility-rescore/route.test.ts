@@ -419,7 +419,7 @@ vi.mock("drizzle-orm", async (importOriginal) => {
 // 모킹 이후 import.
 import { POST } from "./route";
 import { RESCORE_JOBS, jobHash, promptKey } from "@/lib/server/visibility-rescore-jobs";
-import { SCORE_SETS, calcVisibilityWithSet } from "@/lib/server/visibility-score-sets";
+import { SCORE_SETS, calcVisibilityWithSet, deriveMentionInputs } from "@/lib/server/visibility-score-sets";
 import { _clearOwnedVideoCache } from "@/lib/server/brand-youtube-videos";
 // 결함 D2 동치 테스트(파일 끝) 전용 — 수집 경로 채점을 진짜 함수로 돌린다.
 import { buildAutoRunValues, buildScoringContext, type AutoRunTarget } from "@/lib/server/automation-runner";
@@ -715,8 +715,8 @@ describe("(i) 도달 제어·인증 게이트", () => {
 
   it("없는 잡 id → 400", async () => {
     // ⛔ D0-b(계획 §5 Step 6) — v15 는 이제 등록된 잡이다. 2026-09-23 개정으로 v16 도,
-    // 2026-09-24 개정으로 v17 도 등록됐다. 존재하지 않는 잡 id 예시는 v18 로.
-    expect((await POST(post({ job: "v18" }))).status).toBe(400);
+    // 2026-09-24 개정으로 v17 도, 2026-11-19 개정으로 v18 도 등록됐다. 없는 잡 id 예시는 v19 로.
+    expect((await POST(post({ job: "v19" }))).status).toBe(400);
     expect((await POST(post({ job: "v14t" }))).status).toBe(400);
     expect((await POST(post({ job: "v13t" }))).status).toBe(400);
     expect((await POST(post({ job: "v15t" }))).status).toBe(400);
@@ -2419,7 +2419,7 @@ describe("수집 시점 v17a 점수 = v17 재산출 잡 결과 (결함 D2 동치
     const v15pre = await (await POST(post({ job: "v15", preflight: true }))).json();
     expect(v15pre.outOfScopeCount).toBe(1); // 99
     expect(v15pre.clean).toBe(false);
-    expect(v15pre.acceptedVersions).toEqual([14, 15, 16, 17]);
+    expect(v15pre.acceptedVersions).toEqual([14, 15, 16, 17, 18]);
     const v16pre = await (await POST(post({ job: "v16", preflight: true }))).json();
     expect(v16pre.outOfScopeCount).toBe(2); // 14(v15 를 먼저 돌려야 함) · 99
     expect(v16pre.clean).toBe(false);
@@ -2440,7 +2440,7 @@ describe("수집 시점 v17a 점수 = v17 재산출 잡 결과 (결함 D2 동치
     const b = await (await POST(post({ job: "v12", preflight: true }))).json();
     expect(b.outOfScopeCount).toBe(3); // 8/15 의 14 · 8/15 의 17 · 99
     expect(b.clean).toBe(false);
-    expect(b.acceptedVersions).toEqual([10, 12, 14, 15, 16, 17]); // 표시용 목록 — 행별 판정은 따로
+    expect(b.acceptedVersions).toEqual([10, 12, 14, 15, 16, 17, 18]); // 표시용 목록 — 행별 판정은 따로
 
     // 문제 행을 빼면 9월 22일의 17 은 정상으로 남아 clean=true 가 된다.
     H.store.runs = H.store.runs.filter((r) => ![id(2), id(3), id(5)].includes(r.id as string));
@@ -2457,5 +2457,236 @@ describe("수집 시점 v17a 점수 = v17 재산출 잡 결과 (결함 D2 동치
     }
     const v17Preflight = await (await POST(post({ job: "v17", preflight: true }))).json();
     expect(v17Preflight.clean).toBe(true); // 목표 버전(17)이라 v17 기준으론 범위 밖 행이 아니다
+  });
+});
+
+/* ============================================================
+ * v18 잡 — 2026-11-19 A안(링크만 언급은 인용 · 본문 언급은 고정 단계값)
+ * ============================================================ */
+
+describe("v18 잡 — 소스 버전 10·12·14·17 · 버전별 판정 경로 · 목표 v18a", () => {
+  const MB_CONFIG = {
+    brandName: "매직바디",
+    brandAliases: "국제재활필라테스협회, magicbody",
+    websites: [] as string[],
+  };
+  const MB_TERMS = ["매직바디", "국제재활필라테스협회", "magicbody"];
+  const MB_GEN_PROMPT = "필라테스 강사 자격증 어디서 따나요";
+  const MB_BRANDED_PROMPT = "매직바디 자격증 어때요";
+  const LINK_ONLY =
+    "필라테스 자격증은 협회마다 과정이 다릅니다. 참고: www.magicbodypilates.co.kr\nYouTube ·매직바디 | 국제재활필라테스협회 +1";
+  const PROSE = "추천 기관: 매직바디 (국제재활필라테스협회) 특징: 재활 중심 커리큘럼으로 체계적입니다.";
+  const at = (iso: string) => new Date(iso);
+
+  const useMagicBodyWorkspace = () => {
+    H.store.workspaces.length = 0;
+    H.store.workspaces.push({ id: WS_PROD, brandConfig: MB_CONFIG, isProduction: true });
+  };
+
+  /** 그 버전 세트로 저장됐을 점수 — 재산출의 옛 판정(deriveRowInputs)과 같은 입력. */
+  const storedFor = (
+    setId: keyof typeof SCORE_SETS,
+    answer: string,
+    sentiment: "positive" | "neutral" | "negative" | "not-mentioned",
+    isTopRanked: boolean,
+    extra: { hasPressCitation?: boolean } = {},
+  ) =>
+    calcVisibilityWithSet(
+      {
+        ...deriveMentionInputs(answer, MB_TERMS),
+        hasBodyUrl: false,
+        hasCitationOnly: false,
+        sentiment,
+        isTopRanked,
+        isStronglyRecommended: false,
+        isBrandedQuery: false,
+        hasPressCitation: extra.hasPressCitation ?? false,
+      },
+      SCORE_SETS[setId],
+    );
+
+  it("meta: 소스 10·12·14·17 · 목표 18/v18a · 브랜드명 질문 제외 · KST 8/1 부터", async () => {
+    const body = await (await POST(post({ job: "v18", meta: true }))).json();
+    expect(body.sourceVersions).toEqual([10, 12, 14, 17]);
+    expect(body.targetVersion).toBe(18);
+    expect(body.targetSet).toBe("v18a");
+    expect(body.informationalOnly).toBe(true);
+    expect(body.windowFromUtc).toBe("2026-07-31T15:00:00.000Z");
+    expect(body.windowToUtc).toBeNull();
+    expect(body.jobHash).toBe(jobHash("v18"));
+  });
+
+  it("버전마다 다른 세트로 재현하고 링크만·본문 언급을 새 단계값으로 매긴다", async () => {
+    useMagicBodyWorkspace();
+    // 버전 10(8/5) — 링크만, 중립 → 최소 35
+    seedRun(1, {
+      version: 10,
+      score: storedFor("full10", LINK_ONLY, "neutral", false),
+      createdAt: at("2026-08-05T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: LINK_ONLY,
+      sentiment: "neutral",
+    });
+    // 버전 12(8/15) — 본문 언급, 부정 → 30
+    seedRun(2, {
+      version: 12,
+      score: storedFor("v12b", PROSE, "negative", false),
+      createdAt: at("2026-08-15T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: PROSE,
+      sentiment: "negative",
+    });
+    // 버전 14(9/1) — 본문 언급, 긍정·1순위 → 95
+    seedRun(3, {
+      version: 14,
+      score: storedFor("v14a", PROSE, "positive", true),
+      createdAt: at("2026-09-01T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: PROSE,
+      sentiment: "positive",
+    });
+    // 버전 17(10/1) — 본문 언급, 긍정·1순위 아님 → 85
+    seedRun(4, {
+      version: 17,
+      score: storedFor("v17a", PROSE, "positive", false),
+      createdAt: at("2026-10-01T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: PROSE,
+      sentiment: "positive",
+    });
+    // 버전 17(10/2) — 링크만 + 저장된 언론 증거 → 저장 증거 경로라 언론 40 이 최소 35 보다 크다
+    seedRun(5, {
+      version: 17,
+      score: storedFor("v17a", LINK_ONLY, "neutral", false),
+      createdAt: at("2026-10-02T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: LINK_ONLY,
+      sentiment: "neutral",
+      citedPressDomains: ["press-wire.example"],
+    });
+    // 버전 14(9/2) — 링크만 + 증거 컬럼에 언론이 있어도 옛 판정 경로라 읽지 않는다 → 35
+    seedRun(6, {
+      version: 14,
+      score: storedFor("v14a", LINK_ONLY, "neutral", false),
+      createdAt: at("2026-09-02T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: LINK_ONLY,
+      sentiment: "neutral",
+      citedPressDomains: ["press-wire.example"],
+    });
+    // 브랜드명 질문 — 대상 밖
+    seedRun(7, {
+      version: 17,
+      score: 34,
+      createdAt: at("2026-10-03T03:00:00.000Z"),
+      promptText: MB_BRANDED_PROMPT,
+      answer: PROSE,
+      sentiment: "positive",
+    });
+    // KST 7/31 — 창 밖
+    seedRun(8, {
+      version: 10,
+      score: storedFor("full10", PROSE, "neutral", false),
+      createdAt: at("2026-07-31T14:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: PROSE,
+      sentiment: "neutral",
+    });
+
+    const b = await (await POST(post({ job: "v18", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.processed).toBe(6);
+    const byId = new Map<string, { after: number; fromVersion: number; toVersion: number }>(
+      b.changes.map((c: { id: string; after: number; fromVersion: number; toVersion: number }) => [c.id, c]),
+    );
+    expect(byId.get(id(1))).toMatchObject({ after: 35, fromVersion: 10, toVersion: 18 });
+    expect(byId.get(id(2))).toMatchObject({ after: 30, fromVersion: 12, toVersion: 18 });
+    expect(byId.get(id(3))).toMatchObject({ after: 95, fromVersion: 14, toVersion: 18 });
+    expect(byId.get(id(4))).toMatchObject({ after: 85, fromVersion: 17, toVersion: 18 });
+    expect(byId.get(id(5))).toMatchObject({ after: 40, fromVersion: 17, toVersion: 18 });
+    expect(byId.get(id(6))).toMatchObject({ after: 35, fromVersion: 14, toVersion: 18 });
+    expect(byId.has(id(7))).toBe(false);
+    expect(byId.has(id(8))).toBe(false);
+  });
+
+  it("재산출 목표도 같은 계산기 — 버전 17 · 우리 채널 인용 + 언론 증거가 함께면 최댓값 40(검수 6번)", async () => {
+    useMagicBodyWorkspace();
+    const answer = "자격증 과정은 협회마다 다릅니다. 체험 수업을 먼저 들어 보세요.";
+    seedRun(1, {
+      version: 17,
+      score: 45, // v17a: 인용(45)이 언론(45)보다 먼저 — 저장 점수는 45
+      createdAt: at("2026-10-05T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer,
+      sentiment: "not-mentioned",
+      citedOwnedVideoIds: ["dQw4w9WgXcQ"],
+      citedPressDomains: ["press-wire.example"],
+    });
+    const b = await (await POST(post({ job: "v18", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes[0]).toMatchObject({ before: 45, after: 40, fromVersion: 17, toVersion: 18 });
+  });
+
+  it("apply 는 점수·버전만 바꾸고 증거 컬럼은 건드리지 않는다 — manifest 의 before·fromVersion 으로 원복 가능", async () => {
+    useMagicBodyWorkspace();
+    const before = storedFor("v14a", LINK_ONLY, "neutral", false);
+    seedRun(1, {
+      version: 14,
+      score: before,
+      createdAt: at("2026-09-02T03:00:00.000Z"),
+      promptText: MB_GEN_PROMPT,
+      answer: LINK_ONLY,
+      sentiment: "neutral",
+      citedPressDomains: ["press-wire.example"],
+    });
+    const b = await (await POST(post({ job: "v18", apply: true, batchSize: 200 }))).json();
+    expect(b.updated).toBe(1);
+    expect(b.changes[0]).toMatchObject({ before, after: 35, fromVersion: 14, toVersion: 18 });
+    expect(b.changes[0].citedPressDomains).toBeUndefined();
+    const r = H.store.runs[0];
+    expect(r.visibilityScore).toBe(35);
+    expect(r.scoreVersion).toBe(18);
+    expect(r.citedPressDomains).toEqual(["press-wire.example"]);
+  });
+
+  it("수집 시점 v18a 점수 = v17a 로 수집한 행을 v18 로 재산출한 점수", async () => {
+    useMagicBodyWorkspace();
+    const BRAND: BrandConfig = { ...MB_CONFIG, industry: "", keywords: "", description: "" };
+    const ctxOf = (sw: ScoringSetSwitchValue) =>
+      buildScoringContext(WS_PROD, { brandConfig: { ...BRAND, scoringSetSwitch: sw }, competitors: [] }, new Set());
+    const target: AutoRunTarget = {
+      workspaceId: WS_PROD,
+      scheduleId: null,
+      promptText: MB_GEN_PROMPT,
+      provider: "google_ai",
+      intervalSlot: "2026-11-19T12",
+      geolocation: null,
+    };
+    const cases: { answer: string; llm: LlmClassification; expected: number }[] = [
+      { answer: LINK_ONLY, llm: { sentiment: "positive", isTopRanked: true, isStronglyRecommended: false }, expected: 35 },
+      { answer: PROSE, llm: { sentiment: "positive", isTopRanked: true, isStronglyRecommended: false }, expected: 95 },
+      { answer: PROSE, llm: { sentiment: "neutral", isTopRanked: false, isStronglyRecommended: false }, expected: 70 },
+    ];
+    let n = 0;
+    for (const c of cases) {
+      n += 1;
+      const result = { answer: c.answer, sources: [], citations: [], cached: false };
+      const classify = async () => c.llm;
+      const v17 = await buildAutoRunValues(ctxOf("v17a"), target, result, 0, { classifySentiment: classify });
+      const v18 = await buildAutoRunValues(ctxOf("v18a"), target, result, 0, { classifySentiment: classify });
+      expect(v18.scoreVersion).toBe(18);
+      expect(v18.visibilityScore).toBe(c.expected);
+      seedRun(n, {
+        version: 17,
+        score: v17.visibilityScore,
+        createdAt: at(`2026-11-1${n}T03:00:00.000Z`),
+        promptText: MB_GEN_PROMPT,
+        sentiment: v17.sentiment,
+        answer: v17.answer ?? undefined,
+      });
+    }
+    const b = await (await POST(post({ job: "v18", dryRun: true, batchSize: 200 }))).json();
+    expect(b.anomalies).toHaveLength(0);
+    expect(b.changes.map((c: { after: number }) => c.after)).toEqual(cases.map((c) => c.expected));
   });
 });

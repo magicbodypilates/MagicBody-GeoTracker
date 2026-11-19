@@ -14,6 +14,12 @@
  * 구현: 경쟁사별로 쿼리를 돌리지 않고, 기간 내 runs 전체를 한 번 로드해
  * 자바스크립트에서 배열 교집합 계산. DB 커넥션 풀 고갈·N+1 회피.
  *
+ * 언급 판정(2026-11-19 A안): 우리 브랜드·경쟁사 모두 같은 기준일(LINK_ONLY_RULE_FROM_UTC,
+ * KST 11/10) 이후 응답은 본문 규칙 — 주소·채널 이름·출처 칩·영상 카드 형태뿐인 용어는 언급이
+ * 아니다. 그 이전 응답은 예전 기준으로 센다(benchmark-mention-rate.ts).
+ * 본문을 읽지 않은 경우(경쟁사 0곳·구간 상한 초과·쿼리 실패)만 우리 브랜드 언급률이 저장된 언급 배열 기준으로
+ * 돌아가고, 그때는 brand.mentionBasis="stored-array" 로 알린다. 인용률은 그대로다.
+ *
  * 넓은 구간 방어: 경쟁사 집계는 응답 본문(answer)·인용(citations)을 통째로 Node 로 읽으므로
  * 구간이 넓을수록 그대로 메모리를 먹는다. 그래서
  *   - 구간이 STATS_HEAVY_MAX_DAYS 를 넘으면 계산하지 않고 competitorStatus="skipped" 로 알리고,
@@ -28,6 +34,10 @@ import { getSession, assertWorkspaceAccess } from "@/lib/server/auth-guard";
 import { getBrandTermsForWorkspace, viewModeCondition } from "@/lib/server/branded-query-filter";
 import { notArchivedRunCondition } from "@/lib/server/run-archive";
 import { parseStatsRange, isStatsRangeError } from "@/lib/server/stats-range";
+import {
+  isBrandMentionedForBenchmark,
+  isCompetitorMentionedForBenchmark,
+} from "@/lib/server/benchmark-mention-rate";
 import {
   STATS_HEAVY_MAX_DAYS,
   exceedsHeavyLimit,
@@ -84,7 +94,6 @@ export async function GET(
     });
 
     const brandSample = brandRow?.sampleCount ?? 0;
-    const brandMentionRate = brandSample > 0 ? (brandRow!.mentionCount ?? 0) / brandSample : 0;
     const brandCitedRate = brandSample > 0 ? (brandRow!.citedCount ?? 0) / brandSample : 0;
 
     // 2) 경쟁사 목록
@@ -106,21 +115,24 @@ export async function GET(
     let competitorStatus: "none" | "ok" | "skipped" | "failed" = "none";
     type CompRow = {
       answer: string | null;
+      createdAt: Date;
+      brandMentions: string[] | null;
       competitorMentions: string[] | null;
       citedCompetitorDomains: string[] | null;
       citations: unknown;
     };
+    // 본문 로드 — 비교할 경쟁사가 있을 때만, 구간 상한 안에서만 읽는다. 경쟁사가 없으면 화면에
+    // 비교 카드가 없으므로 우리 브랜드 언급률은 저장 배열 기준(mentionBasis="stored-array")으로 둔다.
     let runsForComp: CompRow[] = [];
-    if (competitors.length === 0) {
-      competitorStatus = "none";
-    } else if (exceedsHeavyLimit(range)) {
-      competitorStatus = "skipped";
-    } else {
+    let bodyStatus: "ok" | "skipped" | "failed" = "skipped";
+    if (competitors.length > 0 && !exceedsHeavyLimit(range)) {
       try {
         runsForComp = await runStatsQuery(async (tx) => {
           return tx
             .select({
               answer: schema.runs.answer,
+              createdAt: schema.runs.createdAt,
+              brandMentions: schema.runs.brandMentions,
               competitorMentions: schema.runs.competitorMentions,
               citedCompetitorDomains: schema.runs.citedCompetitorDomains,
               citations: schema.runs.citations,
@@ -128,22 +140,29 @@ export async function GET(
             .from(schema.runs)
             .where(and(...conditions));
         });
-        competitorStatus = "ok";
+        bodyStatus = "ok";
       } catch (err) {
         console.error(
-          "[/api/workspaces/:id/stats/benchmark] 경쟁사 집계 실패:",
+          "[/api/workspaces/:id/stats/benchmark] 본문 집계 실패:",
           err instanceof Error ? err.message : "unknown",
         );
-        competitorStatus = "failed";
+        bodyStatus = "failed";
       }
     }
+    if (competitors.length === 0) competitorStatus = "none";
+    else competitorStatus = bodyStatus;
 
-    // 4) 자바스크립트에서 교집합 계산 — 저장된 필드 + 본문 실시간 매칭 OR 결합
+    // 우리 브랜드 언급률 — 본문을 읽었으면 경쟁사와 같은 규칙, 못 읽었으면 저장 배열 기준.
+    const brandMentionBasis: "prose" | "stored-array" = bodyStatus === "ok" ? "prose" : "stored-array";
+    const brandMentionCount =
+      brandMentionBasis === "prose"
+        ? runsForComp.filter((r) => isBrandMentionedForBenchmark(r, __brandTerms)).length
+        : (brandRow?.mentionCount ?? 0);
+    const brandMentionRate = brandSample > 0 ? brandMentionCount / brandSample : 0;
+
+    // 4) 자바스크립트에서 계산 — 언급은 본문 규칙, 인용은 저장 필드 + 인용 목록 실시간 매칭 OR 결합
     const compStats = competitorStatus === "ok" ? competitors.map((c) => {
-      const termsLower = [c.name, ...(c.aliases ?? [])]
-        .filter(Boolean)
-        .map((s) => s.toLowerCase());
-      const targets = new Set(termsLower);
+      const terms = [c.name, ...(c.aliases ?? [])].filter(Boolean);
       // 사이트 호스트 정규화 (www. 제거)
       const siteHosts = new Set(
         (c.websites ?? [])
@@ -159,17 +178,11 @@ export async function GET(
           .filter(Boolean),
       );
 
-      let mentions = 0;
+      // 언급: 기준일 이후 응답은 본문 규칙(링크·칩·카드뿐이면 언급 아님), 이전은 예전 매칭 —
+      // 우리 브랜드와 같은 기준일.
+      const mentions = runsForComp.filter((r) => isCompetitorMentionedForBenchmark(r, terms)).length;
       let cited = 0;
       for (const r of runsForComp) {
-        // 언급: 저장된 competitorMentions OR 본문에서 직접 매칭
-        const mArr = r.competitorMentions ?? [];
-        const hasStored = mArr.some((m) => targets.has(m.toLowerCase()));
-        const answerLower = (r.answer ?? "").toLowerCase();
-        const hasInBody =
-          !hasStored && termsLower.some((t) => t && answerLower.includes(t));
-        if (hasStored || hasInBody) mentions += 1;
-
         // 인용: 저장된 citedCompetitorDomains OR citations JSONB 에서 직접 매칭
         const dArr = r.citedCompetitorDomains ?? [];
         const hasStoredCited = dArr.some((d) => siteHosts.has(d.toLowerCase()));
@@ -216,6 +229,7 @@ export async function GET(
         sampleCount: brandSample,
         mentionRate: Math.round(brandMentionRate * 1000) / 1000,
         citedRate: Math.round(brandCitedRate * 1000) / 1000,
+        mentionBasis: brandMentionBasis,
       },
       competitors: compStats.map((c) => ({
         ...c,

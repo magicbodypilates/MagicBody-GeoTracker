@@ -36,7 +36,7 @@ function inWindow(iso: string, jobId: RescoreJobId): boolean {
 }
 
 describe("잡 id 는 닫힌 집합", () => {
-  it("등록된 여덟 잡만 통과(2026-09-24 v17 추가)", () => {
+  it("등록된 아홉 잡만 통과(2026-09-24 v17 · 2026-11-19 v18 추가)", () => {
     expect(RESCORE_JOB_IDS.sort()).toEqual([
       "v11",
       "v12",
@@ -46,12 +46,14 @@ describe("잡 id 는 닫힌 집합", () => {
       "v15",
       "v16",
       "v17",
+      "v18",
     ]);
     for (const id of RESCORE_JOB_IDS) expect(isRescoreJobId(id)).toBe(true);
     expect(isRescoreJobId("v15")).toBe(true);
     expect(isRescoreJobId("v16")).toBe(true);
     expect(isRescoreJobId("v17")).toBe(true);
-    expect(isRescoreJobId("v18")).toBe(false);
+    expect(isRescoreJobId("v18")).toBe(true);
+    expect(isRescoreJobId("v19")).toBe(false);
     expect(isRescoreJobId("v14t")).toBe(false);
     expect(isRescoreJobId("v13t")).toBe(false);
     expect(isRescoreJobId("v15t")).toBe(false);
@@ -95,7 +97,7 @@ describe("잡 정의 불변식", () => {
     }
   });
 
-  it("REPRO_SET_BY_VERSION 은 8·10·12·14·15·16 을 매핑한다(11·13·112 는 재산출 대상 밖) — D0-b", () => {
+  it("REPRO_SET_BY_VERSION 은 8·10·12·14·15·16·17 을 매핑한다(11·13·112 는 재산출 대상 밖) — D0-b", () => {
     expect(REPRO_SET_BY_VERSION).toEqual({
       8: "legacy8",
       10: "full10",
@@ -103,6 +105,7 @@ describe("잡 정의 불변식", () => {
       14: "v14a",
       15: "v15a",
       16: "v16a",
+      17: "v17a", // 2026-11-19 — v18 의 소스 버전
     });
     // 12 는 v14 잡의, 14 는 v15 잡의, 15 는 v16 잡의, 16 은 v17 잡의 소스 버전이라
     // 재현 세트가 반드시 있어야 한다.
@@ -112,7 +115,8 @@ describe("잡 정의 불변식", () => {
     expect(reproSetForVersion(16)).toBe("v16a"); // 2026-09-24 — v17 을 위해 신규 등록
     expect(reproSetForVersion(11)).toBeNull();
     expect(reproSetForVersion(13)).toBeNull();
-    expect(reproSetForVersion(17)).toBeNull(); // 17은 목표 버전일 뿐 아직 소스가 된 잡이 없다
+    expect(reproSetForVersion(17)).toBe("v17a"); // 2026-11-19 — v18 을 위해 신규 등록
+    expect(reproSetForVersion(18)).toBeNull(); // 18은 목표 버전일 뿐 아직 소스가 된 잡이 없다
     expect(reproSetForVersion(112)).toBeNull();
     expect(reproSetForVersion(114)).toBeNull();
     expect(reproSetForVersion(0)).toBeNull();
@@ -458,7 +462,8 @@ describe("창 경계 — ±1µs (timestamptz 반차 구간)", () => {
     });
   }
 
-  it("보류 구간(대상 창 사이)은 어느 잡에도 속하지 않는다", () => {
+  it("보류 구간(대상 창 사이)은 v18 말고는 어느 잡에도 속하지 않는다", () => {
+    // v18(2026-11-19 A안)은 KST 8/1 부터 다시 매기는 것이 목적이라 이 구간을 덮는다.
     const samples = [
       "2026-07-31T15:00:00.000Z",
       "2026-08-01T03:00:00.000Z",
@@ -466,8 +471,9 @@ describe("창 경계 — ±1µs (timestamptz 반차 구간)", () => {
       "2026-08-11T14:59:59.999Z",
     ];
     for (const iso of samples) {
-      for (const id of RESCORE_JOB_IDS) expect(inWindow(iso, id)).toBe(false);
+      for (const id of RESCORE_JOB_IDS) expect(inWindow(iso, id)).toBe(id === "v18");
     }
+    expect(inWindow("2026-07-31T14:59:59.999Z", "v18")).toBe(false);
   });
 
   it("대상 창 이전 구간은 v11 · v13 대상 밖", () => {
@@ -533,7 +539,7 @@ describe("jobHash / configFingerprint", () => {
   it("모든 등록 잡의 해시가 서로 다르다(v15·v16·v17 포함)", () => {
     const hashes = RESCORE_JOB_IDS.map((id) => jobHash(id));
     expect(new Set(hashes).size).toBe(hashes.length);
-    expect(hashes.length).toBe(8);
+    expect(hashes.length).toBe(9);
   });
 });
 
@@ -647,8 +653,9 @@ describe("검증 창 — 잡 정의에서 파생", () => {
     expect(w[0].toUtc).toBeNull();
   });
 
-  it("holdout 창은 두 잡 사이 구간과 정확히 일치", () => {
-    for (const id of RESCORE_JOB_IDS) {
+  it("holdout 창은 두 잡 사이 구간과 정확히 일치 — 그 구간을 덮는 v18 은 holdout 창이 없다", () => {
+    expect(buildVerificationWindows("v18").map((x) => x.key)).toEqual(["target", "before-target"]);
+    for (const id of RESCORE_JOB_IDS.filter((x) => x !== "v18")) {
       const holdout = buildVerificationWindows(id).find((x) => x.key === "holdout");
       expect(holdout?.fromUtc).toBe("2026-07-31T15:00:00.000Z");
       expect(holdout?.toUtc).toBe("2026-08-11T15:00:00.000Z");
@@ -662,11 +669,12 @@ describe("검증 창 — 잡 정의에서 파생", () => {
 
 describe("preflightAcceptedVersions — 뒤 잡 체인으로 이미 앞으로 간 버전은 정상 (C3)", () => {
   it("v15 는 14·15 에 더해 v16·v17 이 만든 16·17 을 인정한다", () => {
-    expect(preflightAcceptedVersions("v15")).toEqual([14, 15, 16, 17]);
+    expect(preflightAcceptedVersions("v15")).toEqual([14, 15, 16, 17, 18]);
   });
   it("v16 은 15·16 + 17, v17 은 16·17 — 앞 단계 버전(14)은 인정하지 않는다", () => {
-    expect(preflightAcceptedVersions("v16")).toEqual([15, 16, 17]);
-    expect(preflightAcceptedVersions("v17")).toEqual([16, 17]);
+    expect(preflightAcceptedVersions("v16")).toEqual([15, 16, 17, 18]);
+    expect(preflightAcceptedVersions("v17")).toEqual([16, 17, 18]);
+    expect(preflightAcceptedVersions("v18")).toEqual([10, 12, 14, 17, 18]);
   });
   it("체인이 없는 잡은 예전과 같다(소스 + 목표)", () => {
     expect(preflightAcceptedVersions("v11")).toEqual([8, 10, 11]);
@@ -695,7 +703,11 @@ describe("재산출 스크립트 허용 잡 = 서버 잡 목록 (C4)", () => {
 
 describe("downstreamJobPaths — 뒤 버전에 이르는 잡 경로 (N2)", () => {
   it("v15 → 16 ← [v16] · 17 ← [v16, v17]", () => {
-    expect(Object.fromEntries(downstreamJobPaths("v15"))).toEqual({ 16: [["v16"]], 17: [["v16", "v17"]] });
+    expect(Object.fromEntries(downstreamJobPaths("v15"))).toEqual({
+      16: [["v16"]],
+      17: [["v16", "v17"]],
+      18: [["v16", "v17", "v18"]],
+    });
   });
   it("v12 → 14 ← [v14] … 17 ← [v14, v15, v16, v17] (행별로 각 잡의 창을 따로 본다)", () => {
     const m = downstreamJobPaths("v12");
@@ -703,7 +715,8 @@ describe("downstreamJobPaths — 뒤 버전에 이르는 잡 경로 (N2)", () =>
     expect(m.get(17)).toEqual([["v14", "v15", "v16", "v17"]]);
   });
   it("뒤 잡이 없으면 빈 지도", () => {
-    expect(downstreamJobPaths("v17").size).toBe(0);
+    expect(Object.fromEntries(downstreamJobPaths("v17"))).toEqual({ 18: [["v18"]] });
+    expect(downstreamJobPaths("v18").size).toBe(0);
     expect(downstreamJobPaths("v12t").size).toBe(0); // 다른 workspaceScope 는 잇지 않는다
   });
 });

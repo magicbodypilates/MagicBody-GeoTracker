@@ -2,7 +2,7 @@
  * 기간별 점수 룰 세트 재산출 — 운영 실행 스크립트.
  *
  * 사용 (앱 컨테이너 안에서):
- *   node scripts/visibility-rescore.mjs <mode> --job <v11|v12|v12t|v13|v14|v15|v16|v17> [옵션]
+ *   node scripts/visibility-rescore.mjs <mode> --job <v11|v12|v12t|v13|v14|v15|v16|v17|v18> [옵션]
  *
  * 모드
  *   report          검증 창별 평균(변경 없음)
@@ -49,7 +49,7 @@ const SCORE_MAX = 100;
 const MODES = ["report", "preflight", "sweep", "rollback", "reconcile", "verify-manifest"];
 // 서버 잡 목록(lib/server/visibility-rescore-jobs.ts 의 RESCORE_JOB_IDS)과 같아야 한다 —
 // visibility-rescore-jobs.test.ts 가 두 목록이 어긋나면 실패시킨다.
-const JOB_IDS = ["v11", "v12", "v12t", "v13", "v14", "v15", "v16", "v17"];
+const JOB_IDS = ["v11", "v12", "v12t", "v13", "v14", "v15", "v16", "v17", "v18"];
 /** rollback·reconcile 이 읽는 manifest 는 마운트된 고정 디렉터리 안의 파일만 허용한다. */
 const MANIFEST_DIR = "/app/data/audit";
 const MANIFEST_BASENAME_RE = /^rescore_[A-Za-z0-9_.-]+\.jsonl$/;
@@ -583,7 +583,7 @@ async function runReconcile(args) {
     rows = await sql`
       SELECT id, visibility_score, score_version
         FROM runs
-       WHERE id = ANY(${sql.array([...byId.keys()], "uuid")})
+       WHERE id = ANY(${[...byId.keys()]}::uuid[])
     `;
   } finally {
     await sql.end();

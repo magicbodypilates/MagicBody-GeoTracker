@@ -14,7 +14,7 @@ import { SCORE_SETS, type ScoreSetId } from "@/lib/server/visibility-score-sets"
 /** 운영/비운영 워크스페이스 구분 — UUID 를 코드에 두지 않고 is_production 으로 판정한다. */
 export type WorkspaceScope = "production" | "non-production";
 
-export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15" | "v16" | "v17";
+export type RescoreJobId = "v11" | "v12" | "v12t" | "v13" | "v14" | "v15" | "v16" | "v17" | "v18";
 
 export type RescoreJob = {
   /** 대상 창 시작(inclusive · timestamptz 비교) */
@@ -64,6 +64,13 @@ export type RescoreJob = {
    * v17 은 신설 잡이라 이 필드를 켜도 다른 잡의 jobHash 가 흔들릴 위험 자체가 없다.
    */
   reproFromStoredEvidence?: boolean;
+  /**
+   * 소스 버전이 여럿이고 버전마다 판정 경로가 다른 잡(v18)용 — 여기 든 소스 버전의 행만
+   * reproFromStoredEvidence 와 같은 경로(저장 증거 컬럼)로 재현·목표 입력을 만들고, 나머지
+   * 소스 버전은 옛 판정(deriveRowInputs)으로 만든다. 행의 score_version 으로 고른다.
+   * 선택 필드 — 기존 잡(v11~v17)에는 넣지 않아 jobHash 가 흔들리지 않는다.
+   */
+  storedEvidenceVersions?: readonly number[];
 };
 
 const DIAGNOSTIC_SETS: readonly ScoreSetId[] = ["legacy8", "full10"];
@@ -238,6 +245,36 @@ export const RESCORE_JOBS: Record<RescoreJobId, RescoreJob> = {
     workspaceScope: "production",
     reproFromStoredEvidence: true,
   },
+  /**
+   * 2026-11-19 사장님 결정(A안) — 일반 질의에서 링크·채널 이름·출처 칩·영상 카드뿐인 언급을
+   * 「인용」으로 보고, 본문 언급은 고정 단계값(1순위 95 / 긍정 85 / 중립 70 / 부정 30 — 완화안)으로
+   * 다시 매긴다(세트 v18a). KST 2026-08-01 부터, 브랜드명 질문은 제외(그 점수는 안 바꾼다).
+   *
+   * 소스 버전이 넷이고 버전마다 그 점수를 만든 판정이 다르다 — 그래서 잡을 나누지 않고
+   * 행 단위로 고른다(storedEvidenceVersions):
+   *   10·12·14 — 옛 판정(소유 유튜브·제3자 인용을 보지 않음)으로 수집·재산출된 행.
+   *              deriveRowInputs 로 재현하고, 목표도 같은 판정에 본문 언급 수만 더해 계산한다
+   *              (2026-09-23 결정 — 과거 구간에 새 인용 판정을 소급하지 않는다).
+   *   17       — 새 판정으로 저장된 행(v17 재산출·v17a 수집). 저장 증거 컬럼으로 재현·목표.
+   *
+   * diagnosticSets 가 빈 목록인 이유 — 각 소스 버전을 만든 세트는 하나뿐이고(10=full10 ·
+   * 12=v12b · 14=v14a · 17=v17a), legacy8·full10 을 진단에 넣으면 우연히 합이 같은 조합에서
+   * cross-set-ambiguous 오탐이 난다(v14 주석과 같은 근거).
+   */
+  v18: {
+    // KST 2026-08-01 00:00 이후 — v11·v13 창(~KST 7/31) 바로 다음부터 상한 없음.
+    fromUtc: "2026-07-31T15:00:00.000Z",
+    toUtc: null,
+    providers: null,
+    sourceVersions: [10, 12, 14, 17],
+    diagnosticSets: [],
+    targetVersion: 18,
+    targetSet: "v18a",
+    informationalOnly: true,
+    autoOnly: true,
+    workspaceScope: "production",
+    storedEvidenceVersions: [17],
+  },
 };
 
 export const RESCORE_JOB_IDS = Object.keys(RESCORE_JOBS) as RescoreJobId[];
@@ -262,6 +299,7 @@ export function isRescoreJobId(value: unknown): value is RescoreJobId {
  * preflight·sweep)가 깨진다. 등록해도 예외를 피하면 전 행이 unmapped-version 이 된다.
  * 같은 이유로 15 도 등록한다 — v16(sourceVersions: [15])이 같은 D0-b 함정에 걸린다.
  * 같은 이유로 16 도 등록한다(2026-09-24) — v17(sourceVersions: [16])이 같은 함정에 걸린다.
+ * 같은 이유로 17 도 등록한다(2026-11-19) — v18(sourceVersions: [10, 12, 14, 17]).
  */
 export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   8: "legacy8",
@@ -270,6 +308,7 @@ export const REPRO_SET_BY_VERSION: Readonly<Record<number, ScoreSetId>> = {
   14: "v14a",
   15: "v15a",
   16: "v16a",
+  17: "v17a",
 };
 
 export function reproSetForVersion(version: number): ScoreSetId | null {
@@ -453,14 +492,26 @@ export function buildVerificationWindows(jobId: RescoreJobId): VerificationWindo
       providers: job.providers,
       excludeProviders: null,
     },
-    {
+  ];
+
+  // holdout — 두 잡 사이에 남겨 둔 구간(KST 8/1~8/11). 대상 창이 이 구간을 통째로 덮는 잡(v18)은
+  // 그 구간을 바꾸는 것이 목적이라 "불변이어야 하는 구간"으로 보여주지 않는다.
+  const holdoutFrom = RESCORE_JOBS.v11.toUtc;
+  const holdoutTo = RESCORE_JOBS.v12.fromUtc;
+  const coversHoldout =
+    job.providers === null &&
+    holdoutFrom !== null &&
+    new Date(job.fromUtc).getTime() <= new Date(holdoutFrom).getTime() &&
+    (job.toUtc === null || new Date(job.toUtc).getTime() >= new Date(holdoutTo).getTime());
+  if (!coversHoldout) {
+    windows.push({
       key: "holdout",
-      fromUtc: RESCORE_JOBS.v11.toUtc,
-      toUtc: RESCORE_JOBS.v12.fromUtc,
+      fromUtc: holdoutFrom,
+      toUtc: holdoutTo,
       providers: null,
       excludeProviders: null,
-    },
-  ];
+    });
+  }
 
   if (job.providers !== null) {
     windows.push({

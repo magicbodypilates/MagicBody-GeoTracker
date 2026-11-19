@@ -12,6 +12,8 @@
  *    기존 세트는 수정하지 않는다.
  */
 
+import { stripLinkOnlyBrandForms } from "@/lib/server/brand-link-only";
+
 export type ScoreSetId =
   | "legacy8"
   | "full10"
@@ -21,7 +23,8 @@ export type ScoreSetId =
   | "v14a"
   | "v15a"
   | "v16a"
-  | "v17a";
+  | "v17a"
+  | "v18a";
 
 export type Sentiment = "positive" | "neutral" | "negative" | "not-mentioned";
 
@@ -79,6 +82,22 @@ export type ScoreSet = {
   genNoMentionSocial?: number;
   /** 브랜드 질의 · 블로그·소셜 추천. 위 genNoMentionSocial 과 같은 이유로 선택 필드. */
   brandSocial?: number;
+  /**
+   * 일반 질의 단계 배점 모드(v18a 부터). 있으면 일반 질의 분기가 아래처럼 바뀐다.
+   *   - 본문 언급(링크·칩·카드 형태를 뺀 언급, VisibilityInputs.proseMentions)이 0 이면
+   *     언급 0 분기(genNoMention*) 값 중 켜진 신호의 **최댓값**을 쓰고, 원문에는 용어가 있었다면(링크만) 최소 linkOnlyFloor.
+   *   - 본문 언급이 있으면 위치·반복 가산 없이 고정 단계값:
+   *     isTopRanked → topRanked / 그 외 sentiment positive·neutral·negative 순.
+   * 브랜드 질의 분기는 이 필드와 무관하게 기존 그대로다.
+   * 선택 필드 — 기존 세트에 넣지 않아야 jobHash 가 흔들리지 않는다(genNoMentionPress 와 같은 이유).
+   */
+  mentionTiers?: {
+    topRanked: number;
+    positive: number;
+    neutral: number;
+    negative: number;
+    linkOnlyFloor: number;
+  };
 };
 
 /**
@@ -297,6 +316,36 @@ export const SCORE_SETS: Record<ScoreSetId, ScoreSet> = {
     genNoMentionSocial: 35,
     brandSocial: 35,
   },
+  v18a: {
+    // 2026-11-19 사장님 결정(A안) — 일반 질의만 새 규칙. 브랜드 질의 분기 값은 v17a 그대로.
+    brandPositive: 34,
+    brandStrong: 48,
+    brandBodyUrl: 15,
+    brandCitation: 8,
+    brandPress: 45,
+    brandSocial: 35,
+    // 언급 0(링크만 포함) 분기 — 2026-11-19 완화안(사장님 결정).
+    genNoMentionBodyUrl: 35,
+    genNoMentionCitation: 35,
+    genNoMentionPress: 40,
+    genNoMentionSocial: 30,
+    // 아래 가산 필드는 mentionTiers 가 있으면 읽지 않는다(필수 필드라 0 으로 둔다).
+    genBase: 0,
+    genFirstPos: 0,
+    genMidPos: 0,
+    genMentions3: 0,
+    genMentions2: 0,
+    genPositive: 0,
+    genNeutral: 0,
+    genTopRanked: 0,
+    mentionTiers: {
+      topRanked: 95,
+      positive: 85,
+      neutral: 70,
+      negative: 30,
+      linkOnlyFloor: 35,
+    },
+  },
 };
 
 export const SCORE_SET_IDS = Object.keys(SCORE_SETS) as ScoreSetId[];
@@ -335,6 +384,12 @@ export type VisibilityInputs = {
    * 취급한다(calcVisibilityWithSet 이 `?? false` 로 기본값을 채운다).
    */
   hasSocialCitation?: boolean;
+  /**
+   * 본문 언급 수 — 링크·채널 이름·출처 칩·영상 카드 형태를 뺀 글에서 센 언급 수
+   * (brand-link-only.ts). mentionTiers 가 있는 세트의 일반 질의 분기만 읽는다.
+   * 생략하면 mentions 와 같다고 본다(= 링크만 판정 없음).
+   */
+  proseMentions?: number;
 };
 
 /**
@@ -354,6 +409,7 @@ export function calcVisibilityWithSet(inputs: VisibilityInputs, set: ScoreSet): 
     isBrandedQuery,
     hasPressCitation,
     hasSocialCitation = false,
+    proseMentions,
   } = inputs;
 
   // 브랜드 명 검색 — 평가 어조 + URL 노출만 점수. 언급/위치/반복은 의미 없음.
@@ -367,6 +423,30 @@ export function calcVisibilityWithSet(inputs: VisibilityInputs, set: ScoreSet): 
     else if (hasPressCitation) score += set.brandPress ?? 0;
     else if (hasSocialCitation) score += set.brandSocial ?? 0;
     return Math.min(score, 100);
+  }
+
+  // 일반 검색 · 단계 배점 모드(v18a~) — 이 필드가 없는 세트는 아래 기존 분기를 그대로 탄다.
+  if (set.mentionTiers) {
+    const tiers = set.mentionTiers;
+    const prose = proseMentions ?? mentions;
+    if (prose <= 0) {
+      // 신호가 여럿이면 가장 높은 값 — 기존 세트의 우선순위(else-if)와 달리 인용+언론이 함께
+      // 있을 때 언론 배점이 묻히지 않게 한다. 기존 세트 경로는 아래 분기 그대로다.
+      let base = Math.max(
+        hasBodyUrl ? set.genNoMentionBodyUrl : 0,
+        hasCitationOnly ? set.genNoMentionCitation : 0,
+        hasPressCitation ? (set.genNoMentionPress ?? 0) : 0,
+        hasSocialCitation ? (set.genNoMentionSocial ?? 0) : 0,
+      );
+      // 링크만 — 원문에는 용어가 있었다(주소·칩·카드). 본문에 링크가 있는 셈이라 최소값을 보장한다.
+      if (mentions > 0) base = Math.max(base, tiers.linkOnlyFloor);
+      return Math.min(base, 100);
+    }
+    if (isTopRanked) return tiers.topRanked;
+    if (sentiment === "positive") return tiers.positive;
+    if (sentiment === "negative") return tiers.negative;
+    // neutral — 본문 언급이 있는데 감성이 "not-mentioned" 로 남은 드문 경우도 중립으로 본다.
+    return tiers.neutral;
   }
 
   // 일반 검색 · 언급 0 — URL 노출만 약한 신호.
@@ -450,6 +530,18 @@ export function deriveMentionInputs(
 }
 
 /**
+ * 본문 언급 도출 — 링크·채널 이름·출처 칩·영상 카드 형태를 지운 글에서 deriveMentionInputs.
+ * 단계 배점 세트(v18a~)의 수집·재산출 경로가 같은 함수를 쓴다.
+ */
+export function deriveProseMentionInputs(
+  text: string,
+  brandTerms: string[],
+): { mentions: number; firstPos: number } {
+  if (!text) return { mentions: 0, firstPos: -1 };
+  return deriveMentionInputs(stripLinkOnlyBrandForms(text, brandTerms), brandTerms);
+}
+
+/**
  * 텍스트 기반 진입점 — 응답 텍스트에서 언급 신호를 도출한 뒤 세트 계산기에 위임.
  * 빈 텍스트는 어떤 신호도 신뢰할 수 없으므로 0 (기존 계산기 계약 유지).
  *
@@ -473,6 +565,10 @@ export function calcVisibilityFromText(
 ): number {
   if (!text) return 0;
   const { mentions, firstPos } = deriveMentionInputs(text, brandTerms);
+  // 단계 배점 세트(v18a~)의 일반 질의만 본문 언급 수를 따로 센다 — 그 외에는 계산하지 않아
+  // 기존 세트의 결과·비용이 그대로다.
+  const proseMentions =
+    set.mentionTiers && !isBrandedQuery ? deriveProseMentionInputs(text, brandTerms).mentions : undefined;
   return calcVisibilityWithSet(
     {
       mentions,
@@ -485,6 +581,7 @@ export function calcVisibilityFromText(
       isBrandedQuery,
       hasPressCitation,
       hasSocialCitation,
+      ...(proseMentions !== undefined ? { proseMentions } : {}),
     },
     set,
   );

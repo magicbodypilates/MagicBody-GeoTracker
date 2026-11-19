@@ -524,3 +524,81 @@ describe("정본 세트의 anomaly 공간 (계약 k 의 전제)", () => {
     expect(socialTarget).toBe(35); // 블로그·소셜 추천은 그대로 35 — 언론(45)보다 낮아졌다(우선순위는 여전히 언론 동일값이 아니라 else-if 순서로 결정).
   });
 });
+
+describe("v18 잡 조합 — 소스 버전 10·12·14·17 → v18a (2026-11-19 A안)", () => {
+  /**
+   * 일반 질의(브랜드명 질문 제외 잡)에서 소스 버전마다 선언 세트로 저장 점수를 만들고, 목표 입력에
+   * 본문 언급 수(링크만이면 0)를 더해 v18 이 늘 resolved 로 풀리고 기대 단계값과 같은지 본다.
+   * 1순위 플래그는 저장 점수에서 역산되므로 본문 언급 행의 95 도 정확히 복원돼야 한다.
+   */
+  it("입력 전수에서 항상 resolved · 목표가 단계값과 일치", () => {
+    const job = RESCORE_JOBS.v18;
+    expect(job.targetSet).toBe("v18a");
+    expect(job.informationalOnly).toBe(true);
+    const tiers = SCORE_SETS.v18a.mentionTiers!;
+    const signals = [
+      { hasPressCitation: false, hasSocialCitation: false },
+      { hasPressCitation: true, hasSocialCitation: false },
+      { hasPressCitation: false, hasSocialCitation: true },
+      { hasPressCitation: true, hasSocialCitation: true },
+    ];
+    let checked = 0;
+    for (const version of job.sourceVersions) {
+      const declaredSetId = REPRO_SET_BY_VERSION[version];
+      // 옛 판정 소스(10·12·14)는 언론·소셜 신호를 보지 않는다.
+      const usable = job.storedEvidenceVersions?.includes(version) ? signals : signals.slice(0, 1);
+      for (const rawBase of inputSpace()) {
+        if (rawBase.isBrandedQuery) continue;
+        if (rawBase.mentions > 0 && rawBase.sentiment === "not-mentioned") continue; // 수집 경로에서 생기지 않는 조합
+        if (rawBase.mentions === 0 && rawBase.sentiment !== "not-mentioned") continue;
+        for (const signal of usable) {
+          const reproBase: BaseVisibilityInputs = { ...rawBase, ...signal };
+          const proseOptions = rawBase.mentions > 0 ? [0, rawBase.mentions] : [0];
+          for (const proseMentions of proseOptions) {
+            const targetBase: BaseVisibilityInputs = { ...reproBase, proseMentions };
+            for (const flags of RANKING_COMBOS) {
+              const storedScore = calcVisibilityWithSet({ ...reproBase, ...flags }, SCORE_SETS[declaredSetId]);
+              const res = resolveWithDiagnostics({
+                reproBase,
+                targetBase,
+                storedScore,
+                declaredSetId,
+                diagnosticSetIds: job.diagnosticSets,
+                targetSetId: job.targetSet,
+              });
+              if (res.status !== "resolved") {
+                throw new Error(
+                  `${res.status} — v${version} stored=${storedScore} prose=${proseMentions} base=${JSON.stringify(reproBase)}`,
+                );
+              }
+              let expected: number;
+              if (proseMentions === 0) {
+                const s = SCORE_SETS.v18a;
+                // 신호가 여럿이면 최댓값(검수 6번).
+                expected = Math.max(
+                  reproBase.hasBodyUrl ? s.genNoMentionBodyUrl : 0,
+                  reproBase.hasCitationOnly ? s.genNoMentionCitation : 0,
+                  reproBase.hasPressCitation ? s.genNoMentionPress! : 0,
+                  reproBase.hasSocialCitation ? s.genNoMentionSocial! : 0,
+                );
+                if (rawBase.mentions > 0) expected = Math.max(expected, tiers.linkOnlyFloor);
+              } else if (flags.isTopRanked) {
+                expected = tiers.topRanked;
+              } else {
+                expected =
+                  rawBase.sentiment === "positive"
+                    ? tiers.positive
+                    : rawBase.sentiment === "negative"
+                      ? tiers.negative
+                      : tiers.neutral;
+              }
+              expect(res.targetScore).toBe(expected);
+              checked += 1;
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(2000);
+  });
+});

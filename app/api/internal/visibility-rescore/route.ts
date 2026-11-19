@@ -66,7 +66,12 @@ import {
   resolveWithDiagnostics,
   type BaseVisibilityInputs,
 } from "@/lib/server/visibility-backfill";
-import { deriveMentionInputs, type Sentiment } from "@/lib/server/visibility-score-sets";
+import {
+  SCORE_SETS,
+  deriveMentionInputs,
+  deriveProseMentionInputs,
+  type Sentiment,
+} from "@/lib/server/visibility-score-sets";
 import { getOwnedYoutubeVideoIds } from "@/lib/server/brand-youtube-videos";
 import { extractYoutubeVideoId, isOwnedYoutubeVideo } from "@/lib/server/youtube-video-match";
 import { collectThirdPartyCitationEvidence } from "@/lib/server/press-domain-match";
@@ -980,6 +985,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 역산 · 목표 산출 ──
+    const targetUsesMentionTiers = SCORE_SETS[job.targetSet].mentionTiers !== undefined;
     const anomalies: Anomaly[] = [];
     const pending: (Change & { workspaceId: string })[] = [];
     let lastVisited: Cursor | null = cursor;
@@ -1006,6 +1012,11 @@ export async function POST(req: NextRequest) {
       //   2. job.applyOwnedCitationJudgment(v15) — reproBase 는 옛 판정, targetBase 만
       //      citations·소유 목록에서 새로 판정한다(deriveNewJudgmentRowInputs).
       //   3. 그 외(v11~v14) — targetBase === reproBase(같은 객체). D0 수정 이전과 동일.
+      // job.storedEvidenceVersions(v18)는 1 을 행의 소스 버전 단위로 고른다 — 그 목록에 든
+      // 버전의 행만 1 의 경로, 나머지는 3 의 경로.
+      const useStoredEvidence =
+        job.reproFromStoredEvidence === true ||
+        (job.storedEvidenceVersions?.includes(row.scoreVersion) ?? false);
       let reproBase: BaseVisibilityInputs;
       let targetBase: BaseVisibilityInputs;
       let newEvidence: {
@@ -1013,7 +1024,7 @@ export async function POST(req: NextRequest) {
         citedPressDomains: string[];
         citedSocialDomains: string[];
       } | null = null;
-      if (job.reproFromStoredEvidence) {
+      if (useStoredEvidence) {
         const stored = deriveStoredEvidenceRowInputs(row, ws);
         reproBase = stored.base;
         targetBase = stored.base;
@@ -1036,6 +1047,16 @@ export async function POST(req: NextRequest) {
             citedSocialDomains: judged.citedSocialDomains,
           };
         }
+      }
+
+      // 단계 배점 목표 세트(v18a~) — 목표 계산에만 본문 언급 수(링크·칩·카드 형태를 뺀 언급)를
+      // 응답 원문에서 다시 센다. 재현(reproBase)은 그 점수를 만든 옛 세트라 이 값을 읽지 않는다.
+      if (targetUsesMentionTiers) {
+        const answerText = row.answer ?? "";
+        targetBase = {
+          ...targetBase,
+          proseMentions: answerText ? deriveProseMentionInputs(answerText, ws.brandTerms).mentions : 0,
+        };
       }
 
       let resolution;
